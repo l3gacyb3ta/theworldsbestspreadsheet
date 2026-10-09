@@ -78,7 +78,8 @@ is an ordinary, editable `units` sheet; exchange rates are inputs you can scrub.
 ## Help system
 
 Press **F1** (or the toolbar's Help) for help about the selected cell — or, while
-editing, about the word at the cursor. ⌘/ searches.
+editing, about the word at the cursor. ⌘/ searches. Help is its own OS window
+(an egui viewport); F1 in it, or its close button, closes it.
 
 - **Guides** (`crates/core/help/*.md`): a small markdown dialect with
   `[[word]]` / `[[#topic]]` links, tables, and ```` ```example ```` blocks whose

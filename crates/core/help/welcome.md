@@ -24,6 +24,8 @@ This is a spreadsheet for building models. It looks like a grid, but three thing
 
 ## How help works
 
+Help has its own window, so you can keep it beside the sheet. Press F1 in the sheet and help jumps to what's selected; press F1 in the help window, or close it, to put it away. Links to cells (on **Units in this workbook** and **Your words**) select the cell and bring the sheet to the front.
+
 Every example in help is live: it's evaluated against a small sample sheet, and the result is shown next to it. Click **Try** to open an example in the playground and change it. While you edit a cell, the strip under the formula bar explains the word at the cursor and shows the stack. Hover over any token in the formula bar for its documentation, and use **Step through** in the inspector to watch a cell compute token by token.
 
 The sample sheet the examples use:

@@ -87,11 +87,12 @@ impl App {
         }
     }
 
-    /// F1: close help if open; otherwise open the page that explains what's
-    /// under the caret (when editing) or in the selected cell.
+    /// F1: open help (in front) at the page that explains what's under the caret
+    /// (when editing) or in the selected cell. Help drawn inside this window
+    /// closes instead if it's open; a separate help window closes on F1 in itself.
     pub(super) fn context_help(&mut self) {
-        if self.help.open {
-            self.help.open = false;
+        if self.help.open && self.help.embedded() {
+            self.help.close();
             return;
         }
         if let Some(ed) = &self.edit {
@@ -386,10 +387,10 @@ impl App {
             ui.toggle_value(&mut self.trace, "Trace").on_hover_text("Highlight precedents (blue) and dependents (orange) of the selected cell");
             ui.separator();
             if ui.button("Help").on_hover_text("F1 — help for the selected cell or the word at the cursor").clicked() {
-                if self.help.open {
-                    self.help.open = false;
+                if self.help.open && self.help.embedded() {
+                    self.help.close();
                 } else {
-                    self.help.open = true;
+                    self.help.show();
                 }
             }
             ui.separator();

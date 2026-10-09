@@ -20,7 +20,8 @@ fn main() -> eframe::Result {
             // the file named on the command line, else the last one used, else ./sheet.wbs.json
             let last = cc.storage.and_then(|s| s.get_string(app::LAST_FILE_KEY)).map(PathBuf::from).filter(|p| p.exists());
             let path = arg.or(last).unwrap_or_else(|| PathBuf::from("sheet.wbs.json"));
-            Ok(Box::new(app::App::new(path).with_welcome().with_native_menu(&cc.egui_ctx)))
+            let help = cc.storage.and_then(|s| s.get_string(app::HELP_WINDOW_KEY));
+            Ok(Box::new(app::App::new(path).with_help_geometry(help).with_welcome().with_native_menu(&cc.egui_ctx)))
         }),
     )
 }

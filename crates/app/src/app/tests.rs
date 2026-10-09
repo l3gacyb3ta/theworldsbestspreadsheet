@@ -267,6 +267,87 @@ fn f1_opens_help_for_the_selected_cell() {
 }
 
 #[test]
+fn search_shortcut_opens_help_and_f1_closes_it() {
+    let mut h = harness();
+    assert!(!h.state().help.open);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Slash);
+    h.run_steps(2);
+    assert!(h.state().help.open);
+    assert!(h.state().help.embedded(), "the headless harness embeds viewports");
+    typ(&mut h, "dup");
+    h.get_by_label("dup  Duplicates the top value.");
+    key(&mut h, Key::F1);
+    assert!(!h.state().help.open);
+}
+
+/// With multi-viewport on, help is its own viewport. The harness has no window
+/// backend, so egui draws it embedded, but the app runs its separate-window logic.
+fn harness_viewports() -> Harness<'static, App> {
+    let mut h = harness();
+    h.ctx.set_embed_viewports(false);
+    h.run_steps(2);
+    h
+}
+
+#[test]
+fn help_window_is_its_own_viewport() {
+    let mut h = harness_viewports();
+    { let p = center(&h, "B10"); click(&mut h, p, Modifiers::NONE); }
+    key(&mut h, Key::F1);
+    assert!(h.state().help.open);
+    assert!(!h.state().help.embedded());
+    assert_eq!(*h.state().help.page(), Page::Topic("stack"));
+    h.run_steps(3);
+    h.get_by_label(help_view::TITLE);
+    shot(&mut h, "18_help_viewport");
+    // F1 in the main window navigates the open help window instead of closing it
+    h.state_mut().select(2, 1, false);
+    key(&mut h, Key::F1);
+    assert!(h.state().help.open, "F1 from the main window keeps the help window open");
+    assert_ne!(*h.state().help.page(), Page::Topic("stack"));
+    // the toolbar button brings it forward rather than toggling it
+    h.state_mut().help.show();
+    h.run_steps(2);
+    assert!(h.state().help.open);
+    // closing it (its close button or F1 in it) and reopening
+    h.state_mut().help.close();
+    h.run_steps(2);
+    assert!(!h.state().help.open && h.query_by_label(help_view::TITLE).is_none());
+    key(&mut h, Key::F1);
+    assert!(h.state().help.open);
+    assert!(!h.state().help.has_focus(), "no OS window, so never focused");
+}
+
+#[test]
+fn help_links_reach_the_main_window() {
+    let mut h = harness_viewports();
+    h.state_mut().help.show_page(Page::Units);
+    h.run_steps(3);
+    let (k, label) = {
+        let app = h.state();
+        let (_, k, _) = app.eng.units_list().into_iter().find(|(_, k, _)| app.eng.wb.pos(*k).is_some_and(|p| p != app.cursor)).unwrap();
+        (k, app.eng.wb.cell_label(k, None))
+    };
+    h.query_all_by_label(&label).next().unwrap().click();
+    h.run_steps(3);
+    let app = h.state();
+    assert_eq!(app.eng.wb.sheets[app.sheet_ix].id, k.sheet);
+    assert_eq!(Some(app.cursor), app.eng.wb.pos(k));
+}
+
+#[test]
+fn help_geometry_round_trips() {
+    let mut help = Help::new();
+    assert_eq!(help.geometry(), None);
+    help.set_geometry("40 60 900 700");
+    assert_eq!(help.geometry().as_deref(), Some("40 60 900 700"));
+    let mut bad = Help::new();
+    bad.set_geometry("nonsense");
+    bad.set_geometry("0 0 10 10");
+    assert_eq!(bad.geometry(), None);
+}
+
+#[test]
 fn f1_while_editing_explains_the_word_at_the_cursor() {
     let mut h = harness();
     { let p = center(&h, "E25"); click(&mut h, p, Modifiers::NONE); }

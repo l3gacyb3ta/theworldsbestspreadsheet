@@ -105,6 +105,10 @@ impl App {
                 self.save_as();
             }
             Command::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            // the native menu works whichever window is in front: edits go to the help window's fields
+            Command::Undo | Command::Redo | Command::FillDown | Command::Cut | Command::Copy | Command::Paste if self.help.has_focus() => {
+                self.help.forward(c)
+            }
             Command::Undo | Command::Redo | Command::FillDown if ctx.egui_wants_keyboard_input() => replay(self),
             Command::Undo => self.undo(),
             Command::Redo => self.redo(),
@@ -124,16 +128,20 @@ impl App {
     /// key equivalents fire first and would otherwise run twice).
     /// F1 stays ours everywhere: the native menu only shows it in the title.
     pub(super) fn command_keys(&mut self, ctx: &egui::Context) {
-        let owned: &[Command] = if self.native_menu.is_some() {
-            &[Command::Help]
-        } else {
-            &[Command::SaveAs, Command::Save, Command::New, Command::Open, Command::Quit, Command::Help, Command::SearchHelp]
-        };
-        for &c in owned {
+        for &c in self.owned_keys() {
             let s = c.shortcut().unwrap();
             if ctx.input_mut(|i| i.consume_shortcut(&s)) {
                 self.run(ctx, c);
             }
+        }
+    }
+
+    /// The shortcuts `command_keys` handles (the help window handles them too).
+    pub(super) fn owned_keys(&self) -> &'static [Command] {
+        if self.native_menu.is_some() {
+            &[Command::Help]
+        } else {
+            &[Command::SaveAs, Command::Save, Command::New, Command::Open, Command::Quit, Command::Help, Command::SearchHelp]
         }
     }
 
