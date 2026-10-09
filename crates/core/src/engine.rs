@@ -121,11 +121,8 @@ impl<'a> Env for View<'a> {
     fn cell_value(&self, k: CellKey) -> Result<Value, String> {
         self.0.ref_value(k)
     }
-    fn range_value(&self, sheet: SheetId, a: &StoredRef, b: &StoredRef) -> Result<Value, String> {
-        self.0.range_value(sheet, a, b, false)
-    }
-    fn range_filled(&self, sheet: SheetId, a: &StoredRef, b: &StoredRef) -> Result<Value, String> {
-        self.0.range_value(sheet, a, b, true)
+    fn range_value(&self, sheet: SheetId, a: &StoredRef, b: &StoredRef, gaps: bool) -> Result<Value, String> {
+        self.0.range_value(sheet, a, b, gaps)
     }
     fn unit_info(&self, name: &str) -> Result<UnitInfo, String> {
         let Some(k) = self.0.syms.units.get(name) else { return Err(format!("unknown unit {name}")) };
@@ -405,10 +402,10 @@ impl Engine {
         }
     }
 
-    /// The cells of a range as one array. With `filled`, empty cells are
-    /// skipped and the rest form a list, row by row; otherwise an empty cell
-    /// is an error.
-    fn range_value(&self, sheet: SheetId, a: &StoredRef, b: &StoredRef, filled: bool) -> Result<Value, String> {
+    /// The cells of a range as one array. With `gaps` (`A1:B5?`), empty cells
+    /// are skipped and the rest form a list, row by row; otherwise an empty
+    /// cell is an error.
+    fn range_value(&self, sheet: SheetId, a: &StoredRef, b: &StoredRef, gaps: bool) -> Result<Value, String> {
         let s = self.wb.sheet(sheet).ok_or("sheet was deleted")?;
         let (r0, c0, r1, c1) = s.range_bounds(a, b).ok_or("range refers to deleted cells")?;
         let (nr, nc) = (r1 - r0 + 1, c1 - c0 + 1);
@@ -419,7 +416,7 @@ impl Engine {
         for r in r0..=r1 {
             for c in c0..=c1 {
                 let k = s.key(r, c).unwrap();
-                if filled && !self.nodes.contains_key(&k) && matches!(self.shown(k), Shown::Empty) {
+                if gaps && !self.nodes.contains_key(&k) && matches!(self.shown(k), Shown::Empty) {
                     continue;
                 }
                 match self.scalar_at(k)? {
@@ -454,7 +451,7 @@ impl Engine {
                 }
             }
         }
-        let shape = if filled {
+        let shape = if gaps {
             vec![nums.len() + texts.len()]
         } else if nr == 1 || nc == 1 {
             vec![nr * nc]

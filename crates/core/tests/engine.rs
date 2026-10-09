@@ -402,7 +402,7 @@ fn overlapping_spills_same_after_reload() {
 }
 
 #[test]
-fn filled_skips_empty_cells() {
+fn range_with_gaps_skips_empty_cells() {
     let mut e = eng();
     set(&mut e, "A1", "1");
     set(&mut e, "A2", "2");
@@ -410,16 +410,16 @@ fn filled_skips_empty_cells() {
     set(&mut e, "B1", "=A1:A5 sum");
     match e.shown(key(&e, "B1")) {
         Shown::Error(err) => {
-            // same message and place as without `filled` in the language
+            // same message and place as before `?` existed
             assert_eq!(err.msg, "Sheet1!A3 is empty");
             assert_eq!(err.kind, ErrKind::Local);
             assert_eq!(err.span, Some(1..6));
         }
         _ => panic!("expected error"),
     }
-    set(&mut e, "B2", "=A1:A5 filled sum");
+    set(&mut e, "B2", "=A1:A5? sum");
     assert_eq!(show(&e, "B2"), "7");
-    set(&mut e, "B3", "=A1:A5 filled len");
+    set(&mut e, "B3", "=A1:A5? len");
     assert_eq!(show(&e, "B3"), "3");
     // filling the gap updates it
     set(&mut e, "A3", "3");
@@ -432,18 +432,56 @@ fn filled_skips_empty_cells() {
     assert!(show(&e, "B2").contains("mixes text and numbers"), "{}", show(&e, "B2"));
     set(&mut e, "A5", "=1 0 couple 2 pick");
     assert!(show(&e, "B2").contains("A5 has an error"), "{}", show(&e, "B2"));
-    // filled must come right after the range
-    set(&mut e, "A5", "");
-    set(&mut e, "A3", "");
-    set(&mut e, "B4", "=A1:A5 dup drop filled sum");
-    assert_eq!(show(&e, "B4"), "ERR Sheet1!A3 is empty");
     // tables: non-empty cells row by row, units kept
     set(&mut e, "D1", "1 [m]");
     set(&mut e, "E1", "2 [m]");
     set(&mut e, "E2", "3 [m]");
-    set(&mut e, "F1", "=D1:E2 filled");
+    set(&mut e, "F1", "=D1:E2?");
     assert_eq!(show(&e, "F1"), "1 m");
     assert_eq!(show(&e, "F3"), "3 m");
-    set(&mut e, "G1", "=C1:C9 filled sum");
+    set(&mut e, "G1", "=C1:C9? sum");
     assert_eq!(show(&e, "G1"), "0");
+    // `?` is for ranges only
+    set(&mut e, "G2", "=A1? 1 +");
+    match e.shown(key(&e, "G2")) {
+        Shown::Error(err) => {
+            assert!(err.msg.starts_with("? only applies to a range"), "{}", err.msg);
+            assert_eq!(err.span, Some(1..4));
+        }
+        _ => panic!("expected error"),
+    }
+}
+
+/// The `?` lives outside the range's stored piece, so it survives
+/// rendering, row inserts, fill and copy.
+#[test]
+fn range_gaps_marker_round_trips() {
+    let mut e = eng();
+    set(&mut e, "A1", "1");
+    set(&mut e, "A3", "3");
+    set(&mut e, "B1", "=A1:A3? sum");
+    set(&mut e, "C1", "=$A$1:$A$3? sum");
+    assert_eq!(e.wb.cell_text(key(&e, "B1")), "=A1:A3? sum");
+    assert_eq!(show(&e, "B1"), "4");
+    let sid = e.wb.sheets[0].id;
+    let undo = e.apply(wbs_core::Edit::InsertRows { sheet: sid, at: 1, ids: vec![wbs_core::ids::RowId(77)] });
+    assert_eq!(e.wb.cell_text(key(&e, "B1")), "=A1:A4? sum");
+    assert_eq!(e.wb.cell_text(key(&e, "C1")), "=$A$1:$A$4? sum");
+    assert_eq!(show(&e, "B1"), "4");
+    e.apply(undo);
+    assert_eq!(e.wb.cell_text(key(&e, "B1")), "=A1:A3? sum");
+    // fill down one row: relative range shifts, `?` stays
+    let ed = wbs_core::ops::fill(&mut e, wbs_core::ops::Rect::cell(sid, 0, 1), wbs_core::ops::Rect::span(sid, (0, 1), (1, 1)));
+    e.apply(ed);
+    assert_eq!(e.wb.cell_text(key(&e, "B2")), "=A2:A4? sum");
+    assert_eq!(show(&e, "B2"), "3");
+    // copy/paste
+    let clip = wbs_core::ops::copy(&e, wbs_core::ops::Rect::cell(sid, 0, 2));
+    let ed = wbs_core::ops::paste(&mut e, &clip, sid, (4, 3));
+    e.apply(ed);
+    assert_eq!(e.wb.cell_text(key(&e, "D5")), "=$A$1:$A$3? sum");
+    // other sheets
+    set(&mut e, "E1", "=Sheet1!A1:A3? sum");
+    assert_eq!(e.wb.cell_text(key(&e, "E1")), "=Sheet1!A1:A3? sum");
+    assert_eq!(show(&e, "E1"), "4");
 }

@@ -16,13 +16,13 @@ A range that's one row or one column is a list; anything wider is a table. Empty
 
 ## Ranges with gaps
 
-If a range is meant to have empty cells — a column you're still filling in — write [[filled]] right after it. It reads only the non-empty cells, as a list (a table's are read row by row). The cells it keeps are checked as usual: they must share a unit, and a cell with an error is still an error.
+If a range is meant to have empty cells — a column you're still filling in — end it with `?`: `A1:A100?`. It reads only the non-empty cells, as a list (a table's are read row by row). The cells it keeps are checked as usual: they must share a unit, and a cell with an error is still an error. See [[A1:B5?]].
 
 ```example
 A4:A7 sum            ⇒ ! A6 is empty
-A4:A7 filled         ⇒ [4, 5]
-A4:A7 filled sum     ⇒ 9
-G1:H2 filled         ⇒ [1, 2, 3]
+A4:A7?               ⇒ [4, 5]
+A4:A7? sum           ⇒ 9
+G1:H2?               ⇒ [1, 2, 3]
 ```
 
 ## Elementwise words and broadcasting

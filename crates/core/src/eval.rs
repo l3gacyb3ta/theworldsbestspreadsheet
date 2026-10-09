@@ -21,9 +21,9 @@ pub trait Env {
     /// Value of a referenced cell: the whole array for a spill source, the
     /// element for a spilled-into cell.
     fn cell_value(&self, k: CellKey) -> Result<Value, String>;
-    fn range_value(&self, sheet: SheetId, a: &StoredRef, b: &StoredRef) -> Result<Value, String>;
-    /// The range's non-empty cells as a list, row by row (for `A1:A9 filled`).
-    fn range_filled(&self, sheet: SheetId, a: &StoredRef, b: &StoredRef) -> Result<Value, String>;
+    /// A range as one array. With `gaps` (`A1:B5?`) its empty cells are
+    /// skipped and the rest form a list, row by row.
+    fn range_value(&self, sheet: SheetId, a: &StoredRef, b: &StoredRef, gaps: bool) -> Result<Value, String>;
     fn unit_info(&self, name: &str) -> Result<UnitInfo, String>;
     fn word(&self, k: CellKey) -> Option<Arc<Compiled>>;
 }
@@ -61,8 +61,8 @@ pub fn run_traced(env: &dyn Env, ops: &[Op]) -> (Vec<TraceStep>, Result<Value, E
     let mut it = Interp { env, depth: 0 };
     let mut stack = Vec::new();
     let mut steps = Vec::with_capacity(ops.len());
-    for (i, op) in ops.iter().enumerate() {
-        if let Err(e) = it.run_op(ops, i, &mut stack, &[]) {
+    for op in ops {
+        if let Err(e) = it.run(std::slice::from_ref(op), &mut stack, &[]) {
             return (steps, Err(e));
         }
         steps.push(TraceStep { span: op.span.clone(), stack: stack.clone() });
@@ -199,34 +199,21 @@ fn from_rows(rows: Vec<Value>, what: &str) -> R<Value> {
 
 impl<'e> Interp<'e> {
     fn run(&mut self, ops: &[Op], stack: &mut Vec<Value>, locals: &[Value]) -> Result<(), EvalErr> {
-        for i in 0..ops.len() {
-            self.run_op(ops, i, stack, locals)?;
+        for op in ops {
+            self.step(op, stack, locals).map_err(|e| match e {
+                Step::Here(msg) => EvalErr { msg, span: Some(op.span.clone()) },
+                Step::Inner(e) => e,
+            })?;
         }
         Ok(())
     }
 
-    /// Runs `ops[i]`; the op after it is visible so a range can see a `filled` right after it.
-    fn run_op(&mut self, ops: &[Op], i: usize, stack: &mut Vec<Value>, locals: &[Value]) -> Result<(), EvalErr> {
-        let op = &ops[i];
-        self.step(op, ops.get(i + 1), stack, locals).map_err(|e| match e {
-            Step::Here(msg) => EvalErr { msg, span: Some(op.span.clone()) },
-            Step::Inner(e) => e,
-        })
-    }
-
-    fn step(&mut self, op: &Op, next: Option<&Op>, stack: &mut Vec<Value>, locals: &[Value]) -> Result<(), Step> {
+    fn step(&mut self, op: &Op, stack: &mut Vec<Value>, locals: &[Value]) -> Result<(), Step> {
         match &op.kind {
             OpKind::Num(x) => stack.push(Value::Num(Num::plain(*x))),
             OpKind::Str(s) => stack.push(Value::Text(Text { shape: vec![], data: Arc::new(vec![s.clone()]) })),
             OpKind::Ref(k) => stack.push(self.env.cell_value(*k)?),
-            OpKind::Range { sheet, a, b } => {
-                // `A1:A9 filled` reads only the non-empty cells; any other range errors on an empty cell
-                let v = match next.map(|n| &n.kind) {
-                    Some(OpKind::Builtin(Builtin::Filled)) => self.env.range_filled(*sheet, a, b)?,
-                    _ => self.env.range_value(*sheet, a, b)?,
-                };
-                stack.push(v);
-            }
+            OpKind::Range { sheet, a, b, gaps } => stack.push(self.env.range_value(*sheet, a, b, *gaps)?),
             OpKind::Unit(u) => {
                 let n = pop_num(stack, "a unit")?;
                 stack.push(Value::Num(self.apply_unit(n, u)?));
@@ -611,22 +598,6 @@ impl<'e> Interp<'e> {
             Transpose => {
                 let v = pop(st, name)?;
                 st.push(transpose(v)?);
-            }
-            Filled => {
-                // Right after a range, the range has already skipped its empty
-                // cells; either way the result is a list, row by row.
-                let v = match pop(st, name)? {
-                    Value::Num(mut n) => {
-                        n.shape = vec![n.len()];
-                        Value::Num(n)
-                    }
-                    Value::Text(mut t) => {
-                        t.shape = vec![t.data.len()];
-                        Value::Text(t)
-                    }
-                    v => return Err(Step::Here(format!("filled expects a range, got {}", v.type_name()))),
-                };
-                st.push(v);
             }
             Couple => {
                 let y = pop(st, name)?;

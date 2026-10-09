@@ -14,7 +14,7 @@ pub enum Builtin {
     Add, Sub, Mul, Div, Pow, Neg, Abs, Sqrt, Exp, Log, Log10, Log2, Sin, Cos, Tan,
     Floor, Ceil, Round, Min, Max, Dup, Drop, Swap, Over, Rot, Len, Range, If,
     Lt, Gt, Le, Ge, Eq, Ne, Not, Sum, Mean, Rev, Join, First, Last, Pick, Transpose,
-    Filled, Couple, Pi, Line, Scatter, Bar, Layer, Title, XLabel, YLabel, Size,
+    Couple, Pi, Line, Scatter, Bar, Layer, Title, XLabel, YLabel, Size,
 }
 
 pub const BUILTINS: &[(&str, Builtin, &str)] = {
@@ -62,9 +62,7 @@ pub const BUILTINS: &[(&str, Builtin, &str)] = {
         ("first", First, "a → first row"),
         ("last", Last, "a → last row"),
         ("pick", Pick, "a i → row i of a (0-based)"),
-        ("transpose", Transpose, "a → a with axes swapped"),
-        ("filled", Filled, "range → list of its non-empty cells"),
-        ("couple", Couple, "a b → 2-row array [a, b]"),
+        ("transpose", Transpose, "a → a with axes swapped"),        ("couple", Couple, "a b → 2-row array [a, b]"),
         ("pi", Pi, " → π"),
         ("line", Line, "xs ys → line chart"),
         ("scatter", Scatter, "xs ys → scatter chart"),
@@ -95,7 +93,8 @@ pub enum OpKind {
     Num(f64),
     Str(Arc<str>),
     Ref(CellKey),
-    Range { sheet: SheetId, a: StoredRef, b: StoredRef },
+    /// `gaps` (written `A1:B5?`): skip empty cells and read the rest as a list.
+    Range { sheet: SheetId, a: StoredRef, b: StoredRef, gaps: bool },
     /// Multiply TOS by a unit. `deps` are the declaring cells, by name.
     Unit(UnitExpr),
     To(UnitExpr),
@@ -372,12 +371,12 @@ impl<'a> Compiler<'a> {
                     self.deps.push(Dep::Cell(k));
                     OpKind::Ref(k)
                 }
-                Tok::Range(a, b) => {
+                Tok::Range(a, b, gaps) => {
                     let (sid, explicit) = self.resolve_ref(a, &span)?;
                     let sa = self.stored(sid, explicit, a, &span)?;
                     let sb = self.stored(sid, None, b, &span)?;
                     self.deps.push(Dep::Range { sheet: sid, a: sa, b: sb });
-                    OpKind::Range { sheet: sid, a: sa, b: sb }
+                    OpKind::Range { sheet: sid, a: sa, b: sb, gaps: *gaps }
                 }
                 Tok::DeadRef => return err("reference to a deleted cell", span),
                 Tok::Reduce(w) => OpKind::Reduce(self.callee(w, &span)?),
