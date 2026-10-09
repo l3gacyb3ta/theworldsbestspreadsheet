@@ -109,8 +109,13 @@ pub const WORDS: &[WordDoc] = &[
         ex: [("A1", "1"), ("$A$2 A3 +", "5"), ("B2", "20 m")], see: ["A1:B5", "name", "#references"]),
     w!("A1:B5", "— array", Syntax, "A range pushes one array: rank 1 for a single row or column, rank 2 otherwise.",
         units: "All numbers in a range must share a dimension; the first cell's unit is used for display.",
-        details: "Empty cells in a range are an error (they're not zero). Drag across cells while editing to insert a range.",
-        ex: [("A1:A5", "[1, 2, 3, 4, 5]"), ("A1:B2", "! mixes units"), ("A1:A5 sum", "15"), ("B1:B3", "[10, 20, 30] m")], see: ["A1", "/op", "#arrays"]),
+        details: "Empty cells in a range are an error (they're not zero); end the range with `?` (`A1:A100?`) to leave them out. Drag across cells while editing to insert a range.",
+        ex: [("A1:A5", "[1, 2, 3, 4, 5]"), ("A1:B2", "! mixes units"), ("A4:A7", "! A6 is empty"), ("A1:A5 sum", "15"), ("B1:B3", "[10, 20, 30] m")], see: ["A1", "A1:B5?", "/op", "#arrays"]),
+    w!("A1:B5?", "— list", Syntax, "A range ending in `?` may have empty cells: it pushes its non-empty cells as a list.",
+        units: "The non-empty cells must still share a dimension, and can't mix text and numbers.",
+        details: "An empty cell in a plain range is an error, because treating it as zero would be a guess. The `?` says gaps are expected: `A1:A100? sum` adds up whatever has been filled in. The result is always a list — a table's non-empty cells are read row by row — so its shape doesn't depend on which cells happen to be empty. Only empty cells are skipped; a cell with an error is still an error. `?` works on ranges only: `A1?` is an error.",
+        ex: [("A4:A7?", "[4, 5]"), ("A4:A7? sum", "9"), ("A4:A7 sum", "! A6 is empty"), ("G1:H2?", "[1, 2, 3]"), ("C2:C5?", "[pears, plums]"), ("A5:B6?", "! mixes units"), ("A6:A9?", "[]"), ("A6:A9? sum", "0"), ("A1? sum", "! ? only applies to a range")],
+        see: ["A1:B5", "sum", "#references"]),
     w!("name", "— value", Syntax, "A cell's name pushes that cell, like a reference.",
         units: "",
         details: "Name a cell in the inspector. Names may contain letters, digits, `_` and `.` (`rates.eur`) and can't shadow words. Tick “input” to list it in the Inputs panel.",
@@ -295,7 +300,8 @@ pub fn doc_for_token(tok: &Tok) -> Option<&'static WordDoc> {
         Tok::Unit(_) => word_doc("[unit]"),
         Tok::To(_) => word_doc("to[unit]"),
         Tok::Ref(_) => word_doc("A1"),
-        Tok::Range(..) => word_doc("A1:B5"),
+        Tok::Range(_, _, false) => word_doc("A1:B5"),
+        Tok::Range(_, _, true) => word_doc("A1:B5?"),
         Tok::Reduce(_) => word_doc("/op"),
         Tok::Scan(_) => word_doc("\\op"),
         Tok::Comment(_) => word_doc("( … )"),
@@ -601,7 +607,7 @@ pub const ERRORS: &[ErrorHelp] = &[
         patterns: &["is empty"],
         title: "Reference to an empty cell",
         why: "Empty cells are not zero — that would be a silent guess.",
-        fix: "Put a value in the cell (0 if you mean zero) or change the reference.",
+        fix: "Put a value in the cell (0 if you mean zero) or change the reference. If a range is meant to have gaps, end it with `?` (`A1:A100? sum`) to leave its empty cells out.",
         topic: "references",
     },
     ErrorHelp {
@@ -621,8 +627,8 @@ pub const ERRORS: &[ErrorHelp] = &[
     ErrorHelp {
         patterns: &["#spill blocked"],
         title: "Spill blocked",
-        why: "The cell's result is an array or chart that needs the cells below/right, but one of them isn't empty. The blocking cell is outlined in red.",
-        fix: "Clear or move the blocking cell, or move the formula.",
+        why: "The cell's result is an array or chart that needs the cells below/right, but one of them isn't empty, or another formula's spill needs some of the same cells. When two spills overlap, both are blocked — neither wins. The blocking cell is outlined in red.",
+        fix: "Clear or move the blocking cell, or move one of the formulas so the spills don't overlap.",
         topic: "spill",
     },
     ErrorHelp {
@@ -668,7 +674,7 @@ pub const ERRORS: &[ErrorHelp] = &[
         topic: "words",
     },
     ErrorHelp {
-        patterns: &["end with ;", "missing", "unterminated", "expected", "only appears", "is a builtin", "reserved", "only 1 may appear", "a base unit", "a unit"],
+        patterns: &["end with ;", "missing", "unterminated", "expected", "only appears", "only applies to a range", "is a builtin", "reserved", "only 1 may appear", "a base unit", "a unit"],
         title: "Syntax",
         why: "The text doesn't follow the language's syntax at the highlighted token.",
         fix: "Compare with the reference entry for the word or form you're using.",
@@ -775,6 +781,9 @@ pub const SAMPLE: &[(&str, &str)] = &[
     ("D3", "2"),
     ("E1", "0.05"),
     ("E2", "1000 [USD]"),
+    ("G1", "1"),
+    ("H1", "2"),
+    ("G2", "3"),
     ("F1", "dim widgets"),
     ("F2", "base [widget] widgets"),
     ("F3", ": sq ( x -- x² ) dup * ;"),
@@ -929,6 +938,8 @@ mod tests {
             "=A1:A5 9 pick",
             ": sq dup * ;",
             "=1 \"oops",
+            "=A1? sum",
+            "=A6:A9 sum",
         ] {
             e.set_text(k, prog);
             let msg = match e.shown(k) {

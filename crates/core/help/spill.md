@@ -6,6 +6,7 @@ When a cell's value is a list or a table, it spills: the first element shows in 
 - A reference to the **source** cell means the whole array. `=A10 2 *` doubles every month if A10 spills a list of months.
 - A reference to a cell **inside** the spill means just that element, and a range over spilled cells reads them like any other cells.
 - If anything is in the way — a value, or another spill — the source shows `#spill blocked` and the blocking cell is outlined in red. Nothing is overwritten.
+- When two spills would overlap, both are blocked and each names the other's source. Neither wins, so the result never depends on which formula you typed first.
 
 Spills resize themselves. In the demo model, scrub `months` and the table grows and shrinks, as does everything that reads it.
 

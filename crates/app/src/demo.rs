@@ -95,7 +95,7 @@ pub fn workbook() -> Engine {
         eng.set_name(name, Some(k), input).expect("demo name");
     }
     let s = &mut eng.wb.sheets[0];
-    for (c, w) in [(0, 150.0), (1, 140.0), (2, 140.0), (3, 140.0), (5, 150.0), (6, 130.0), (13, 380.0)] {
+    for (c, w) in [(0, 150.0), (1, 140.0), (2, 140.0), (3, 140.0), (4, 120.0), (5, 150.0), (6, 130.0), (13, 380.0)] {
         let id = s.cols.get(c).unwrap();
         s.col_widths.insert(id, w);
     }

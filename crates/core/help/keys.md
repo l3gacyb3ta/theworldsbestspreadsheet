@@ -41,7 +41,7 @@
 | Alt-drag a number | scrub it (⇧ for ×10) |
 | drag the selection corner | fill |
 | drag a header border | resize; double-click to fit |
-| drag a hollow chart point | edit the cell behind it |
+| drag a hollow chart point | edit the cell behind it (⇧ for finer steps) |
 | right-click | insert, delete, sort, fill |
 | click a sheet tab | show the sheet |
 | double-click a sheet tab | rename it (Enter confirms, Escape cancels) |

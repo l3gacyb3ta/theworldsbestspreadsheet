@@ -150,7 +150,7 @@ impl App {
         let kind = classify(&text);
         let tok = syntax::token_at(&text, at);
         let mut insert: Option<(Range<usize>, String)> = None;
-        ui.horizontal_wrapped(|ui| {
+        ui.horizontal(|ui| {
             ui.add_space(176.0);
             // 1. what the token at the caret is
             let hint = match tok.as_ref().map(|t| &t.tok) {
@@ -222,7 +222,7 @@ impl App {
         // 3. the stack at the caret
         if kind == Kind::Program {
             let s = self.eng.eval_scratch(&text, home);
-            ui.horizontal_wrapped(|ui| {
+            ui.horizontal(|ui| {
                 ui.add_space(176.0);
                 ui.label(RichText::new("stack").small().weak());
                 let before: Vec<&wbs_core::eval::TraceStep> = s.steps.iter().filter(|st| st.span.end <= at).collect();
@@ -304,15 +304,27 @@ impl App {
         }
     }
 
+    /// Byte span of the token a cell's error points at, if any.
+    pub(super) fn err_span(&self, k: CellKey) -> Option<Range<usize>> {
+        match self.eng.shown(k) {
+            Shown::Error(e) if e.kind == ErrKind::Local => e.span.clone(),
+            _ => self.eng.compile_error(k).and_then(|e| e.span.clone()),
+        }
+    }
+
     /// The shared formula editor (used in the cell and in the formula bar).
     pub(super) fn editor(&mut self, ui: &mut Ui, id: Id, width: f32, in_bar: bool) -> EditorOut {
         let ctx = ui.ctx().clone();
         let ed = self.edit.as_ref().unwrap();
         let refs = syntax::analyze(&ed.text, &self.eng.wb, ed.key.sheet);
+        // underline the error while the text is still what produced it
+        let orig = ed.orig.clone();
+        let err = self.err_span(ed.key);
         let font = FontId::proportional(FONT);
         let base = ui.visuals().text_color();
         let mut layouter = move |ui: &Ui, buf: &dyn egui::TextBuffer, _w: f32| {
-            let job = syntax::layout(buf.as_str(), &refs, None, font.clone(), base);
+            let err = err.as_ref().filter(|_| buf.as_str() == orig);
+            let job = syntax::layout(buf.as_str(), &refs, err, font.clone(), base);
             ui.fonts_mut(|f| f.layout_job(job))
         };
         let ed = self.edit.as_mut().unwrap();
@@ -431,10 +443,7 @@ impl App {
                 return;
             }
             // display mode: colored program, alt-drag numbers to scrub, click to edit
-            let err_span = match self.eng.shown(k) {
-                Shown::Error(e) if e.kind == ErrKind::Local => e.span.clone(),
-                _ => self.eng.compile_error(k).and_then(|e| e.span.clone()),
-            };
+            let err_span = self.err_span(k);
             let font = FontId::proportional(FONT);
             let job = syntax::layout(&text_now, &[], err_span.as_ref(), font, ui.visuals().text_color());
             let galley = ui.fonts_mut(|f| f.layout_job(job));
@@ -504,10 +513,33 @@ impl App {
                 }
             }
         });
+        // the hint strip always takes the same height, so starting an edit doesn't shift the grid
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), ASSIST_H), Sense::hover());
+        let mut strip = ui.new_child(UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)));
+        strip.set_clip_rect(rect.intersect(ui.clip_rect()));
         if self.edit.is_some() {
-            self.assist(ui);
+            self.assist(&mut strip);
+        } else {
+            self.idle_hint(&mut strip);
         }
         ui.add_space(2.0);
+    }
+
+    /// The hint strip when not editing: what kind of cell is selected.
+    fn idle_hint(&mut self, ui: &mut Ui) {
+        let k = {
+            let (r, c) = self.cursor;
+            self.key(r, c)
+        };
+        let kind = self.eng.kind(k);
+        let hint = match self.eng.spill_anchor(k) {
+            Some(a) if kind == Kind::Empty => format!("spilled from {} — read-only, edit the source", self.label(a)),
+            _ => kind_hint(kind).to_string(),
+        };
+        ui.horizontal(|ui| {
+            ui.add_space(176.0);
+            ui.label(RichText::new(hint).small().weak());
+        });
     }
 
     /// Tooltip text for the token at byte `at` of a cell's text.
@@ -937,6 +969,9 @@ impl App {
         });
     }
 }
+
+/// Height of the hint strip under the formula bar (two rows: hint, stack).
+const ASSIST_H: f32 = 42.0;
 
 const HELP: &str = "\
 =  program: postfix, the cell's value is the top of the stack

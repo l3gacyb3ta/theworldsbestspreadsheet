@@ -29,7 +29,7 @@ Axes are labelled with the values' display units automatically. Dates on the x a
 
 ## Dragging points
 
-If a point's y value comes straight from a number cell (through a range or reference, with nothing computed in between), the point is drawn hollow and you can drag it up and down — that writes the cell, keeping its unit. Bars with a dark cap are draggable the same way.
+If a point's y value comes straight from a number cell (through a range or reference, with nothing computed in between), the point is drawn hollow and you can drag it up and down — that writes the cell, keeping its unit and its decimals: dragging `180 [widget]` writes whole numbers, `4.0` moves in steps of 0.1. Hold Shift for finer steps. Bars with a dark cap are draggable the same way.
 
 Points computed from other cells aren't draggable yet. Hover one to see which inputs it depends on — those are the cells a future goal-seek would adjust.
 

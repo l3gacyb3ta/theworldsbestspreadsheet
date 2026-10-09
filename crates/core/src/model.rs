@@ -508,7 +508,8 @@ impl Workbook {
         for t in lex::lex(text) {
             let piece = match &t.tok {
                 Tok::Ref(r) => self.resolve_a1(r, home, None).map(Piece::Ref),
-                Tok::Range(a, b) => {
+                // a trailing `?` is outside the token's span, so it stays as text
+                Tok::Range(a, b, _) => {
                     let ra = self.resolve_a1(a, home, None);
                     let sid = ra.and_then(|x| x.sheet).unwrap_or(home);
                     let rb = self.resolve_a1(b, home, Some(sid));
