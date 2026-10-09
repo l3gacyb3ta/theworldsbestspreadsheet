@@ -15,6 +15,8 @@ A cell's first characters decide what it is. There's no guessing beyond this tab
 
 A number cell is a literal: `120000 [USD]`, `4.0 [%]`, `24`. These are the cells you scrub with Alt-drag, list as inputs, and edit by dragging chart points. Keep the decimals you want to step by: scrubbing `4.0` moves in steps of 0.1, `4.00` in steps of 0.01.
 
+A number wider than its column runs into empty cells on its left. If there's no room it shows `###` rather than a cut-off number: hover it, or select it and look in the inspector, to see the value, and double-click the column's header border to widen it.
+
 ## Programs
 
 A program runs on an empty stack, and the cell's value is the one value left at the end. See [[#stack]].

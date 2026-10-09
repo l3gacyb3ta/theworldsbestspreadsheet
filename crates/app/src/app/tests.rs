@@ -5,8 +5,14 @@ use super::*;
 use egui_kittest::{kittest::Queryable, Harness};
 
 fn harness() -> Harness<'static, App> {
+    harness_dt(0.25)
+}
+
+/// A harness whose frames are `dt` seconds apart (short enough for double clicks).
+fn harness_dt(dt: f32) -> Harness<'static, App> {
     let mut h = Harness::builder()
         .with_size([1440.0, 900.0])
+        .with_step_dt(dt)
         .wgpu()
         .build_eframe(|_| App::new(PathBuf::from("/nonexistent/ui-test.wbs.json")));
     h.run_steps(3);
@@ -198,6 +204,17 @@ fn drag_bar_writes_literal() {
     let v: f64 = source(&h, "B47").split_whitespace().next().unwrap().parse().unwrap();
     assert!(v > 180.0, "{v}");
     assert!(source(&h, "B47").ends_with("[widget]"));
+    // an integer literal stays an integer
+    assert!(!source(&h, "B47").contains('.'), "{}", source(&h, "B47"));
+    // a literal with decimals keeps them
+    let k = h.state().eng.wb.sheets[0].key(45, 1).unwrap();
+    h.state_mut().eng.set_text(k, "135.00 [widget]");
+    h.run_steps(2);
+    let hit = h.state().chart_hits.iter().find(|(p, _)| p.label.starts_with("Q3")).map(|(p, _)| p.pos).unwrap();
+    drag(&mut h, hit, hit - Vec2::new(0.0, 23.0), Modifiers::NONE);
+    let src = source(&h, "B46");
+    assert!(src != "135.00 [widget]" && src.ends_with("[widget]"), "{src}");
+    assert_eq!(src.split_whitespace().next().unwrap().split('.').nth(1).map(str::len), Some(2), "{src}");
 }
 
 #[test]
@@ -313,4 +330,92 @@ fn help_pages_render() {
     h.state_mut().help.show_page(Page::Topic("units"));
     h.run_steps(3);
     shot(&mut h, "17_help_units_topic");
+}
+
+// ---- papercuts -----------------------------------------------------------------
+
+fn grid_top(h: &Harness<'static, App>) -> f32 {
+    h.state().geo.as_ref().unwrap().cells.top()
+}
+
+#[test]
+fn editing_keeps_the_grid_still() {
+    let mut h = harness();
+    { let p = center(&h, "H25"); click(&mut h, p, Modifiers::NONE); }
+    let top = grid_top(&h);
+    shot(&mut h, "18_layout_idle");
+    // typing a program brings up the hint and stack rows
+    typ(&mut h, "=A10:A15 mea");
+    assert_eq!(grid_top(&h), top);
+    shot(&mut h, "19_layout_editing");
+    key(&mut h, Key::Escape);
+    assert!(h.state().edit.is_none());
+    assert_eq!(grid_top(&h), top);
+    // F2 on a number, and on text
+    { let p = center(&h, "B3"); click(&mut h, p, Modifiers::NONE); }
+    key(&mut h, Key::F2);
+    assert!(h.state().edit.is_some());
+    assert_eq!(grid_top(&h), top);
+    key(&mut h, Key::Escape);
+    { let p = center(&h, "A3"); click(&mut h, p, Modifiers::NONE); }
+    key(&mut h, Key::F2);
+    assert_eq!(grid_top(&h), top);
+}
+
+#[test]
+fn double_click_edits_an_error_cell() {
+    // 60 fps, so two clicks land inside egui's double-click window
+    let mut h = harness_dt(1.0 / 60.0);
+    { let p = center(&h, "H25"); click(&mut h, p, Modifiers::NONE); }
+    typ(&mut h, "=B3 B5 +");
+    key(&mut h, Key::Enter);
+    h.run_steps(60);
+    let p = center(&h, "H25");
+    click(&mut h, p, Modifiers::NONE);
+    assert!(h.state().edit.is_none());
+    h.run_steps(60);
+    shot(&mut h, "20_error_selected");
+    // a real double click: press and release on separate frames; egui reports it on the second release
+    click(&mut h, p, Modifiers::NONE);
+    assert!(h.state().edit.is_none(), "one click only selects");
+    click(&mut h, p, Modifiers::NONE);
+    // the in-cell editor holds the source (with the bad `+` underlined), not "#err"
+    assert_eq!(h.state().edit.as_ref().map(|e| e.text.as_str()), Some("=B3 B5 +"));
+    assert_eq!(h.state().edit.as_ref().unwrap().key, h.state().eng.wb.sheets[0].key(24, 7).unwrap());
+    h.event(Event::PointerMoved(p + Vec2::new(0.0, 80.0)));
+    h.run_steps(2);
+    shot(&mut h, "21_error_cell_editing");
+    key(&mut h, Key::End);
+    key(&mut h, Key::Backspace);
+    typ(&mut h, "*");
+    key(&mut h, Key::Enter);
+    assert_eq!(source(&h, "H25"), "=B3 B5 *");
+    assert_eq!(shown(&h, "H25"), "2,880,000 USD");
+}
+
+#[test]
+fn wide_numbers_never_look_like_other_numbers() {
+    let mut h = harness();
+    let p = center(&h, "E20");
+    h.hover_at(p);
+    h.run_steps(1);
+    h.event(Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -500.0), modifiers: Modifiers::NONE, phase: egui::TouchPhase::Move });
+    h.run_steps(20);
+    // H38 has an empty G38 to its left, so it runs into it; so does H40, next to a label that stops at F40;
+    // H41's neighbours are taken by a longer label, so it shows ###
+    let wide = "=123456 [km] to[mm]";
+    for (at, text) in [("H38", wide), ("E40", "'a label that runs on"), ("H40", wide), ("E41", "'a label that runs on and on, right up to column H"), ("H41", wide)] {
+        let p = center(&h, at);
+        click(&mut h, p, Modifiers::NONE);
+        typ(&mut h, text);
+        key(&mut h, Key::Enter);
+    }
+    assert_eq!(shown(&h, "H38"), "123,456,000,000 mm");
+    h.hover_at(center(&h, "C45"));
+    h.run_steps(2);
+    shot(&mut h, "22_wide_numbers");
+    // hovering ### shows the value
+    h.hover_at(center(&h, "H41"));
+    h.run_steps(2);
+    shot(&mut h, "23_wide_number_hover");
 }
