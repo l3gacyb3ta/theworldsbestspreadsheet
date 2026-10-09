@@ -9,6 +9,9 @@ cargo run -p wbs --release -- my-model.wbs.json
 ```
 
 The first launch (when the file doesn't exist) opens a demo model; ⌘S saves.
+Without an argument it reopens the last workbook you used. File ▸ New / Open… /
+Save As… use native file dialogs (the xdg desktop portal on Linux), and closing
+with unsaved changes asks first.
 
 ## Layout
 
@@ -98,7 +101,7 @@ builtin, or an error message without an explanation fails the build.
 ## Keys
 
 Arrows/⇧arrows, Enter/Tab, F2 or double-click to edit, Delete clears, ⌘C/⌘X/⌘V,
-⌘Z/⇧⌘Z, ⌘D fill down, ⌘E accept "extend formula", ⌘S save. Alt-drag a number
+⌘Z/⇧⌘Z, ⌘D fill down, ⌘E accept "extend formula", ⌘N/⌘O/⌘S/⇧⌘S new/open/save/save as. Alt-drag a number
 (in a cell or the formula bar) to scrub it, ⇧ for ×10. Right-click for
 insert/delete rows/columns and sort.
 

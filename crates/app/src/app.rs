@@ -1,5 +1,9 @@
+mod commands;
+mod files;
 mod grid;
 mod panels;
+
+pub use commands::Command;
 #[cfg(test)]
 mod tests;
 
@@ -163,7 +167,23 @@ pub struct App {
     drag: Drag,
     offer: Option<(CellKey, CRect)>,
     status: Option<String>,
-    path: PathBuf,
+    /// `None`: untitled (Save asks where).
+    path: Option<PathBuf>,
+    dialogs: Box<dyn files::Dialogs>,
+    /// `files::fingerprint` of the workbook as last opened/saved.
+    saved_fp: u64,
+    /// Cached `is_dirty()` for the title; refreshed on input.
+    dirty: bool,
+    dirty_stale: bool,
+    title: String,
+    /// The save-changes prompt is up, for this action.
+    confirm: Option<files::Pending>,
+    /// Unsaved changes dealt with: let the window close.
+    close_ok: bool,
+    queued: Vec<Command>,
+    /// Synthetic input for the next frame (menu commands replayed as keys).
+    inject: Vec<Event>,
+    native_menu: Option<crate::menus::NativeMenu>,
     name_buf: String,
     name_for: Option<CellKey>,
     chart_hits: Vec<(PointHit, YAxis)>,
@@ -185,7 +205,7 @@ pub struct App {
 impl App {
     /// On first run (no saved file) open help at the welcome guide.
     pub fn with_welcome(mut self) -> App {
-        if !self.path.exists() {
+        if !self.path.as_ref().is_some_and(|p| p.exists()) {
             self.help.show_page(Page::Topic("welcome"));
         }
         self
@@ -199,7 +219,7 @@ impl App {
             },
             Err(_) => (demo::workbook(), format!("demo workbook — ⌘S saves to {}", path.display())),
         };
-        App {
+        let mut app = App {
             eng,
             sheet_ix: 0,
             anchor: (3, 1),
@@ -213,7 +233,17 @@ impl App {
             drag: Drag::None,
             offer: None,
             status: Some(status),
-            path,
+            path: Some(path),
+            dialogs: files::default_dialogs(),
+            saved_fp: 0,
+            dirty: false,
+            dirty_stale: false,
+            title: String::new(),
+            confirm: None,
+            close_ok: false,
+            queued: Vec::new(),
+            inject: Vec::new(),
+            native_menu: None,
             name_buf: String::new(),
             name_for: None,
             chart_hits: Vec::new(),
@@ -227,7 +257,16 @@ impl App {
             input_scrub: None,
             geo: None,
             help: Help::new(),
-        }
+        };
+        // the demo (or the opened file) is the clean state
+        app.mark_clean();
+        app
+    }
+
+    /// Use the native menu bar where there is one (macOS).
+    pub fn with_native_menu(mut self, ctx: &egui::Context) -> App {
+        self.native_menu = crate::menus::NativeMenu::install(ctx);
+        self
     }
 
     // ---- helpers ------------------------------------------------------------
@@ -267,16 +306,6 @@ impl App {
         if let Some(e) = self.redo.pop() {
             let inv = self.eng.apply(e);
             self.undo.push(inv);
-        }
-    }
-
-    fn save(&mut self) {
-        match serde_json::to_string_pretty(&self.eng.wb) {
-            Ok(s) => match std::fs::write(&self.path, s) {
-                Ok(()) => self.status = Some(format!("saved {}", self.path.display())),
-                Err(e) => self.status = Some(format!("save failed: {e}")),
-            },
-            Err(e) => self.status = Some(format!("save failed: {e}")),
         }
     }
 
@@ -376,8 +405,15 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.keys(&ctx);
+        self.run_queued(&ctx);
+        if self.confirm.is_none() {
+            self.command_keys(&ctx);
+            self.keys(&ctx);
+        }
         let dark = ui.visuals().dark_mode;
+        if self.native_menu.is_none() {
+            egui::Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui));
+        }
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
         egui::Panel::top("formula_bar").show(ui, |ui| self.formula_bar(ui, dark));
         egui::Panel::bottom("statusbar").show(ui, |ui| self.status_bar(ui));
@@ -391,5 +427,25 @@ impl eframe::App for App {
                 HelpAction::Goto(k) => self.goto(k),
             }
         }
+        self.document_ui(&ctx);
+        if let Some(m) = &self.native_menu {
+            m.sync(self.trace, !self.undo.is_empty(), !self.redo.is_empty());
+        }
+        if !self.inject.is_empty() {
+            ctx.request_repaint();
+        }
+    }
+
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        raw_input.events.append(&mut self.inject);
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        if let Some(p) = self.path.as_ref().and_then(|p| std::path::absolute(p).ok()) {
+            storage.set_string(LAST_FILE_KEY, p.display().to_string());
+        }
     }
 }
+
+/// eframe storage key for the most recently opened/saved workbook.
+pub const LAST_FILE_KEY: &str = "last_file";

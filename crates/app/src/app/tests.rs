@@ -314,3 +314,240 @@ fn help_pages_render() {
     h.run_steps(3);
     shot(&mut h, "17_help_units_topic");
 }
+
+// ---- files: dirty tracking, New / Open / Save, the save-changes prompt ----
+
+type Answers = std::rc::Rc<std::cell::RefCell<std::collections::VecDeque<Option<PathBuf>>>>;
+
+/// Scripted file dialogs: each call takes the next answer (None = cancelled).
+struct Scripted(Answers);
+
+impl files::Dialogs for Scripted {
+    fn open(&mut self, _: Option<&std::path::Path>) -> Option<PathBuf> {
+        self.0.borrow_mut().pop_front().expect("unexpected open dialog")
+    }
+    fn save_as(&mut self, _: Option<&std::path::Path>, _: &str) -> Option<PathBuf> {
+        self.0.borrow_mut().pop_front().expect("unexpected save dialog")
+    }
+}
+
+/// Install dialogs that answer `answers` in order; returns the queue so the
+/// test can check they were all used.
+fn script(h: &mut Harness<'static, App>, answers: &[Option<PathBuf>]) -> Answers {
+    let q: Answers = std::rc::Rc::new(std::cell::RefCell::new(answers.iter().cloned().collect()));
+    h.state_mut().dialogs = Box::new(Scripted(q.clone()));
+    q
+}
+
+fn tmp_file(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("wbs-ui-tests-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join(name);
+    let _ = std::fs::remove_file(&p);
+    p
+}
+
+fn command(h: &mut Harness<'static, App>, c: Command) {
+    h.state_mut().queue(c);
+    h.run_steps(3);
+}
+
+fn key_cmd(h: &mut Harness<'static, App>, k: Key) {
+    h.key_press_modifiers(Modifiers::COMMAND, k);
+    h.run_steps(2);
+}
+
+/// Click a button in the save-changes prompt (drawn last, above the toolbar's Save).
+fn modal_button(h: &mut Harness<'static, App>, label: &str) {
+    h.get_all_by_label(label).last().expect("no such button").click();
+}
+
+fn type_into(h: &mut Harness<'static, App>, at: &str, text: &str) {
+    let p = center(h, at);
+    click(h, p, Modifiers::NONE);
+    typ(h, text);
+    key(h, Key::Enter);
+}
+
+#[test]
+fn dirty_marker_follows_edits_and_undo() {
+    let mut h = harness();
+    assert!(!h.state().dirty);
+    assert_eq!(h.state().title, "ui-test.wbs.json — the world's best spreadsheet");
+    type_into(&mut h, "H25", "42");
+    assert!(h.state().dirty);
+    assert!(h.state().title.starts_with("• ui-test.wbs.json"));
+    // undoing back to the saved state is clean again
+    key_cmd(&mut h, Key::Z);
+    assert_eq!(source(&h, "H25"), "");
+    assert!(!h.state().dirty, "undo back to the saved state");
+    // moving around grows the sheet but isn't an edit
+    for _ in 0..40 {
+        h.key_press(Key::ArrowDown);
+    }
+    h.run_steps(2);
+    assert!(!h.state().is_dirty());
+    // non-undoable changes count too: a column resize, a sheet rename
+    let ix = h.state().sheet_ix;
+    let cid = h.state().eng.wb.sheets[ix].cols.ids()[20];
+    h.state_mut().eng.wb.sheets[ix].col_widths.insert(cid, 180.0);
+    assert!(h.state().is_dirty());
+    h.state_mut().eng.wb.sheets[ix].col_widths.remove(&cid);
+    assert!(!h.state().is_dirty());
+    h.state_mut().eng.wb.sheets[ix].name = "Renamed".into();
+    assert!(h.state().is_dirty());
+}
+
+#[test]
+fn save_as_then_save() {
+    let mut h = harness();
+    let p = tmp_file("save_as.wbs.json");
+    let q = script(&mut h, &[None, Some(p.clone())]);
+    type_into(&mut h, "H25", "42");
+    // cancelled dialog: nothing written, still dirty
+    command(&mut h, Command::SaveAs);
+    assert!(!p.exists());
+    assert!(h.state().dirty);
+    command(&mut h, Command::SaveAs);
+    assert!(p.exists());
+    assert_eq!(h.state().path.as_deref(), Some(p.as_path()));
+    assert!(!h.state().dirty);
+    assert!(h.state().title.starts_with("save_as.wbs.json"));
+    // ⌘S saves in place without asking
+    type_into(&mut h, "H26", "43");
+    assert!(h.state().dirty);
+    key_cmd(&mut h, Key::S);
+    assert!(!h.state().dirty);
+    assert!(q.borrow().is_empty());
+    let saved: wbs_core::model::Workbook = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+    assert!(saved.sheets[0].cells.values().any(|c| c.pieces == vec![wbs_core::model::Piece::Text("43".into())]));
+}
+
+#[test]
+fn new_asks_before_discarding_changes() {
+    let mut h = harness();
+    type_into(&mut h, "H25", "42");
+    command(&mut h, Command::New);
+    assert_eq!(h.state().confirm, Some(files::Pending::New));
+    shot(&mut h, "18_save_changes_prompt");
+    // Cancel keeps everything
+    modal_button(&mut h, "Cancel");
+    h.run_steps(3);
+    assert_eq!(h.state().confirm, None);
+    assert_eq!(source(&h, "H25"), "42");
+    // Don't save: an empty workbook, untitled and clean
+    command(&mut h, Command::New);
+    modal_button(&mut h, "Don't save");
+    h.run_steps(3);
+    let app = h.state();
+    assert_eq!(app.confirm, None);
+    assert_eq!(app.path, None);
+    assert!(!app.dirty);
+    assert_eq!(app.title, "Untitled — the world's best spreadsheet");
+    assert!(app.eng.wb.sheets[0].cells.is_empty());
+    assert!(app.undo.is_empty());
+    // a clean workbook doesn't ask
+    command(&mut h, Command::New);
+    assert_eq!(h.state().confirm, None);
+}
+
+#[test]
+fn save_on_untitled_asks_where_and_open_reads_it_back() {
+    let mut h = harness();
+    command(&mut h, Command::New);
+    let p = tmp_file("roundtrip.wbs.json");
+    let q = script(&mut h, &[Some(p.clone()), Some(p.clone())]);
+    type_into(&mut h, "A1", "=6 7 *");
+    key_cmd(&mut h, Key::S);
+    assert_eq!(h.state().path.as_deref(), Some(p.as_path()));
+    command(&mut h, Command::New);
+    assert_eq!(source(&h, "A1"), "");
+    command(&mut h, Command::Open);
+    assert!(q.borrow().is_empty());
+    assert_eq!(h.state().path.as_deref(), Some(p.as_path()));
+    assert_eq!(source(&h, "A1"), "=6 7 *");
+    assert_eq!(shown(&h, "A1"), "42");
+    assert!(!h.state().dirty);
+}
+
+#[test]
+fn open_with_changes_can_save_first() {
+    let mut h = harness();
+    let mine = tmp_file("mine.wbs.json");
+    let other = tmp_file("other.wbs.json");
+    std::fs::write(&other, serde_json::to_string(&wbs_core::stdlib::default_workbook()).unwrap()).unwrap();
+    h.state_mut().path = Some(mine.clone());
+    let q = script(&mut h, &[Some(other.clone())]);
+    type_into(&mut h, "H25", "42");
+    command(&mut h, Command::Open);
+    assert_eq!(h.state().confirm, Some(files::Pending::Open));
+    modal_button(&mut h, "Save");
+    h.run_steps(3);
+    assert!(mine.exists(), "saved before opening");
+    assert!(q.borrow().is_empty());
+    assert_eq!(h.state().path.as_deref(), Some(other.as_path()));
+    // a file that isn't a workbook leaves the current one alone
+    let bad = tmp_file("bad.wbs.json");
+    std::fs::write(&bad, "not json").unwrap();
+    script(&mut h, &[Some(bad)]);
+    command(&mut h, Command::Open);
+    assert_eq!(h.state().path.as_deref(), Some(other.as_path()));
+    assert!(h.state().status.as_deref().unwrap().starts_with("couldn't open"));
+}
+
+#[test]
+fn closing_with_changes_asks() {
+    let mut h = harness();
+    let close = |h: &mut Harness<'static, App>| {
+        h.input_mut().viewports.get_mut(&egui::ViewportId::ROOT).unwrap().events.push(egui::ViewportEvent::Close);
+        h.run_steps(3);
+    };
+    // clean: closes without asking
+    close(&mut h);
+    assert_eq!(h.state().confirm, None);
+    type_into(&mut h, "H25", "42");
+    close(&mut h);
+    assert_eq!(h.state().confirm, Some(files::Pending::Quit));
+    assert!(!h.state().close_ok);
+    modal_button(&mut h, "Cancel");
+    h.run_steps(3);
+    assert!(!h.state().close_ok);
+    // Save to an unwritable path fails: the window stays open
+    close(&mut h);
+    modal_button(&mut h, "Save");
+    h.run_steps(3);
+    assert!(!h.state().close_ok);
+    assert!(h.state().status.as_deref().unwrap().starts_with("save failed"));
+    let p = tmp_file("quit.wbs.json");
+    h.state_mut().path = Some(p.clone());
+    close(&mut h);
+    modal_button(&mut h, "Save");
+    h.run_steps(3);
+    assert!(p.exists());
+    assert!(h.state().close_ok);
+}
+
+#[test]
+fn edit_commands_reach_the_grid_and_the_editor() {
+    let mut h = harness();
+    type_into(&mut h, "H25", "42");
+    command(&mut h, Command::Undo);
+    assert_eq!(source(&h, "H25"), "");
+    command(&mut h, Command::Redo);
+    assert_eq!(source(&h, "H25"), "42");
+    let trace = h.state().trace;
+    command(&mut h, Command::ToggleTrace);
+    assert_eq!(h.state().trace, !trace);
+    // while typing, Undo belongs to the text field: it's replayed as ⌘Z
+    // (fed back in by raw_input_hook in the real app)
+    {
+        let p = center(&h, "H26");
+        click(&mut h, p, Modifiers::NONE);
+    }
+    typ(&mut h, "abc");
+    h.state_mut().queue(Command::Undo);
+    h.run_steps(1);
+    let injected = std::mem::take(&mut h.state_mut().inject);
+    assert!(matches!(injected[..], [Event::Key { key: Key::Z, pressed: true, modifiers, .. }] if modifiers.command));
+    assert_eq!(source(&h, "H25"), "42", "grid undo didn't run");
+}

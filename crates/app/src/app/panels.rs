@@ -11,17 +11,6 @@ impl App {
     pub(super) fn keys(&mut self, ctx: &egui::Context) {
         let (events, mods) = ctx.input(|i| (i.events.clone(), i.modifiers));
         let focused = ctx.memory(|m| m.focused());
-        for ev in &events {
-            match ev {
-                Event::Key { key: Key::S, pressed: true, modifiers, .. } if modifiers.command => {
-                    self.commit();
-                    self.save();
-                }
-                Event::Key { key: Key::F1, pressed: true, .. } => self.context_help(),
-                Event::Key { key: Key::Slash, pressed: true, modifiers, .. } if modifiers.command => self.help.focus_search(),
-                _ => {}
-            }
-        }
         if self.edit.is_some() {
             // An edit whose editor lost focus (e.g. after clicking a header) can still be cancelled.
             if focused.is_none() && events.iter().any(|e| matches!(e, Event::Key { key: Key::Escape, pressed: true, .. })) {
@@ -353,8 +342,7 @@ impl App {
             ui.label(egui::RichText::new("the world's best spreadsheet").strong());
             ui.separator();
             if ui.button("Save").on_hover_text("⌘S").clicked() {
-                self.commit();
-                self.save();
+                self.run(ui.ctx(), Command::Save);
             }
             if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("Undo")).on_hover_text("⌘Z").clicked() {
                 self.undo();
@@ -373,7 +361,9 @@ impl App {
                 }
             }
             ui.separator();
-            ui.label(egui::RichText::new(format!("recalc {:.2} ms · {}", self.last_recalc_ms, self.path.display())).weak().small());
+            let file = self.path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "Untitled".into());
+            let file = if self.dirty { format!("{file} (edited)") } else { file };
+            ui.label(egui::RichText::new(format!("recalc {:.2} ms · {file}", self.last_recalc_ms)).weak().small());
         });
     }
 
