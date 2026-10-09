@@ -307,6 +307,24 @@ fn errors_are_explained_and_linked() {
 }
 
 #[test]
+fn dimensions_show_without_values() {
+    let mut h = harness();
+    // H40 is empty: no value, but the dimension is known statically
+    { let p = center(&h, "E25"); click(&mut h, p, Modifiers::NONE); }
+    typ(&mut h, "=H40 drop 5 [m] 2 [s] /");
+    h.run_steps(2);
+    h.get_by_label("  dims: length/time");
+    key(&mut h, Key::Enter);
+    { let p = center(&h, "E25"); click(&mut h, p, Modifiers::NONE); }
+    h.run_steps(2);
+    assert!(shown(&h, "E25").contains("is empty"), "{}", shown(&h, "E25"));
+    h.get_by_label("dimension: length/time");
+    // a unit mismatch shows up while the input is still empty
+    type_into(&mut h, "E26", "=H40 1 [m] 1 [s] + +");
+    assert!(shown(&h, "E26").contains("+ needs matching units: length vs time"), "{}", shown(&h, "E26"));
+}
+
+#[test]
 fn help_pages_render() {
     let mut h = harness();
     h.state_mut().help.show_page(Page::Reference);
