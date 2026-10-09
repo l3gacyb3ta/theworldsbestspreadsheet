@@ -9,28 +9,55 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: test
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    outputs:
+      app: ${{ steps.filter.outputs.app }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            app:
+              - 'crates/app/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+
+  core:
+    name: core tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: System libraries (eframe build, software Vulkan for UI tests)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-            libxkbcommon-dev libssl-dev libvulkan1 mesa-vulkan-drivers
-
       - uses: dtolnay/rust-toolchain@stable
-
       - uses: Swatinem/rust-cache@v2
-
-      - name: Core tests (engine, language, units, help docs)
+        with:
+          key: core
+      - name: Engine, language, units, help docs
         run: cargo test -p wbs-core
 
-      - name: App tests (headless UI via egui_kittest)
+  ui:
+    name: UI tests
+    needs: changes
+    # Headless UI tests need system libraries and a full eframe/wgpu build, so they
+    # run on every push to main but only on PRs that touch the app.
+    if: github.event_name == 'push' || needs.changes.outputs.app == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: System libraries (eframe build, software Vulkan)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libvulkan1 mesa-vulkan-drivers
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ui
+      - name: Headless UI tests (egui_kittest)
         run: cargo test -p wbs
-
       - name: Upload UI snapshots
         if: always()
         uses: actions/upload-artifact@v4
