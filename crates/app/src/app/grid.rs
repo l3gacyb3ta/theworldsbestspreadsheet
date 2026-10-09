@@ -1,0 +1,766 @@
+//! The grid: geometry, pointer interaction (select, click-to-reference,
+//! fill-drag, resize, scrub, chart point drags) and painting.
+
+use super::*;
+use crate::chart_view;
+use std::collections::HashSet;
+
+impl App {
+    fn geometry(&mut self, area: Rect) -> Geo {
+        let ix = self.sheet_ix;
+        let cells = Rect::from_min_max(area.min + Vec2::new(HDR_W, HDR_H), area.max);
+        // grow the sheet so there is always room to scroll into
+        loop {
+            let s = &self.eng.wb.sheets[ix];
+            let h: f32 = s.rows.ids().iter().map(|r| s.row_heights.get(r).copied().unwrap_or(DEF_H)).sum();
+            let w: f32 = s.cols.ids().iter().map(|c| s.col_widths.get(c).copied().unwrap_or(DEF_W)).sum();
+            let need_r = h < self.scroll.y + cells.height() + 400.0;
+            let need_c = w < self.scroll.x + cells.width() + 300.0;
+            if !need_r && !need_c {
+                break;
+            }
+            let (nr, nc) = (s.rows.len() + if need_r { 100 } else { 0 }, s.cols.len() + if need_c { 10 } else { 0 });
+            self.eng.wb.sheets[ix].ensure_size(nr, nc);
+        }
+        let s = &self.eng.wb.sheets[ix];
+        let mut col_x = Vec::with_capacity(s.cols.len() + 1);
+        let mut acc = 0.0;
+        col_x.push(0.0);
+        for c in s.cols.ids() {
+            acc += s.col_widths.get(c).copied().unwrap_or(DEF_W);
+            col_x.push(acc);
+        }
+        let mut row_y = Vec::with_capacity(s.rows.len() + 1);
+        acc = 0.0;
+        row_y.push(0.0);
+        for r in s.rows.ids() {
+            acc += s.row_heights.get(r).copied().unwrap_or(DEF_H);
+            row_y.push(acc);
+        }
+        Geo { cells, col_x, row_y, scroll: self.scroll }
+    }
+
+    fn cell_display(&self, k: CellKey, pal: &Pal) -> Option<(String, Color32, bool)> {
+        match self.eng.shown(k) {
+            Shown::Empty => None,
+            Shown::Error(e) => Some((e.short().to_string(), pal.err, false)),
+            Shown::Value { value, dr, dc, anchor } => {
+                let spilled = anchor != k;
+                let (color, right) = match value {
+                    Value::Chart(_) => return None,
+                    Value::Num(_) => (if spilled { pal.spill } else { pal.text }, true),
+                    Value::Text(_) => (if spilled { pal.spill } else { pal.text }, false),
+                    _ => (pal.decl, false),
+                };
+                let text = match value {
+                    Value::Unit(_) | Value::Dim(_) | Value::Word(_) => self.eng.wb.cell_text(k),
+                    _ => value.display_at(dr, dc),
+                };
+                Some((text, color, right))
+            }
+        }
+    }
+
+    pub(super) fn grid(&mut self, ui: &mut Ui, dark: bool) {
+        let ctx = ui.ctx().clone();
+        let pal = Pal::new(dark);
+        let area = ui.max_rect();
+        let resp = ui.allocate_rect(area, Sense::click_and_drag());
+        let sid = self.sid();
+
+        // scrolling
+        if resp.hovered() {
+            let d = ui.input(|i| i.smooth_scroll_delta());
+            self.scroll -= d;
+        }
+        self.scroll = self.scroll.max(Vec2::ZERO);
+        let mut g = self.geometry(area);
+        if self.scroll_into_view {
+            self.scroll_into_view = false;
+            let r = g.cell(self.cursor.0, self.cursor.1);
+            let cells = g.cells;
+            if r.top() < cells.top() {
+                self.scroll.y -= cells.top() - r.top();
+            } else if r.bottom() > cells.bottom() {
+                self.scroll.y += r.bottom() - cells.bottom();
+            }
+            if r.left() < cells.left() {
+                self.scroll.x -= cells.left() - r.left();
+            } else if r.right() > cells.right() {
+                self.scroll.x += r.right() - cells.right();
+            }
+            self.scroll = self.scroll.max(Vec2::ZERO);
+            g = self.geometry(area);
+        }
+
+        self.pointer(ui, &ctx, &resp, &g, area);
+        let g = self.geometry(area);
+        self.geo = Some(g.clone());
+        self.paint(ui, &ctx, &pal, &g, area, dark, sid);
+        self.cell_editor(ui, &g, &pal, sid);
+        self.offer_banner(ui, &g, sid);
+        self.context_menu(&resp);
+    }
+
+    fn pointer(&mut self, ui: &mut Ui, ctx: &egui::Context, resp: &egui::Response, g: &Geo, area: Rect) {
+        let (pos, pressed, down, dbl, secondary, mods) = ui.input(|i| {
+            (
+                i.pointer.interact_pos(),
+                i.pointer.primary_pressed(),
+                i.pointer.primary_down(),
+                i.pointer.button_double_clicked(PointerButton::Primary),
+                i.pointer.secondary_pressed(),
+                i.modifiers,
+            )
+        });
+        let Some(pos) = pos else { return };
+        let over_editor = self.editor_rect.is_some_and(|r| r.contains(pos));
+        let in_cells = g.cells.contains(pos);
+        let in_col_hdr = pos.y >= area.top() && pos.y < g.cells.top() && pos.x >= g.cells.left();
+        let in_row_hdr = pos.x >= area.left() && pos.x < g.cells.left() && pos.y >= g.cells.top();
+        let hovering = resp.hovered() && !over_editor;
+
+        // hover feedback
+        if hovering && matches!(self.drag, Drag::None) {
+            if in_col_hdr && self.col_border(g, pos).is_some() {
+                ctx.set_cursor_icon(CursorIcon::ResizeColumn);
+            } else if in_row_hdr && self.row_border(g, pos).is_some() {
+                ctx.set_cursor_icon(CursorIcon::ResizeRow);
+            } else if in_cells {
+                if let Some((hit, _)) = self.chart_hit(pos) {
+                    match hit.prov {
+                        Prov::Literal(k) => {
+                            ctx.set_cursor_icon(CursorIcon::ResizeVertical);
+                            chart_view::tooltip(ctx, pos, &format!("{}\ndrag to edit {}", hit.label, self.label(k)));
+                        }
+                        Prov::Derived(k) => {
+                            let inputs = self.eng.upstream_inputs(k);
+                            let names: Vec<String> = inputs
+                                .iter()
+                                .take(4)
+                                .map(|i| match self.eng.name_of(*i) {
+                                    Some(n) => format!("{n} ({})", self.label(*i)),
+                                    None => self.label(*i),
+                                })
+                                .collect();
+                            let solve = if names.is_empty() { "no literal inputs upstream".to_string() } else { format!("would solve for: {}", names.join(", ")) };
+                            chart_view::tooltip(ctx, pos, &format!("{}\nderived from {} — not draggable yet\n{solve}", hit.label, self.label(k)));
+                        }
+                        Prov::None => chart_view::tooltip(ctx, pos, &hit.label),
+                    }
+                } else if self.fill_handle(g).contains(pos) && self.edit.is_none() {
+                    ctx.set_cursor_icon(CursorIcon::Crosshair);
+                } else if mods.alt {
+                    let (r, c) = (g.row_at(pos.y), g.col_at(pos.x));
+                    if let Some(k) = self.sheet().key(r, c) {
+                        if ops::cell_literal(&self.eng.wb.cell_text(k)).is_some() {
+                            ctx.set_cursor_icon(CursorIcon::ResizeHorizontal);
+                        }
+                    }
+                }
+            }
+        }
+
+        if secondary && hovering && in_cells {
+            let (r, c) = (g.row_at(pos.y), g.col_at(pos.x));
+            if !self.sel().contains(r, c) {
+                self.commit();
+                self.select(r, c, false);
+            }
+        }
+
+        if pressed && hovering {
+            self.press(ctx, g, pos, area, dbl, mods, in_cells, in_col_hdr, in_row_hdr);
+        }
+
+        if down {
+            self.drag_update(ctx, g, pos, mods);
+        } else if !matches!(self.drag, Drag::None) {
+            self.drag_end();
+        }
+    }
+
+    fn col_border(&self, g: &Geo, pos: Pos2) -> Option<usize> {
+        let c = g.col_at(pos.x);
+        if (pos.x - g.x(c + 1)).abs() < 5.0 {
+            Some(c)
+        } else if c > 0 && (pos.x - g.x(c)).abs() < 5.0 {
+            Some(c - 1)
+        } else {
+            None
+        }
+    }
+    fn row_border(&self, g: &Geo, pos: Pos2) -> Option<usize> {
+        let r = g.row_at(pos.y);
+        if (pos.y - g.y(r + 1)).abs() < 4.0 {
+            Some(r)
+        } else if r > 0 && (pos.y - g.y(r)).abs() < 4.0 {
+            Some(r - 1)
+        } else {
+            None
+        }
+    }
+    fn fill_handle(&self, g: &Geo) -> Rect {
+        let s = self.sel();
+        let br = g.rect(s.r0, s.c0, s.r1, s.c1).right_bottom();
+        Rect::from_center_size(br, Vec2::splat(9.0))
+    }
+    fn chart_hit(&self, pos: Pos2) -> Option<(&PointHit, &YAxis)> {
+        self.chart_hits
+            .iter()
+            .filter(|(h, _)| h.pos.distance(pos) < 8.0)
+            .min_by(|a, b| a.0.pos.distance(pos).partial_cmp(&b.0.pos.distance(pos)).unwrap())
+            .map(|(h, a)| (h, a))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn press(
+        &mut self,
+        ctx: &egui::Context,
+        g: &Geo,
+        pos: Pos2,
+        area: Rect,
+        dbl: bool,
+        mods: Modifiers,
+        in_cells: bool,
+        in_col_hdr: bool,
+        in_row_hdr: bool,
+    ) {
+        let ix = self.sheet_ix;
+        if in_col_hdr {
+            if let Some(c) = self.col_border(g, pos) {
+                if dbl {
+                    self.autofit(ctx, c);
+                } else {
+                    let cid = self.sheet().cols.get(c).unwrap();
+                    let w0 = self.sheet().col_widths.get(&cid).copied().unwrap_or(DEF_W);
+                    self.drag = Drag::Col { col: c, x0: pos.x, w0 };
+                }
+                return;
+            }
+            let c = g.col_at(pos.x);
+            if self.editing_formula() {
+                let last = self.sheet().used_extent().0.max(1) - 1;
+                self.insert_ref(ctx, (0, c), (last, c));
+                return;
+            }
+            self.commit();
+            let last = self.sheet().rows.len() - 1;
+            if mods.shift {
+                self.anchor.0 = 0;
+                self.cursor = (last, c);
+            } else {
+                self.anchor = (0, c);
+                self.cursor = (last, c);
+            }
+            return;
+        }
+        if in_row_hdr {
+            if let Some(r) = self.row_border(g, pos) {
+                let rid = self.sheet().rows.get(r).unwrap();
+                let h0 = self.sheet().row_heights.get(&rid).copied().unwrap_or(DEF_H);
+                self.drag = Drag::Row { row: r, y0: pos.y, h0 };
+                return;
+            }
+            self.commit();
+            let r = g.row_at(pos.y);
+            let last = self.sheet().cols.len() - 1;
+            if mods.shift {
+                self.anchor.1 = 0;
+                self.cursor = (r, last);
+            } else {
+                self.anchor = (r, 0);
+                self.cursor = (r, last);
+            }
+            return;
+        }
+        if !in_cells {
+            if pos.x < g.cells.left() && pos.y < g.cells.top() && area.contains(pos) {
+                self.commit();
+                let end = (self.sheet().rows.len() - 1, self.sheet().cols.len() - 1);
+                self.anchor = (0, 0);
+                self.cursor = end;
+            }
+            return;
+        }
+        let (r, c) = (g.row_at(pos.y), g.col_at(pos.x));
+        // 1. click-to-reference while editing a formula
+        if self.editing_formula() && !dbl {
+            if let Some(ed) = &mut self.edit {
+                ed.ref_span = None;
+            }
+            self.insert_ref(ctx, (r, c), (r, c));
+            self.drag = Drag::Ref { start: (r, c) };
+            return;
+        }
+        // 2. dragging a chart point bound to a literal cell
+        if self.edit.is_none() {
+            if let Some((hit, axis)) = self.chart_hit(pos) {
+                if let Prov::Literal(k) = hit.prov {
+                    let text = self.eng.wb.cell_text(k);
+                    let disp = match self.eng.result(k) {
+                        Some(Ok(Value::Num(n))) => Some(n.q.disp.clone()),
+                        _ => None,
+                    };
+                    if let (Some(lit), Some(cell_disp)) = (ops::cell_literal(&text), disp) {
+                        let axis = axis.clone();
+                        self.drag = Drag::Point { key: k, orig: self.eng.wb.cell(k).cloned(), text, lit, axis, cell_disp };
+                        return;
+                    }
+                }
+            }
+        }
+        // 3. alt-drag scrubs a literal number
+        if mods.alt && self.edit.is_none() {
+            let k = self.eng.wb.sheets[ix].key(r, c).unwrap();
+            let text = self.eng.wb.cell_text(k);
+            if let Some(lit) = ops::cell_literal(&text) {
+                self.select(r, c, false);
+                self.drag = Drag::Scrub { key: k, orig: self.eng.wb.cell(k).cloned(), text, lit, x0: pos.x };
+                return;
+            }
+        }
+        // 4. fill handle
+        if self.edit.is_none() && self.fill_handle(g).contains(pos) {
+            let s = self.sel();
+            self.drag = Drag::Fill { src: s, dst: s };
+            return;
+        }
+        // 5. plain selection
+        self.commit();
+        if dbl {
+            self.select(r, c, false);
+            self.start_edit(ctx, r, c, None, false);
+            return;
+        }
+        self.select(r, c, mods.shift);
+        self.offer = self.offer.filter(|(k, _)| self.eng.wb.pos(*k) == Some((r, c)));
+        self.drag = Drag::Select;
+    }
+
+    fn drag_update(&mut self, ctx: &egui::Context, g: &Geo, pos: Pos2, mods: Modifiers) {
+        let autoscroll = matches!(self.drag, Drag::Select | Drag::Ref { .. } | Drag::Fill { .. });
+        if autoscroll {
+            let c = g.cells;
+            let mut d = Vec2::ZERO;
+            if pos.y > c.bottom() {
+                d.y = (pos.y - c.bottom()).min(60.0) * 0.5;
+            } else if pos.y < c.top() {
+                d.y = (pos.y - c.top()).max(-60.0) * 0.5;
+            }
+            if pos.x > c.right() {
+                d.x = (pos.x - c.right()).min(60.0) * 0.5;
+            } else if pos.x < c.left() {
+                d.x = (pos.x - c.left()).max(-60.0) * 0.5;
+            }
+            if d != Vec2::ZERO {
+                self.scroll = (self.scroll + d).max(Vec2::ZERO);
+                ctx.request_repaint();
+            }
+        }
+        let cp = Pos2::new(pos.x.clamp(g.cells.left() + 1.0, g.cells.right() - 1.0), pos.y.clamp(g.cells.top() + 1.0, g.cells.bottom() - 1.0));
+        let (r, c) = (g.row_at(cp.y), g.col_at(cp.x));
+        let ix = self.sheet_ix;
+        match &mut self.drag {
+            Drag::None => {}
+            Drag::Select => {
+                self.cursor = (r, c);
+            }
+            Drag::Ref { start } => {
+                let start = *start;
+                self.insert_ref(ctx, start, (r, c));
+            }
+            Drag::Fill { src, dst } => {
+                let s = *src;
+                let down = r as i64 - s.r1 as i64;
+                let up = s.r0 as i64 - r as i64;
+                let right = c as i64 - s.c1 as i64;
+                let left = s.c0 as i64 - c as i64;
+                let v = down.max(up);
+                let h = right.max(left);
+                *dst = if v <= 0 && h <= 0 {
+                    s
+                } else if v >= h {
+                    if down > 0 { CRect { r1: r, ..s } } else { CRect { r0: r, ..s } }
+                } else if right > 0 {
+                    CRect { c1: c, ..s }
+                } else {
+                    CRect { c0: c, ..s }
+                };
+                ctx.set_cursor_icon(CursorIcon::Crosshair);
+            }
+            Drag::Col { col, x0, w0 } => {
+                let w = (*w0 + pos.x - *x0).max(24.0);
+                let cid = self.eng.wb.sheets[ix].cols.get(*col).unwrap();
+                self.eng.wb.sheets[ix].col_widths.insert(cid, w);
+                ctx.set_cursor_icon(CursorIcon::ResizeColumn);
+            }
+            Drag::Row { row, y0, h0 } => {
+                let h = (*h0 + pos.y - *y0).max(14.0);
+                let rid = self.eng.wb.sheets[ix].rows.get(*row).unwrap();
+                self.eng.wb.sheets[ix].row_heights.insert(rid, h);
+                ctx.set_cursor_icon(CursorIcon::ResizeRow);
+            }
+            Drag::Scrub { key, text, lit, x0, .. } => {
+                let fast = if mods.shift { 10.0 } else { 1.0 };
+                let steps = ((pos.x - *x0) / 4.0).round() as f64 * fast;
+                let new = ops::replace_span(text, &lit.span, &ops::scrub(lit, steps));
+                let key = *key;
+                ctx.set_cursor_icon(CursorIcon::ResizeHorizontal);
+                if new != self.eng.wb.cell_text(key) {
+                    let t = std::time::Instant::now();
+                    self.eng.set_text(key, &new);
+                    self.last_recalc_ms = t.elapsed().as_secs_f64() * 1000.0;
+                }
+            }
+            Drag::Point { key, text, lit, axis, cell_disp, .. } => {
+                ctx.set_cursor_icon(CursorIcon::ResizeVertical);
+                let shown = axis.from_screen(pos.y);
+                let canonical = axis.disp.to_canonical(shown);
+                let v = cell_disp.to_display(canonical);
+                // resolution: about 1/200 of the axis, never coarser than the literal
+                let step = (axis.y1 - axis.y0).abs() / 200.0 / cell_disp.factor.abs().max(1e-300) * axis.disp.factor.abs();
+                let dec = if step > 0.0 { (-step.log10()).ceil().max(0.0) as usize } else { 0 };
+                let decimals = dec.max(lit.decimals).min(10);
+                let new = ops::replace_span(text, &lit.span, &ops::format_lit(v, decimals, false));
+                let key = *key;
+                if new != self.eng.wb.cell_text(key) {
+                    let t = std::time::Instant::now();
+                    self.eng.set_text(key, &new);
+                    self.last_recalc_ms = t.elapsed().as_secs_f64() * 1000.0;
+                }
+            }
+        }
+    }
+
+    fn drag_end(&mut self) {
+        let drag = std::mem::replace(&mut self.drag, Drag::None);
+        match drag {
+            Drag::Fill { src, dst } => {
+                if src != dst {
+                    let e = ops::fill(&mut self.eng, src, dst);
+                    self.exec(e);
+                    self.anchor = (dst.r0, dst.c0);
+                    self.cursor = (dst.r1, dst.c1);
+                }
+            }
+            Drag::Scrub { key, orig, .. } | Drag::Point { key, orig, .. } => {
+                if self.eng.wb.cell(key) != orig.as_ref() {
+                    self.undo.push(Edit::Cells(vec![(key, orig)]));
+                    self.redo.clear();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn autofit(&mut self, ctx: &egui::Context, c: usize) {
+        let s = self.sheet();
+        let font = FontId::proportional(FONT);
+        let pal = Pal::new(false);
+        let mut texts = Vec::new();
+        for r in 0..s.used_extent().0 {
+            if let Some(k) = s.key(r, c) {
+                if let Some((t, _, _)) = self.cell_display(k, &pal) {
+                    texts.push(t);
+                }
+            }
+        }
+        let w = texts
+            .iter()
+            .map(|t| ctx.fonts_mut(|f| f.layout_no_wrap(t.clone(), font.clone(), Color32::WHITE).size().x))
+            .fold(0.0f32, f32::max);
+        let cid = self.sheet().cols.get(c).unwrap();
+        let ix = self.sheet_ix;
+        self.eng.wb.sheets[ix].col_widths.insert(cid, (w + 18.0).clamp(40.0, 600.0));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn paint(&mut self, ui: &mut Ui, ctx: &egui::Context, pal: &Pal, g: &Geo, area: Rect, dark: bool, sid: SheetId) {
+        let painter = ui.painter_at(area);
+        painter.rect_filled(g.cells, 0.0, pal.bg);
+        let cp = painter.with_clip_rect(g.cells);
+        let (rows, cols) = g.visible();
+        let font = FontId::proportional(FONT);
+        let s = self.sheet();
+        let sel = self.sel();
+
+        // input tint
+        let inputs: HashSet<CellKey> = self.eng.wb.names.values().filter(|d| d.input).map(|d| d.cell).collect();
+        // grid lines
+        for c in cols.clone() {
+            let x = g.x(c + 1) - 0.5;
+            cp.line_segment([Pos2::new(x, g.cells.top()), Pos2::new(x, g.cells.bottom())], Stroke::new(1.0, pal.grid));
+        }
+        for r in rows.clone() {
+            let y = g.y(r + 1) - 0.5;
+            cp.line_segment([Pos2::new(g.cells.left(), y), Pos2::new(g.cells.right(), y)], Stroke::new(1.0, pal.grid));
+        }
+        let is_blank = |r: usize, c: usize| match s.key(r, c) {
+            Some(k) => matches!(self.eng.shown(k), Shown::Empty),
+            None => true,
+        };
+        // cells
+        let mut anchors: HashSet<CellKey> = HashSet::new();
+        let mut blockers: Vec<CellKey> = Vec::new();
+        for r in rows.clone() {
+            for c in cols.clone() {
+                let Some(k) = s.key(r, c) else { continue };
+                let rect = g.cell(r, c);
+                if inputs.contains(&k) {
+                    cp.rect_filled(rect.shrink2(Vec2::new(0.0, 0.5)).translate(Vec2::new(-0.5, -0.5)), 0.0, pal.input_fill);
+                }
+                if let Some(a) = self.eng.spill_anchor(k) {
+                    anchors.insert(a);
+                }
+                if self.eng.spill_size(k).is_some() {
+                    anchors.insert(k);
+                }
+                if let Shown::Error(e) = self.eng.shown(k) {
+                    if let ErrKind::SpillBlocked(b) = e.kind {
+                        blockers.push(b);
+                    }
+                }
+                if let Some((text, color, right)) = self.cell_display(k, pal) {
+                    let mut clip = rect;
+                    if !right {
+                        // text overflows into empty cells to its right
+                        let needed = ctx.fonts_mut(|f| f.layout_no_wrap(text.clone(), font.clone(), color).size().x) + 10.0;
+                        let mut c2 = c + 1;
+                        while clip.width() < needed && c2 < g.col_x.len() - 1 && is_blank(r, c2) && c2 < cols.end + 8 {
+                            clip.max.x = g.x(c2 + 1);
+                            c2 += 1;
+                        }
+                        if clip.max.x > rect.max.x {
+                            let cover = Rect::from_min_max(Pos2::new(rect.right(), rect.top()), Pos2::new(clip.right() - 1.0, rect.bottom() - 1.0));
+                            cp.rect_filled(cover, 0.0, pal.bg);
+                        }
+                    }
+                    let tp = cp.with_clip_rect(clip.shrink2(Vec2::new(3.0, 0.0)).intersect(g.cells));
+                    let (pos, align) = if right {
+                        (Pos2::new(rect.right() - 5.0, rect.center().y), Align2::RIGHT_CENTER)
+                    } else {
+                        (Pos2::new(rect.left() + 5.0, rect.center().y), Align2::LEFT_CENTER)
+                    };
+                    tp.text(pos, align, text, font.clone(), color);
+                }
+            }
+        }
+        // spills and charts
+        let mut chart_hits = Vec::new();
+        for a in anchors {
+            let Some((r0, c0)) = self.eng.wb.pos(a) else { continue };
+            let Some((nr, nc)) = self.eng.spill_size(a) else { continue };
+            let rect = g.rect(r0, c0, r0 + nr - 1, c0 + nc - 1);
+            if let Some(Ok(Value::Chart(ch))) = self.eng.result(a) {
+                let (axis, hits) = chart_view::draw(&cp, rect, ch, dark);
+                for h in hits {
+                    chart_hits.push((h, axis.clone()));
+                }
+            } else {
+                dashed_rect(&cp, rect.shrink(1.0), Stroke::new(1.0, pal.spill));
+            }
+        }
+        for b in blockers {
+            if let Some((r, c)) = self.eng.wb.pos(b) {
+                if b.sheet == sid {
+                    let rect = g.cell(r, c);
+                    cp.rect_filled(rect, 0.0, pal.err.gamma_multiply(0.12));
+                    dashed_rect(&cp, rect.shrink(1.0), Stroke::new(1.5, pal.err));
+                }
+            }
+        }
+        // cycles
+        for cyc in &self.eng.cycles {
+            for k in cyc {
+                if k.sheet == sid {
+                    if let Some((r, c)) = self.eng.wb.pos(*k) {
+                        cp.rect_filled(g.cell(r, c), 0.0, pal.err.gamma_multiply(0.15));
+                        cp.rect_stroke(g.cell(r, c).shrink(1.0), 0.0, Stroke::new(1.5, pal.err), StrokeKind::Inside);
+                    }
+                }
+            }
+        }
+        // trace
+        let cur = s.key(self.cursor.0, self.cursor.1);
+        if self.trace && self.edit.is_none() {
+            if let Some(k) = cur {
+                let pre_c = Color32::from_rgb(0x3b, 0x82, 0xf6);
+                let dep_c = Color32::from_rgb(0xf9, 0x73, 0x16);
+                for p in self.eng.precedents(k) {
+                    if p.sheet == sid {
+                        if let Some((r, c)) = self.eng.wb.pos(p) {
+                            cp.rect_filled(g.cell(r, c), 0.0, pre_c.gamma_multiply(0.10));
+                            cp.rect_stroke(g.cell(r, c).shrink(1.0), 0.0, Stroke::new(1.0, pre_c.gamma_multiply(0.7)), StrokeKind::Inside);
+                        }
+                    }
+                }
+                for d in self.eng.dependents(k) {
+                    if d.sheet == sid {
+                        if let Some((r, c)) = self.eng.wb.pos(d) {
+                            cp.rect_filled(g.cell(r, c), 0.0, dep_c.gamma_multiply(0.10));
+                            cp.rect_stroke(g.cell(r, c).shrink(1.0), 0.0, Stroke::new(1.0, dep_c.gamma_multiply(0.8)), StrokeKind::Inside);
+                        }
+                    }
+                }
+            }
+        }
+        // references in the formula being edited
+        if let Some(ed) = &self.edit {
+            for h in syntax::analyze(&ed.text, &self.eng.wb, ed.key.sheet) {
+                if h.sheet != sid {
+                    continue;
+                }
+                let rect = g.rect(h.r0, h.c0, h.r1, h.c1);
+                cp.rect_filled(rect, 0.0, h.color.gamma_multiply(0.12));
+                cp.rect_stroke(rect.shrink(1.0), 0.0, Stroke::new(2.0, h.color), StrokeKind::Inside);
+            }
+        }
+        // selection
+        let srect = g.rect(sel.r0, sel.c0, sel.r1, sel.c1);
+        if sel.rows() > 1 || sel.cols() > 1 {
+            cp.rect_filled(srect, 0.0, pal.sel_fill);
+        }
+        cp.rect_stroke(srect, 0.0, Stroke::new(1.5, pal.sel), StrokeKind::Inside);
+        cp.rect_stroke(g.cell(self.cursor.0, self.cursor.1), 0.0, Stroke::new(2.0, pal.sel), StrokeKind::Inside);
+        if self.edit.is_none() {
+            cp.rect_filled(self.fill_handle(g).shrink(1.5), 1.0, pal.sel);
+            cp.rect_stroke(self.fill_handle(g).shrink(1.5), 1.0, Stroke::new(1.0, pal.bg), StrokeKind::Outside);
+        }
+        if let Drag::Fill { dst, .. } = &self.drag {
+            dashed_rect(&cp, g.rect(dst.r0, dst.c0, dst.r1, dst.c1), Stroke::new(1.5, pal.sel));
+        }
+
+        // headers
+        let hp = painter.with_clip_rect(Rect::from_min_max(Pos2::new(g.cells.left(), area.top()), Pos2::new(area.right(), g.cells.top())));
+        let small = FontId::proportional(11.5);
+        for c in cols.clone() {
+            let rect = Rect::from_min_max(Pos2::new(g.x(c), area.top()), Pos2::new(g.x(c + 1), g.cells.top()));
+            let on = c >= sel.c0 && c <= sel.c1;
+            hp.rect_filled(rect, 0.0, if on { pal.hdr_sel } else { pal.hdr });
+            hp.line_segment([rect.right_top(), rect.right_bottom()], Stroke::new(1.0, pal.grid));
+            hp.text(rect.center(), Align2::CENTER_CENTER, a1::col_name(c), small.clone(), if on { pal.sel } else { pal.muted });
+        }
+        let vp = painter.with_clip_rect(Rect::from_min_max(Pos2::new(area.left(), g.cells.top()), Pos2::new(g.cells.left(), area.bottom())));
+        for r in rows.clone() {
+            let rect = Rect::from_min_max(Pos2::new(area.left(), g.y(r)), Pos2::new(g.cells.left(), g.y(r + 1)));
+            let on = r >= sel.r0 && r <= sel.r1;
+            vp.rect_filled(rect, 0.0, if on { pal.hdr_sel } else { pal.hdr });
+            vp.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, pal.grid));
+            vp.text(rect.center(), Align2::CENTER_CENTER, (r + 1).to_string(), small.clone(), if on { pal.sel } else { pal.muted });
+        }
+        painter.rect_filled(Rect::from_min_max(area.min, g.cells.min), 0.0, pal.hdr);
+        painter.line_segment([Pos2::new(area.left(), g.cells.top()), Pos2::new(area.right(), g.cells.top())], Stroke::new(1.0, pal.grid));
+        painter.line_segment([Pos2::new(g.cells.left(), area.top()), Pos2::new(g.cells.left(), area.bottom())], Stroke::new(1.0, pal.grid));
+        self.chart_hits = chart_hits;
+    }
+
+    fn cell_editor(&mut self, ui: &mut Ui, g: &Geo, pal: &Pal, sid: SheetId) {
+        self.editor_rect = None;
+        let Some(ed) = &self.edit else { return };
+        if ed.key.sheet != sid {
+            return;
+        }
+        let Some((r, c)) = self.eng.wb.pos(ed.key) else { return };
+        let cell = g.cell(r, c);
+        if !g.cells.intersects(cell) {
+            return;
+        }
+        let text_w = ui.fonts_mut(|f| f.layout_no_wrap(ed.text.clone(), FontId::proportional(FONT), Color32::WHITE).size().x);
+        let w = (text_w + 24.0).max(cell.width()).min((g.cells.right() - cell.left()).max(cell.width()));
+        let rect = Rect::from_min_size(cell.min, Vec2::new(w, cell.height()));
+        ui.painter().rect_filled(rect, 0.0, pal.bg);
+        ui.painter().rect_stroke(rect, 0.0, Stroke::new(2.0, pal.sel), StrokeKind::Inside);
+        self.editor_rect = Some(rect);
+        let mut child = ui.new_child(UiBuilder::new().max_rect(rect.shrink2(Vec2::new(5.0, 2.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        let out = self.editor(&mut child, Id::new("cell_editor"), rect.width() - 10.0, false);
+        self.editor_keys(ui, &out);
+    }
+
+    fn offer_banner(&mut self, ui: &mut Ui, g: &Geo, sid: SheetId) {
+        let Some((k, dst)) = self.offer else { return };
+        if k.sheet != sid || self.edit.is_some() {
+            return;
+        }
+        let Some((r, c)) = self.eng.wb.pos(k) else { return };
+        let cell = g.cell(r, c);
+        if !g.cells.contains(cell.left_bottom()) {
+            return;
+        }
+        let label = format!("↓ extend to {}:{}  ⌘E", a1::cell_name(dst.r0, dst.c0), a1::cell_name(dst.r1, dst.c1));
+        egui::Area::new(Id::new("offer"))
+            .fixed_pos(cell.right_top() + Vec2::new(10.0, -2.0))
+            .order(egui::Order::Foreground)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui.button(label).clicked() {
+                            self.accept_offer();
+                        }
+                        if ui.small_button("dismiss").clicked() {
+                            self.offer = None;
+                        }
+                    });
+                });
+            });
+    }
+
+    fn context_menu(&mut self, resp: &egui::Response) {
+        resp.context_menu(|ui| {
+            let sel = self.sel();
+            let sid = sel.sheet;
+            let col = a1::col_name(self.cursor.1);
+            if ui.button(format!("Insert {} row(s) above", sel.rows())).clicked() {
+                let ids = (0..sel.rows()).map(|_| wbs_core::ids::RowId(wbs_core::ids::fresh_id())).collect();
+                self.exec(Edit::InsertRows { sheet: sid, at: sel.r0, ids });
+                ui.close();
+            }
+            if ui.button(format!("Insert {} row(s) below", sel.rows())).clicked() {
+                let ids = (0..sel.rows()).map(|_| wbs_core::ids::RowId(wbs_core::ids::fresh_id())).collect();
+                self.exec(Edit::InsertRows { sheet: sid, at: sel.r1 + 1, ids });
+                ui.close();
+            }
+            if ui.button(format!("Delete row(s) {}–{}", sel.r0 + 1, sel.r1 + 1)).clicked() {
+                self.exec(Edit::DeleteRows { sheet: sid, at: sel.r0, n: sel.rows() });
+                ui.close();
+            }
+            ui.separator();
+            if ui.button(format!("Insert {} column(s) left", sel.cols())).clicked() {
+                let ids = (0..sel.cols()).map(|_| wbs_core::ids::ColId(wbs_core::ids::fresh_id())).collect();
+                self.exec(Edit::InsertCols { sheet: sid, at: sel.c0, ids });
+                ui.close();
+            }
+            if ui.button(format!("Insert {} column(s) right", sel.cols())).clicked() {
+                let ids = (0..sel.cols()).map(|_| wbs_core::ids::ColId(wbs_core::ids::fresh_id())).collect();
+                self.exec(Edit::InsertCols { sheet: sid, at: sel.c1 + 1, ids });
+                ui.close();
+            }
+            if ui.button(format!("Delete column(s) {}–{}", a1::col_name(sel.c0), a1::col_name(sel.c1))).clicked() {
+                self.exec(Edit::DeleteCols { sheet: sid, at: sel.c0, n: sel.cols() });
+                ui.close();
+            }
+            ui.separator();
+            let rows = if sel.rows() > 1 { sel } else { CRect { r0: 0, r1: self.sheet().used_extent().0.max(1) - 1, ..sel } };
+            if ui.button(format!("Sort rows {}–{} by {col} ↑", rows.r0 + 1, rows.r1 + 1)).clicked() {
+                let e = ops::sort_rows(&self.eng, rows, self.cursor.1, true);
+                self.exec(e);
+                ui.close();
+            }
+            if ui.button(format!("Sort rows {}–{} by {col} ↓", rows.r0 + 1, rows.r1 + 1)).clicked() {
+                let e = ops::sort_rows(&self.eng, rows, self.cursor.1, false);
+                self.exec(e);
+                ui.close();
+            }
+            ui.separator();
+            if ui.add_enabled(sel.rows() > 1, egui::Button::new("Fill down  ⌘D")).clicked() {
+                self.fill_down();
+                ui.close();
+            }
+        });
+    }
+}
+
+fn dashed_rect(p: &Painter, r: Rect, stroke: Stroke) {
+    let pts = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
+    p.extend(egui::Shape::dashed_line(&pts, stroke, 4.0, 3.0));
+}

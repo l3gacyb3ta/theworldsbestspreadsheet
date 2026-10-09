@@ -1,0 +1,12 @@
+[package]
+name = "wbs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wbs-core = { path = "../core" }
+eframe = "0.36"
+serde_json = "1"
+
+[dev-dependencies]
+egui_kittest = { version = "0.36", features = ["wgpu", "snapshot", "eframe"] }
