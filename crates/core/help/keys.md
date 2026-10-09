@@ -19,6 +19,9 @@
 | F2 or double-click | edit the cell's text |
 | Enter, Tab | confirm |
 | Escape | cancel |
+| ↓ / ↑ while completions show | highlight a completion |
+| Enter, Tab on a highlighted completion | insert it and keep editing |
+| Escape while completions show | close the list (again to cancel) |
 | Delete / Backspace | clear the selection |
 | click / drag a cell while editing | insert a reference / range |
 

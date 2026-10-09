@@ -292,6 +292,125 @@ fn completions_insert_words() {
     assert_eq!(shown(&h, "E25"), "3.5");
 }
 
+fn edit_text(h: &Harness<'static, App>) -> Option<String> {
+    h.state().edit.as_ref().map(|e| e.text.clone())
+}
+
+#[test]
+fn completions_from_the_keyboard() {
+    let mut h = harness();
+    { let p = center(&h, "E25"); click(&mut h, p, Modifiers::NONE); }
+    typ(&mut h, "=A10:A15 m");
+    let cands = h.state().completions().unwrap().cands;
+    assert!(cands.len() >= 2, "{cands:?}");
+    // nothing is highlighted until ↓; ↓ ↓ ↑ ↓ lands on the second
+    key(&mut h, Key::ArrowDown);
+    key(&mut h, Key::ArrowDown);
+    key(&mut h, Key::ArrowUp);
+    key(&mut h, Key::ArrowDown);
+    assert_eq!(h.state().edit.as_ref().unwrap().pick, Some(1));
+    shot(&mut h, "24_completion_highlighted");
+    key(&mut h, Key::Enter);
+    // inserted, still editing, caret after the word: typing carries on
+    assert_eq!(edit_text(&h).unwrap(), format!("=A10:A15 {} ", cands[1]));
+    assert_eq!(h.state().cursor, (24, 4));
+    typ(&mut h, "x");
+    assert_eq!(edit_text(&h).unwrap(), format!("=A10:A15 {} x", cands[1]));
+    shot(&mut h, "25_completion_accepted");
+    // ↑ above the first suggestion clears the highlight, so Enter commits as typed
+    key(&mut h, Key::Escape);
+    key(&mut h, Key::Escape);
+    { let p = center(&h, "E25"); click(&mut h, p, Modifiers::NONE); }
+    typ(&mut h, "=A10:A15 mea");
+    key(&mut h, Key::ArrowDown);
+    key(&mut h, Key::ArrowUp);
+    assert_eq!(h.state().edit.as_ref().unwrap().pick, None);
+    // Tab with the list showing but nothing highlighted keeps commit-and-move-right
+    key(&mut h, Key::Tab);
+    assert!(h.state().edit.is_none());
+    assert_eq!(source(&h, "E25"), "=A10:A15 mea");
+    assert_eq!(h.state().cursor, (24, 5));
+}
+
+#[test]
+fn tab_accepts_and_enter_without_a_list_commits() {
+    let mut h = harness();
+    { let p = center(&h, "E25"); click(&mut h, p, Modifiers::NONE); }
+    typ(&mut h, "=A10:A15 mea");
+    key(&mut h, Key::ArrowDown);
+    key(&mut h, Key::Tab);
+    assert_eq!(edit_text(&h).unwrap(), "=A10:A15 mean ");
+    // no partial word at the caret: no list, ↓/↑ do nothing harmful, Enter commits and moves down
+    assert!(h.state().completions().is_none());
+    key(&mut h, Key::ArrowDown);
+    key(&mut h, Key::ArrowUp);
+    assert_eq!(edit_text(&h).unwrap(), "=A10:A15 mean ");
+    key(&mut h, Key::Enter);
+    assert!(h.state().edit.is_none());
+    assert_eq!(shown(&h, "E25"), "3.5");
+    assert_eq!(h.state().cursor, (25, 4));
+}
+
+#[test]
+fn escape_closes_completions_then_cancels() {
+    let mut h = harness();
+    { let p = center(&h, "E25"); click(&mut h, p, Modifiers::NONE); }
+    let top = grid_top(&h);
+    typ(&mut h, "=A10:A15 mea");
+    key(&mut h, Key::ArrowDown);
+    key(&mut h, Key::Escape);
+    assert_eq!(edit_text(&h).as_deref(), Some("=A10:A15 mea"), "first Escape only closes the list");
+    assert!(h.state().completions().is_none());
+    shot(&mut h, "26_completion_closed");
+    // it stays closed until the text changes
+    key(&mut h, Key::ArrowDown);
+    assert!(h.state().completions().is_none());
+    typ(&mut h, "n");
+    assert!(h.state().completions().is_none(), "no completion for a whole word");
+    typ(&mut h, " m");
+    assert!(h.state().completions().is_some(), "typing reopens the list");
+    key(&mut h, Key::Escape);
+    key(&mut h, Key::Escape);
+    assert!(h.state().edit.is_none(), "second Escape cancels the edit");
+    assert_eq!(source(&h, "E25"), "");
+    assert_eq!(grid_top(&h), top);
+}
+
+#[test]
+fn unit_completion_from_the_keyboard() {
+    let mut h = harness();
+    { let p = center(&h, "H25"); click(&mut h, p, Modifiers::NONE); }
+    // the demo declares USD; complete it inside `[…`
+    typ(&mut h, "=3 [U");
+    let c = h.state().completions().expect("unit completions");
+    assert!(c.unit);
+    assert_eq!(c.cands[0], "USD");
+    key(&mut h, Key::ArrowDown);
+    shot(&mut h, "27_unit_completion");
+    key(&mut h, Key::Enter);
+    assert_eq!(edit_text(&h).unwrap(), "=3 [USD");
+    typ(&mut h, "]");
+    key(&mut h, Key::Enter);
+    assert_eq!(shown(&h, "H25"), "3 USD");
+}
+
+#[test]
+fn completions_work_in_the_formula_bar() {
+    let mut h = harness();
+    { let p = center(&h, "E25"); click(&mut h, p, Modifiers::NONE); }
+    // start in the cell, then click the formula bar (right of the address label): the bar editor gets focus
+    typ(&mut h, "=A10:A15 mea");
+    let addr = h.get_all_by_label("E25").map(|n| n.rect()).min_by(|a, b| a.top().total_cmp(&b.top())).unwrap().right_center();
+    click(&mut h, addr + Vec2::new(400.0, 0.0), Modifiers::NONE);
+    assert!(h.state().edit.as_ref().unwrap().in_bar);
+    key(&mut h, Key::End);
+    key(&mut h, Key::ArrowDown);
+    key(&mut h, Key::Enter);
+    assert_eq!(edit_text(&h).unwrap(), "=A10:A15 mean ");
+    key(&mut h, Key::Enter);
+    assert_eq!(shown(&h, "E25"), "3.5");
+}
+
 #[test]
 fn errors_are_explained_and_linked() {
     let mut h = harness();

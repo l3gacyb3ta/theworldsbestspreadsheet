@@ -6,6 +6,13 @@ pub(super) struct EditorOut {
     pub lost_focus: bool,
 }
 
+/// Completions offered while editing: the byte span they replace and the candidates.
+pub(super) struct Comps {
+    pub span: Range<usize>,
+    pub cands: Vec<String>,
+    pub unit: bool,
+}
+
 /// Sheet-tab state: an inline rename, a delete waiting for confirmation, a tab being dragged.
 #[derive(Default)]
 pub(super) struct Tabs {
@@ -138,72 +145,40 @@ impl App {
         let at = syntax::char_to_byte(&text, caret_ci);
         let kind = classify(&text);
         let tok = syntax::token_at(&text, at);
+        let comps = self.completions();
+        let pick = ed.pick.filter(|p| comps.as_ref().is_some_and(|c| *p < c.cands.len()));
         let mut insert: Option<(Range<usize>, String)> = None;
         ui.horizontal(|ui| {
             ui.add_space(176.0);
-            // 1. what the token at the caret is
-            let hint = match tok.as_ref().map(|t| &t.tok) {
-                Some(wbs_core::lex::Tok::Word(w)) => help_view::word_hint(&self.eng, w).or_else(|| {
-                    self.eng.wb.names.get(w.as_str()).map(|n| format!("{w} — name for {}", self.eng.wb.cell_label(n.cell, Some(home))))
-                }),
-                Some(t) => help::doc_for_token(t).map(help_view::doc_line),
-                None => None,
-            };
-            match hint {
-                Some(h) => {
-                    if ui.link(RichText::new(h).monospace().size(12.0)).on_hover_text("F1 for full help").clicked() {
-                        self.context_help();
+            // 1. what the highlighted completion, or else the token at the caret, is
+            if let (Some(p), Some(c)) = (pick, &comps) {
+                ui.label(RichText::new(self.completion_hint(c, &c.cands[p], home)).monospace().size(12.0));
+            } else {
+                let hint = match tok.as_ref().map(|t| &t.tok) {
+                    Some(wbs_core::lex::Tok::Word(w)) => help_view::word_hint(&self.eng, w).or_else(|| {
+                        self.eng.wb.names.get(w.as_str()).map(|n| format!("{w} — name for {}", self.eng.wb.cell_label(n.cell, Some(home))))
+                    }),
+                    Some(t) => help::doc_for_token(t).map(help_view::doc_line),
+                    None => None,
+                };
+                match hint {
+                    Some(h) => {
+                        if ui.link(RichText::new(h).monospace().size(12.0)).on_hover_text("F1 for full help").clicked() {
+                            self.context_help();
+                        }
                     }
-                }
-                None => {
-                    ui.label(RichText::new(kind_hint(kind)).small().weak());
-                }
-            }
-            // 2. completions for a partial word or unit
-            let mut cands: Vec<String> = Vec::new();
-            let mut replace: Option<Range<usize>> = None;
-            if let Some(t) = &tok {
-                if t.span.end == at {
-                    match &t.tok {
-                        wbs_core::lex::Tok::Word(w) if w.chars().next().is_some_and(|c| c.is_alphabetic()) => {
-                            let mut pool: Vec<String> = BUILTINS
-                                .iter()
-                                .map(|(n, _, _)| n.to_string())
-                                .filter(|n| n.chars().next().is_some_and(|c| c.is_alphabetic()))
-                                .collect();
-                            pool.extend(self.eng.symbols().words.keys().cloned());
-                            pool.extend(self.eng.wb.names.keys().cloned());
-                            cands = pool.into_iter().filter(|n| n.starts_with(w.as_str()) && n != w).collect();
-                            replace = Some(t.span.clone());
-                        }
-                        wbs_core::lex::Tok::Bad(_) | wbs_core::lex::Tok::Unit(_) | wbs_core::lex::Tok::To(_) => {
-                            // inside `[…`: complete the last unit name
-                            let src = &text[t.span.start..at];
-                            if let Some(open) = src.find('[') {
-                                let inner = &src[open + 1..];
-                                let frag_start = inner.rfind(['*', '/', '(', ' ']).map(|i| i + 1).unwrap_or(0);
-                                let frag = &inner[frag_start..];
-                                if !frag.is_empty() && !inner.ends_with(']') {
-                                    let start = t.span.start + open + 1 + frag_start;
-                                    cands = self.eng.symbols().units.keys().filter(|u| u.starts_with(frag) && *u != frag).cloned().collect();
-                                    replace = Some(start..at);
-                                }
-                            }
-                        }
-                        _ => {}
+                    None => {
+                        ui.label(RichText::new(kind_hint(kind)).small().weak());
                     }
                 }
             }
-            cands.sort_by_key(|c| (c.len(), c.clone()));
-            cands.dedup();
-            if let Some(span) = replace {
-                if !cands.is_empty() {
-                    ui.label(RichText::new("   complete:").small().weak());
-                }
-                for c in cands.iter().take(8) {
-                    let tip = help_view::word_hint(&self.eng, c).unwrap_or_else(|| format!("[{c}]"));
-                    if ui.small_button(RichText::new(c).monospace()).on_hover_text(tip).clicked() {
-                        insert = Some((span.clone(), c.clone()));
+            // 2. completions for a partial word or unit (↓/↑ highlight, Tab/Enter accept)
+            if let Some(c) = &comps {
+                ui.label(RichText::new("   complete:").small().weak());
+                for (i, cand) in c.cands.iter().enumerate() {
+                    let b = egui::Button::new(RichText::new(cand).monospace()).small().selected(pick == Some(i));
+                    if ui.add(b).on_hover_text(self.completion_hint(c, cand, home)).clicked() {
+                        insert = Some((c.span.clone(), cand.clone()));
                     }
                 }
             }
@@ -228,17 +203,114 @@ impl App {
             });
         }
         if let Some((span, word)) = insert {
+            self.complete(span, &word, ctx.cumulative_pass_nr() + 1);
             if let Some(ed) = &mut self.edit {
-                ed.text.replace_range(span.clone(), &word);
-                let end = span.start + word.len();
-                if !ed.text[end..].starts_with(' ') && !word.is_empty() && !ed.text[..span.start].ends_with('[') {
-                    ed.text.insert(end, ' ');
-                }
-                let caret = ed.text[..end].chars().count() + usize::from(ed.text[end..].starts_with(' '));
-                ed.cursor = caret;
                 ed.in_bar = in_bar;
-                self.focus_req = Some((ctx.cumulative_pass_nr() + 1, caret));
             }
+        }
+    }
+
+    /// Completions for the partial word (or unit, inside `[…`) just before the caret, shortest first.
+    /// `None` when there are none or the list was closed with Escape.
+    pub(super) fn completions(&self) -> Option<Comps> {
+        let ed = self.edit.as_ref()?;
+        if ed.comp_closed {
+            return None;
+        }
+        let text = &ed.text;
+        let at = syntax::char_to_byte(text, ed.cursor);
+        let t = syntax::token_at(text, at)?;
+        if t.span.end != at {
+            return None;
+        }
+        let (mut cands, span, unit): (Vec<String>, Range<usize>, bool) = match &t.tok {
+            wbs_core::lex::Tok::Word(w) if w.chars().next().is_some_and(|c| c.is_alphabetic()) => {
+                let mut pool: Vec<String> =
+                    BUILTINS.iter().map(|(n, _, _)| n.to_string()).filter(|n| n.chars().next().is_some_and(|c| c.is_alphabetic())).collect();
+                pool.extend(self.eng.symbols().words.keys().cloned());
+                pool.extend(self.eng.wb.names.keys().cloned());
+                (pool.into_iter().filter(|n| n.starts_with(w.as_str()) && n != w).collect(), t.span.clone(), false)
+            }
+            wbs_core::lex::Tok::Bad(_) | wbs_core::lex::Tok::Unit(_) | wbs_core::lex::Tok::To(_) => {
+                // inside `[…`: complete the last unit name
+                let src = &text[t.span.start..at];
+                let open = src.find('[')?;
+                let inner = &src[open + 1..];
+                let frag_start = inner.rfind(['*', '/', '(', ' ']).map(|i| i + 1).unwrap_or(0);
+                let frag = &inner[frag_start..];
+                if frag.is_empty() || inner.ends_with(']') {
+                    return None;
+                }
+                let start = t.span.start + open + 1 + frag_start;
+                (self.eng.symbols().units.keys().filter(|u| u.starts_with(frag) && *u != frag).cloned().collect(), start..at, true)
+            }
+            _ => return None,
+        };
+        cands.sort_by_key(|c| (c.len(), c.clone()));
+        cands.dedup();
+        cands.truncate(8);
+        (!cands.is_empty()).then_some(Comps { span, cands, unit })
+    }
+
+    /// One line describing a completion candidate.
+    fn completion_hint(&self, c: &Comps, cand: &str, home: SheetId) -> String {
+        if !c.unit {
+            return help_view::word_hint(&self.eng, cand)
+                .or_else(|| self.eng.wb.names.get(cand).map(|n| format!("{cand} — name for {}", self.eng.wb.cell_label(n.cell, Some(home)))))
+                .unwrap_or_else(|| cand.to_string());
+        }
+        match self.eng.units_list().into_iter().find(|(m, ..)| m == cand) {
+            Some((_, k, Some(i))) => format!("[{cand}]: {} · defined at {}", i.dim, self.eng.wb.cell_label(k, Some(home))),
+            _ => format!("[{cand}]"),
+        }
+    }
+
+    /// Replace `span` of the edit text with a completion, add a separating space after a word, and put the
+    /// caret after it (from pass `pass` on).
+    fn complete(&mut self, span: Range<usize>, word: &str, pass: u64) {
+        let Some(ed) = &mut self.edit else { return };
+        ed.text.replace_range(span.clone(), word);
+        let end = span.start + word.len();
+        if !ed.text[end..].starts_with(' ') && !word.is_empty() && !ed.text[..span.start].ends_with('[') {
+            ed.text.insert(end, ' ');
+        }
+        let caret = ed.text[..end].chars().count() + usize::from(ed.text[end..].starts_with(' '));
+        ed.cursor = caret;
+        ed.pick = None;
+        ed.comp_closed = false;
+        self.focus_req = Some((pass, caret));
+    }
+
+    /// Completion keys, before the focused editor sees them: ↓/↑ move the highlight, Tab/Enter accept the
+    /// highlighted completion, Escape closes the list. With no list (or nothing highlighted for Tab/Enter)
+    /// the keys are left to the editor.
+    fn completion_keys(&mut self, ctx: &egui::Context) {
+        let Some(c) = self.completions() else { return };
+        let plain = |k: Key| ctx.input_mut(|i| i.modifiers.is_none() && i.consume_key(Modifiers::NONE, k));
+        // Enter/Tab also accept with Shift held (consume_key ignores Shift)
+        let accept = |k: Key| ctx.input_mut(|i| i.consume_key(Modifiers::NONE, k));
+        let ed = self.edit.as_mut().unwrap();
+        let before = (ed.pick, ed.comp_closed);
+        if plain(Key::ArrowDown) {
+            ed.pick = Some(ed.pick.map_or(0, |p| (p + 1).min(c.cands.len() - 1)));
+        }
+        if plain(Key::ArrowUp) {
+            ed.pick = ed.pick.and_then(|p| p.checked_sub(1));
+        }
+        if plain(Key::Escape) {
+            ed.pick = None;
+            ed.comp_closed = true;
+        }
+        if let Some(p) = ed.pick.filter(|p| *p < c.cands.len()) {
+            if accept(Key::Enter) || accept(Key::Tab) {
+                self.complete(c.span.clone(), &c.cands[p], ctx.cumulative_pass_nr());
+                ctx.request_repaint();
+                return;
+            }
+        }
+        if (ed.pick, ed.comp_closed) != before {
+            // the strip may already be drawn this frame
+            ctx.request_repaint();
         }
     }
 
@@ -304,6 +376,9 @@ impl App {
     /// The shared formula editor (used in the cell and in the formula bar).
     pub(super) fn editor(&mut self, ui: &mut Ui, id: Id, width: f32, in_bar: bool) -> EditorOut {
         let ctx = ui.ctx().clone();
+        if ctx.memory(|m| m.has_focus(id)) {
+            self.completion_keys(&ctx);
+        }
         let ed = self.edit.as_ref().unwrap();
         let refs = syntax::analyze(&ed.text, &self.eng.wb, ed.key.sheet);
         // underline the error while the text is still what produced it
@@ -324,24 +399,35 @@ impl App {
             .layouter(&mut layouter)
             .show(ui);
         let resp = out.response.response.clone();
+        let mut placed = false;
         if let Some((pass, caret)) = self.focus_req {
             if ed.in_bar == in_bar && ctx.cumulative_pass_nr() >= pass {
                 resp.request_focus();
                 out.state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(caret))));
                 out.state.store(&ctx, id);
                 self.focus_req = None;
+                placed = true;
             }
         }
         if resp.changed() {
             ed.ref_span = None;
+            ed.pick = None;
+            ed.comp_closed = false;
         }
         if resp.has_focus() {
             ed.in_bar = in_bar;
-            if let Some(cr) = out.cursor_range {
+            if let Some(cr) = out.cursor_range.filter(|_| !placed) {
                 if cr.primary.index.0 != ed.cursor {
                     ed.cursor = cr.primary.index.0;
+                    ed.pick = None;
+                    ed.comp_closed = false;
                 }
             }
+            // while the completion list shows, Escape (and Tab, once one is highlighted) are ours, not egui's focus keys
+            let list = self.completions().is_some();
+            let picked = list && self.edit.as_ref().is_some_and(|e| e.pick.is_some());
+            let filter = egui::EventFilter { tab: picked, horizontal_arrows: true, vertical_arrows: true, escape: list };
+            ctx.memory_mut(|m| m.set_focus_lock_filter(id, filter));
         }
         EditorOut { lost_focus: resp.lost_focus() }
     }
