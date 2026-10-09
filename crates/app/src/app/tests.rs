@@ -5,8 +5,14 @@ use super::*;
 use egui_kittest::{kittest::Queryable, Harness};
 
 fn harness() -> Harness<'static, App> {
+    harness_dt(0.25)
+}
+
+/// A harness whose frames are `dt` seconds apart (short enough for double clicks).
+fn harness_dt(dt: f32) -> Harness<'static, App> {
     let mut h = Harness::builder()
         .with_size([1440.0, 900.0])
+        .with_step_dt(dt)
         .wgpu()
         .build_eframe(|_| App::new(PathBuf::from("/nonexistent/ui-test.wbs.json")));
     h.run_steps(3);
@@ -198,6 +204,17 @@ fn drag_bar_writes_literal() {
     let v: f64 = source(&h, "B47").split_whitespace().next().unwrap().parse().unwrap();
     assert!(v > 180.0, "{v}");
     assert!(source(&h, "B47").ends_with("[widget]"));
+    // an integer literal stays an integer
+    assert!(!source(&h, "B47").contains('.'), "{}", source(&h, "B47"));
+    // a literal with decimals keeps them
+    let k = h.state().eng.wb.sheets[0].key(45, 1).unwrap();
+    h.state_mut().eng.set_text(k, "135.00 [widget]");
+    h.run_steps(2);
+    let hit = h.state().chart_hits.iter().find(|(p, _)| p.label.starts_with("Q3")).map(|(p, _)| p.pos).unwrap();
+    drag(&mut h, hit, hit - Vec2::new(0.0, 23.0), Modifiers::NONE);
+    let src = source(&h, "B46");
+    assert!(src != "135.00 [widget]" && src.ends_with("[widget]"), "{src}");
+    assert_eq!(src.split_whitespace().next().unwrap().split('.').nth(1).map(str::len), Some(2), "{src}");
 }
 
 #[test]
@@ -550,4 +567,264 @@ fn edit_commands_reach_the_grid_and_the_editor() {
     let injected = std::mem::take(&mut h.state_mut().inject);
     assert!(matches!(injected[..], [Event::Key { key: Key::Z, pressed: true, modifiers, .. }] if modifiers.command));
     assert_eq!(source(&h, "H25"), "42", "grid undo didn't run");
+}
+
+// ---- sheet tabs ----------------------------------------------------------------
+
+/// Short steps so two clicks count as a double-click.
+fn quick_harness() -> Harness<'static, App> {
+    let mut h = Harness::builder()
+        .with_size([1440.0, 900.0])
+        .with_step_dt(1.0 / 60.0)
+        .wgpu()
+        .build_eframe(|_| App::new(PathBuf::from("/nonexistent/ui-test.wbs.json")));
+    h.run_steps(3);
+    h
+}
+
+fn sheet_names(h: &Harness<'static, App>) -> Vec<String> {
+    h.state().eng.wb.sheets.iter().map(|s| s.name.clone()).collect()
+}
+
+fn tab(h: &Harness<'static, App>, name: &str) -> Pos2 {
+    h.get_by_label(name).rect().center()
+}
+
+fn double_click(h: &mut Harness<'static, App>, pos: Pos2) {
+    h.event(Event::PointerMoved(pos));
+    h.run_steps(1);
+    for _ in 0..2 {
+        press(h, pos, true, Modifiers::NONE);
+        press(h, pos, false, Modifiers::NONE);
+    }
+    h.run_steps(2);
+}
+
+fn tab_menu(h: &mut Harness<'static, App>, name: &str, item: &str) {
+    h.get_by_label(name).click_secondary();
+    h.run_steps(2);
+    h.get_by_label(item).click();
+    h.run_steps(3);
+}
+
+fn undo(h: &mut Harness<'static, App>) {
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run_steps(3);
+}
+
+#[test]
+fn sheet_tabs_add_rename_delete_undo() {
+    let mut h = quick_harness();
+    assert_eq!(sheet_names(&h), ["model", "units"]);
+    h.get_by_label("+").click();
+    h.run_steps(30); // long enough that the next click isn't a double-click
+    assert_eq!(sheet_names(&h), ["model", "units", "Sheet3"]);
+    assert_eq!(h.state().sheet_ix, 2, "the new sheet is shown");
+    // double-click renames inline
+    { let p = tab(&h, "Sheet3"); double_click(&mut h, p); }
+    assert!(h.state().tabs.rename.is_some());
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    typ(&mut h, "inputs");
+    shot(&mut h, "18_sheet_renaming");
+    key(&mut h, Key::Enter);
+    assert_eq!(sheet_names(&h), ["model", "units", "inputs"]);
+    assert!(h.state().tabs.rename.is_none());
+    { let p = center(&h, "A1"); click(&mut h, p, Modifiers::NONE); }
+    typ(&mut h, "7");
+    key(&mut h, Key::Enter);
+    // reference it from the model sheet
+    h.get_by_label("model").click();
+    h.run_steps(3);
+    assert_eq!(h.state().sheet_ix, 0);
+    { let p = center(&h, "H25"); click(&mut h, p, Modifiers::NONE); }
+    typ(&mut h, "=inputs!A1 2 *");
+    key(&mut h, Key::Enter);
+    assert_eq!(shown(&h, "H25"), "14");
+    shot(&mut h, "19_sheet_tabs");
+    // delete it from the tab's menu: the reference breaks visibly
+    tab_menu(&mut h, "inputs", "Delete");
+    assert_eq!(sheet_names(&h), ["model", "units"]);
+    assert_eq!(h.state().sheet_ix, 0);
+    assert_eq!(source(&h, "H25"), "=#ref! 2 *");
+    assert_eq!(shown(&h, "H25"), "ERR reference to a deleted sheet");
+    { let p = center(&h, "H25"); click(&mut h, p, Modifiers::NONE); }
+    shot(&mut h, "20_sheet_deleted");
+    // undo brings the sheet and the reference back
+    undo(&mut h);
+    assert_eq!(sheet_names(&h), ["model", "units", "inputs"]);
+    assert_eq!(h.state().sheet_ix, 2, "the restored sheet is shown");
+    assert_eq!(shown(&h, "A1"), "7");
+    h.get_by_label("model").click();
+    h.run_steps(3);
+    assert_eq!(source(&h, "H25"), "=inputs!A1 2 *");
+    assert_eq!(shown(&h, "H25"), "14");
+    // undo the formula, the 7, the rename, then the add; the shown sheet stays valid
+    undo(&mut h);
+    undo(&mut h);
+    undo(&mut h);
+    assert_eq!(sheet_names(&h), ["model", "units", "Sheet3"]);
+    undo(&mut h);
+    assert_eq!(sheet_names(&h), ["model", "units"]);
+    assert!(h.state().sheet_ix < 2);
+}
+
+#[test]
+fn sheet_rename_escape_and_invalid_names() {
+    let mut h = quick_harness();
+    { let p = tab(&h, "model"); double_click(&mut h, p); }
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    typ(&mut h, "units");
+    key(&mut h, Key::Enter);
+    assert_eq!(sheet_names(&h), ["model", "units"], "names stay unique");
+    assert!(h.state().status.as_deref().unwrap_or("").contains("already a sheet"));
+    { let p = tab(&h, "model"); double_click(&mut h, p); }
+    typ(&mut h, "zzz");
+    key(&mut h, Key::Escape);
+    assert_eq!(sheet_names(&h), ["model", "units"], "escape cancels");
+    assert!(h.state().undo.is_empty(), "nothing to undo");
+}
+
+#[test]
+fn sheet_duplicate_move_and_drag() {
+    let mut h = quick_harness();
+    tab_menu(&mut h, "model", "Duplicate");
+    assert_eq!(sheet_names(&h), ["model", "model copy", "units"]);
+    assert_eq!(h.state().sheet_ix, 1);
+    assert_eq!(shown(&h, "G22"), "4", "the copy computes on its own");
+    tab_menu(&mut h, "model copy", "Move right");
+    assert_eq!(sheet_names(&h), ["model", "units", "model copy"]);
+    assert_eq!(h.state().sheet_ix, 2, "the moved sheet stays shown");
+    // drag the last tab to the front
+    let from = tab(&h, "model copy");
+    let to = tab(&h, "model") - Vec2::new(20.0, 0.0);
+    h.event(Event::PointerMoved(from));
+    h.run_steps(1);
+    press(&mut h, from, true, Modifiers::NONE);
+    for i in 1..=6 {
+        h.event(Event::PointerMoved(from + (to - from) * (i as f32 / 6.0)));
+        h.run_steps(1);
+    }
+    assert_eq!(sheet_names(&h), ["model", "units", "model copy"], "nothing moves until the drop");
+    shot(&mut h, "21_sheet_dragging");
+    press(&mut h, to, false, Modifiers::NONE);
+    h.run_steps(2);
+    assert_eq!(sheet_names(&h), ["model copy", "model", "units"]);
+    assert_eq!(h.state().sheet_ix, 0);
+    shot(&mut h, "22_sheet_dragged");
+    undo(&mut h);
+    undo(&mut h);
+    undo(&mut h);
+    assert_eq!(sheet_names(&h), ["model", "units"]);
+    assert!(h.state().sheet_ix < 2);
+}
+
+#[test]
+fn deleting_units_asks_first() {
+    let mut h = quick_harness();
+    tab_menu(&mut h, "units", "Delete");
+    assert_eq!(sheet_names(&h), ["model", "units"], "not yet");
+    assert!(h.state().tabs.confirm_delete.is_some());
+    shot(&mut h, "23_delete_units_confirm");
+    h.get_by_label("Cancel").click();
+    h.run_steps(2);
+    assert!(h.state().tabs.confirm_delete.is_none());
+    tab_menu(&mut h, "units", "Delete");
+    h.get_by_label("Delete sheet").click();
+    h.run_steps(3);
+    assert_eq!(sheet_names(&h), ["model"]);
+    assert!(shown(&h, "B3").starts_with("ERR"), "{}", shown(&h, "B3"));
+    shot(&mut h, "24_units_deleted");
+    undo(&mut h);
+    assert_eq!(sheet_names(&h), ["model", "units"]);
+    h.get_by_label("model").click();
+    h.run_steps(3);
+    assert_eq!(shown(&h, "B3"), "120,000 USD");
+}
+
+// ---- papercuts -----------------------------------------------------------------
+
+fn grid_top(h: &Harness<'static, App>) -> f32 {
+    h.state().geo.as_ref().unwrap().cells.top()
+}
+
+#[test]
+fn editing_keeps_the_grid_still() {
+    let mut h = harness();
+    { let p = center(&h, "H25"); click(&mut h, p, Modifiers::NONE); }
+    let top = grid_top(&h);
+    shot(&mut h, "18_layout_idle");
+    // typing a program brings up the hint and stack rows
+    typ(&mut h, "=A10:A15 mea");
+    assert_eq!(grid_top(&h), top);
+    shot(&mut h, "19_layout_editing");
+    key(&mut h, Key::Escape);
+    assert!(h.state().edit.is_none());
+    assert_eq!(grid_top(&h), top);
+    // F2 on a number, and on text
+    { let p = center(&h, "B3"); click(&mut h, p, Modifiers::NONE); }
+    key(&mut h, Key::F2);
+    assert!(h.state().edit.is_some());
+    assert_eq!(grid_top(&h), top);
+    key(&mut h, Key::Escape);
+    { let p = center(&h, "A3"); click(&mut h, p, Modifiers::NONE); }
+    key(&mut h, Key::F2);
+    assert_eq!(grid_top(&h), top);
+}
+
+#[test]
+fn double_click_edits_an_error_cell() {
+    // 60 fps, so two clicks land inside egui's double-click window
+    let mut h = harness_dt(1.0 / 60.0);
+    { let p = center(&h, "H25"); click(&mut h, p, Modifiers::NONE); }
+    typ(&mut h, "=B3 B5 +");
+    key(&mut h, Key::Enter);
+    h.run_steps(60);
+    let p = center(&h, "H25");
+    click(&mut h, p, Modifiers::NONE);
+    assert!(h.state().edit.is_none());
+    h.run_steps(60);
+    shot(&mut h, "20_error_selected");
+    // a real double click: press and release on separate frames; egui reports it on the second release
+    click(&mut h, p, Modifiers::NONE);
+    assert!(h.state().edit.is_none(), "one click only selects");
+    click(&mut h, p, Modifiers::NONE);
+    // the in-cell editor holds the source (with the bad `+` underlined), not "#err"
+    assert_eq!(h.state().edit.as_ref().map(|e| e.text.as_str()), Some("=B3 B5 +"));
+    assert_eq!(h.state().edit.as_ref().unwrap().key, h.state().eng.wb.sheets[0].key(24, 7).unwrap());
+    h.event(Event::PointerMoved(p + Vec2::new(0.0, 80.0)));
+    h.run_steps(2);
+    shot(&mut h, "21_error_cell_editing");
+    key(&mut h, Key::End);
+    key(&mut h, Key::Backspace);
+    typ(&mut h, "*");
+    key(&mut h, Key::Enter);
+    assert_eq!(source(&h, "H25"), "=B3 B5 *");
+    assert_eq!(shown(&h, "H25"), "2,880,000 USD");
+}
+
+#[test]
+fn wide_numbers_never_look_like_other_numbers() {
+    let mut h = harness();
+    let p = center(&h, "E20");
+    h.hover_at(p);
+    h.run_steps(1);
+    h.event(Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -500.0), modifiers: Modifiers::NONE, phase: egui::TouchPhase::Move });
+    h.run_steps(20);
+    // H38 has an empty G38 to its left, so it runs into it; so does H40, next to a label that stops at F40;
+    // H41's neighbours are taken by a longer label, so it shows ###
+    let wide = "=123456 [km] to[mm]";
+    for (at, text) in [("H38", wide), ("E40", "'a label that runs on"), ("H40", wide), ("E41", "'a label that runs on and on, right up to column H"), ("H41", wide)] {
+        let p = center(&h, at);
+        click(&mut h, p, Modifiers::NONE);
+        typ(&mut h, text);
+        key(&mut h, Key::Enter);
+    }
+    assert_eq!(shown(&h, "H38"), "123,456,000,000 mm");
+    h.hover_at(center(&h, "C45"));
+    h.run_steps(2);
+    shot(&mut h, "22_wide_numbers");
+    // hovering ### shows the value
+    h.hover_at(center(&h, "H41"));
+    h.run_steps(2);
+    shot(&mut h, "23_wide_number_hover");
 }

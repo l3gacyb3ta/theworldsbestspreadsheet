@@ -18,6 +18,14 @@ Inserting, deleting, moving or sorting rows and columns never breaks or rewrites
 
 "Relative" matters only when you copy or fill: then a relative reference moves with the formula, and an `$`-absolute one stays put.
 
+## Sheets
+
+References point at sheets the same way, so managing sheets never rewrites a formula. Double-click a tab to rename it, right-click it to duplicate, move or delete it, and drag tabs to reorder them. All of these are undoable.
+
+- **Rename**: references to the sheet show the new name; nothing else changes.
+- **Duplicate**: in the copy, references without a sheet name point at the copy itself; references naming a sheet keep pointing at that sheet. Unit, dimension and word declarations in the copy are duplicates, so the copies show "already defined".
+- **Delete**: references into the deleted sheet show `#ref!` and the error "reference to a deleted sheet" — undo brings the sheet and the references back. The last sheet can't be deleted. Deleting a sheet that declares units, like `units`, removes those units, so every cell that uses them shows an error; the status bar asks before doing it.
+
 ## Names
 
 Name any cell in the inspector. Names may contain letters, digits, `_` and `.`, like `rates.eur`. Use them anywhere a reference goes:
@@ -35,6 +43,13 @@ Tick **input** next to a name and the cell is tinted yellow and listed in the In
 ## Empty cells
 
 A reference to an empty cell is an error, not zero. If you mean zero, type 0. This makes a missing input visible instead of silently wrong.
+
+The same goes for a range with an empty cell in it. When gaps are expected, say so: a range ending in `?` ([[A1:B5?]]) leaves its empty cells out.
+
+```example
+A1:A6 sum            ⇒ ! A6 is empty
+A1:A6? sum           ⇒ 15
+```
 
 ## Cycles
 

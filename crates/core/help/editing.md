@@ -33,6 +33,10 @@ Type a program next to a filled column and the sheet offers to extend it down to
 
 Drag a header border to resize; double-click it to fit the contents. Right-click for insert, delete, sort and fill. Sorting moves whole rows, and references follow the cells they point at.
 
+## Sheets
+
+The tabs at the bottom are the sheets; **+** adds one. Double-click a tab to rename it, right-click it to duplicate, move or delete it, or drag it to a new place. See [[#references]] for what happens to references.
+
 ## Undo
 
 ⌘Z undoes, ⇧⌘Z redoes. A whole scrub or chart drag is one step.

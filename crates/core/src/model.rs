@@ -379,6 +379,34 @@ impl Workbook {
     pub fn sheet_by_name(&self, name: &str) -> Option<&Sheet> {
         self.sheets.iter().find(|s| s.name == name)
     }
+    /// Position of a sheet in the tab order.
+    pub fn sheet_index(&self, id: SheetId) -> Option<usize> {
+        self.sheets.iter().position(|s| s.id == id)
+    }
+    /// A sheet name must be non-empty, on one line, and not used by another sheet. Returns it trimmed.
+    pub fn check_sheet_name(&self, name: &str, renaming: Option<SheetId>) -> Result<String, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("a sheet needs a name".into());
+        }
+        if name.chars().any(char::is_control) {
+            return Err("sheet names are a single line".into());
+        }
+        match self.sheet_by_name(name) {
+            Some(s) if Some(s.id) != renaming => Err(format!("there is already a sheet named {name}")),
+            _ => Ok(name.to_string()),
+        }
+    }
+    /// `base`, or `base 2`, `base 3`… whichever is free.
+    pub fn free_sheet_name(&self, base: &str) -> String {
+        let mut name = base.to_string();
+        let mut n = 2;
+        while self.sheet_by_name(&name).is_some() {
+            name = format!("{base} {n}");
+            n += 1;
+        }
+        name
+    }
     pub fn cell(&self, k: CellKey) -> Option<&Cell> {
         self.sheet(k.sheet)?.cell(k.row, k.col)
     }
@@ -480,7 +508,8 @@ impl Workbook {
         for t in lex::lex(text) {
             let piece = match &t.tok {
                 Tok::Ref(r) => self.resolve_a1(r, home, None).map(Piece::Ref),
-                Tok::Range(a, b) => {
+                // a trailing `?` is outside the token's span, so it stays as text
+                Tok::Range(a, b, _) => {
                     let ra = self.resolve_a1(a, home, None);
                     let sid = ra.and_then(|x| x.sheet).unwrap_or(home);
                     let rb = self.resolve_a1(b, home, Some(sid));

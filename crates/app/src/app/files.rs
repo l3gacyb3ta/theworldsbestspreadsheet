@@ -148,7 +148,7 @@ impl App {
         self.chart_hits.clear();
         self.bar_scrub = None;
         self.input_scrub = None;
-        self.sheet_name_buf.clear();
+        self.tabs = Default::default();
         self.mark_clean();
     }
 

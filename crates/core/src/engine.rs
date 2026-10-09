@@ -6,7 +6,7 @@
 
 use crate::eval::{run_program, run_traced, Env, TraceStep};
 use crate::ids::*;
-use crate::model::{classify, Cell, Kind, NameDef, Piece, StoredRef, Workbook};
+use crate::model::{classify, Cell, Kind, NameDef, Piece, Sheet, StoredRef, Workbook};
 use crate::parse::{declares, CompileError, Compiled, Compiler, Declares, Dep, Symbols};
 use crate::units::{Dim, Quant, UnitInfo};
 use crate::value::{Num, Prov, Text, Value};
@@ -71,6 +71,9 @@ impl Region {
     fn contains(&self, sheet: SheetId, r: usize, c: usize) -> bool {
         sheet == self.sheet && r >= self.r0 && r < self.r0 + self.rows && c >= self.c0 && c < self.c0 + self.cols
     }
+    fn overlaps(&self, o: &Region) -> bool {
+        self.sheet == o.sheet && self.r0 < o.r0 + o.rows && o.r0 < self.r0 + self.rows && self.c0 < o.c0 + o.cols && o.c0 < self.c0 + self.cols
+    }
 }
 
 /// What a grid position shows.
@@ -91,6 +94,12 @@ pub enum Edit {
     DeleteCols { sheet: SheetId, at: usize, n: usize },
     PermuteRows { sheet: SheetId, at: usize, ids: Vec<RowId> },
     Names(BTreeMap<String, NameDef>),
+    /// Puts a whole sheet, with its own ids, at `at` in the tab order.
+    InsertSheet { at: usize, sheet: Box<Sheet> },
+    /// Removes a sheet; the inverse carries it whole, so undo restores the same ids.
+    DeleteSheet { sheet: SheetId },
+    MoveSheet { sheet: SheetId, to: usize },
+    RenameSheet { sheet: SheetId, name: String },
     Batch(Vec<Edit>),
 }
 
@@ -118,8 +127,8 @@ impl<'a> Env for View<'a> {
     fn cell_value(&self, k: CellKey) -> Result<Value, String> {
         self.0.ref_value(k)
     }
-    fn range_value(&self, sheet: SheetId, a: &StoredRef, b: &StoredRef) -> Result<Value, String> {
-        self.0.range_value(sheet, a, b)
+    fn range_value(&self, sheet: SheetId, a: &StoredRef, b: &StoredRef, gaps: bool) -> Result<Value, String> {
+        self.0.range_value(sheet, a, b, gaps)
     }
     fn unit_info(&self, name: &str) -> Result<UnitInfo, String> {
         let Some(k) = self.0.syms.units.get(name) else { return Err(format!("unknown unit {name}")) };
@@ -336,6 +345,9 @@ impl Engine {
     // ---- value access used by the interpreter ----------------------------
 
     fn ref_value(&self, k: CellKey) -> Result<Value, String> {
+        if self.wb.sheet(k.sheet).is_none() {
+            return Err("reference to a deleted sheet".into());
+        }
         if let Some(r) = self.results.get(&k) {
             return match r {
                 Ok(v) => {
@@ -399,7 +411,10 @@ impl Engine {
         }
     }
 
-    fn range_value(&self, sheet: SheetId, a: &StoredRef, b: &StoredRef) -> Result<Value, String> {
+    /// The cells of a range as one array. With `gaps` (`A1:B5?`), empty cells
+    /// are skipped and the rest form a list, row by row; otherwise an empty
+    /// cell is an error.
+    fn range_value(&self, sheet: SheetId, a: &StoredRef, b: &StoredRef, gaps: bool) -> Result<Value, String> {
         let s = self.wb.sheet(sheet).ok_or("sheet was deleted")?;
         let (r0, c0, r1, c1) = s.range_bounds(a, b).ok_or("range refers to deleted cells")?;
         let (nr, nc) = (r1 - r0 + 1, c1 - c0 + 1);
@@ -410,6 +425,9 @@ impl Engine {
         for r in r0..=r1 {
             for c in c0..=c1 {
                 let k = s.key(r, c).unwrap();
+                if gaps && !self.nodes.contains_key(&k) && matches!(self.shown(k), Shown::Empty) {
+                    continue;
+                }
                 match self.scalar_at(k)? {
                     Value::Num(n) => {
                         if !texts.is_empty() {
@@ -442,7 +460,13 @@ impl Engine {
                 }
             }
         }
-        let shape = if nr == 1 || nc == 1 { vec![nr * nc] } else { vec![nr, nc] };
+        let shape = if gaps {
+            vec![nums.len() + texts.len()]
+        } else if nr == 1 || nc == 1 {
+            vec![nr * nc]
+        } else {
+            vec![nr, nc]
+        };
         if !texts.is_empty() {
             return Ok(Value::Text(Text { shape, data: Arc::new(texts) }));
         }
@@ -555,6 +579,35 @@ impl Engine {
                 *structural = true;
                 Edit::Names(std::mem::replace(&mut self.wb.names, n))
             }
+            Edit::InsertSheet { at, sheet } => {
+                if self.wb.sheet(sheet.id).is_some() {
+                    return Edit::Batch(vec![]);
+                }
+                *structural = true;
+                let id = sheet.id;
+                let mut sheet = *sheet;
+                sheet.reindex();
+                self.wb.sheets.insert(at.min(self.wb.sheets.len()), sheet);
+                Edit::DeleteSheet { sheet: id }
+            }
+            Edit::DeleteSheet { sheet } => {
+                // the last sheet stays: the app always shows one
+                let Some(at) = self.wb.sheet_index(sheet).filter(|_| self.wb.sheets.len() > 1) else { return Edit::Batch(vec![]) };
+                *structural = true;
+                Edit::InsertSheet { at, sheet: Box::new(self.wb.sheets.remove(at)) }
+            }
+            Edit::MoveSheet { sheet, to } => {
+                let Some(from) = self.wb.sheet_index(sheet) else { return Edit::Batch(vec![]) };
+                *structural = true;
+                let s = self.wb.sheets.remove(from);
+                self.wb.sheets.insert(to.min(self.wb.sheets.len()), s);
+                Edit::MoveSheet { sheet, to: from }
+            }
+            Edit::RenameSheet { sheet, name } => {
+                let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
+                *structural = true;
+                Edit::RenameSheet { sheet, name: std::mem::replace(&mut s.name, name) }
+            }
             Edit::Batch(es) => {
                 let mut inv: Vec<Edit> = es.into_iter().map(|e| self.apply_raw(e, touched, structural)).collect();
                 inv.reverse();
@@ -611,6 +664,45 @@ impl Engine {
         Ok(self.apply(Edit::Names(names)))
     }
 
+    // ---- sheets: these build an edit for `apply` (and the undo stack) ----------
+
+    /// A new empty sheet at `at`, named `SheetN`.
+    pub fn add_sheet_edit(&self, at: usize) -> Edit {
+        let mut n = self.wb.sheets.len() + 1;
+        while self.wb.sheet_by_name(&format!("Sheet{n}")).is_some() {
+            n += 1;
+        }
+        Edit::InsertSheet { at, sheet: Box::new(Sheet::new(&format!("Sheet{n}"), 200, 26)) }
+    }
+
+    /// A copy right after the original. It keeps the row and column ids (cells are keyed by
+    /// sheet too, so nothing collides), which makes its own-sheet references point at the copy.
+    pub fn duplicate_sheet_edit(&self, sheet: SheetId) -> Result<Edit, String> {
+        let at = self.wb.sheet_index(sheet).ok_or("no such sheet")?;
+        let mut copy = self.wb.sheets[at].clone();
+        copy.id = SheetId(fresh_id());
+        copy.name = self.wb.free_sheet_name(&format!("{} copy", copy.name));
+        Ok(Edit::InsertSheet { at: at + 1, sheet: Box::new(copy) })
+    }
+
+    pub fn delete_sheet_edit(&self, sheet: SheetId) -> Result<Edit, String> {
+        self.wb.sheet_index(sheet).ok_or("no such sheet")?;
+        if self.wb.sheets.len() < 2 {
+            return Err("can't delete the only sheet".into());
+        }
+        Ok(Edit::DeleteSheet { sheet })
+    }
+
+    pub fn rename_sheet_edit(&self, sheet: SheetId, name: &str) -> Result<Edit, String> {
+        self.wb.sheet_index(sheet).ok_or("no such sheet")?;
+        Ok(Edit::RenameSheet { sheet, name: self.wb.check_sheet_name(name, Some(sheet))? })
+    }
+
+    /// Unit and dimension declarations on a sheet: deleting it turns their users into errors.
+    pub fn declarations_on(&self, sheet: SheetId) -> usize {
+        self.syms.units.values().chain(self.syms.dims.values()).filter(|k| k.sheet == sheet).count()
+    }
+
     // ---- graph maintenance ---------------------------------------------------
 
     fn all_content(&self) -> Vec<(CellKey, String)> {
@@ -653,9 +745,29 @@ impl Engine {
     }
 
     fn compile_node(&self, k: CellKey, text: &str) -> Node {
+        if let Some(e) = self.dead_sheet_ref(k) {
+            return Node { kind: classify(text), compiled: Err(e), deps: vec![] };
+        }
         let mut c = Compiler::new(&self.wb, &self.syms, k.sheet);
         let compiled = c.compile(text).map(Arc::new);
         Node { kind: classify(text), compiled, deps: c.deps }
+    }
+
+    /// A reference into a deleted sheet renders as `#ref!`; say which kind of deletion it was.
+    fn dead_sheet_ref(&self, k: CellKey) -> Option<CompileError> {
+        let mut at = 0;
+        for p in &self.wb.cell(k)?.pieces {
+            let len = self.wb.render(std::slice::from_ref(p), k.sheet).len();
+            let sheet = match p {
+                Piece::Ref(r) | Piece::Range(r, _) => r.sheet,
+                Piece::Text(_) => None,
+            };
+            if sheet.is_some_and(|s| self.wb.sheet(s).is_none()) {
+                return Some(CompileError { msg: "reference to a deleted sheet".into(), span: Some(at..at + len) });
+            }
+            at += len;
+        }
+        None
     }
 
     fn index_deps(&mut self, k: CellKey) {
@@ -832,7 +944,7 @@ impl Engine {
             let mut changed_positions: Vec<CellKey> = Vec::new();
             for k in &gone {
                 self.results.remove(k);
-                self.desired.remove(k);
+                changed_positions.extend(self.set_desired(*k, None));
                 if let Some(reg) = self.spills.remove(k) {
                     changed_positions.extend(self.uncover(&reg));
                 }
@@ -851,6 +963,7 @@ impl Engine {
                             kind: ErrKind::Cycle(path),
                         }),
                     );
+                    changed_positions.extend(self.set_desired(k, None));
                     if let Some(reg) = self.spills.remove(&k) {
                         changed_positions.extend(self.uncover(&reg));
                     }
@@ -934,8 +1047,25 @@ impl Engine {
         keys
     }
 
+    /// Records the region an anchor wants. When it changes, every other anchor
+    /// whose wanted region overlaps the old or new one is returned: whether
+    /// those are blocked may have changed, so they must be placed again.
+    fn set_desired(&mut self, k: CellKey, reg: Option<Region>) -> Vec<CellKey> {
+        let old = match reg {
+            Some(r) => self.desired.insert(k, r),
+            None => self.desired.remove(&k),
+        };
+        if old == reg {
+            return vec![];
+        }
+        self.desired.iter().filter(|(a, d)| **a != k && [old, reg].iter().flatten().any(|r| r.overlaps(d))).map(|(a, _)| *a).collect()
+    }
+
     /// Updates spill bookkeeping for an anchor; returns positions whose
-    /// coverage changed. Turns the result into an error if blocked.
+    /// coverage changed (and anchors to place again). Turns the result into
+    /// an error if blocked: by content in its region, or by another anchor
+    /// whose wanted region overlaps it — then both are blocked, no matter
+    /// which was computed first.
     fn place_spill(&mut self, k: CellKey, res: CellResult) -> (CellResult, Vec<CellKey>) {
         let old = self.spills.remove(&k);
         let mut changed = Vec::new();
@@ -946,22 +1076,27 @@ impl Engine {
             Ok(v) => v.spill_size(),
             Err(_) => (1, 1),
         };
-        if size == (1, 1) {
-            self.desired.remove(&k);
+        let pos = if size == (1, 1) { None } else { self.wb.pos(k) };
+        let Some((r0, c0)) = pos else {
+            changed.extend(self.set_desired(k, None));
             return (res, changed);
-        }
-        let Some((r0, c0)) = self.wb.pos(k) else { return (res, changed) };
+        };
         let reg = Region { sheet: k.sheet, r0, c0, rows: size.0, cols: size.1 };
-        self.desired.insert(k, reg);
+        changed.extend(self.set_desired(k, Some(reg)));
         if let Some(s) = self.wb.sheet_mut(k.sheet) {
             s.ensure_size(r0 + size.0, c0 + size.1);
         }
         // blocked?
         let keys = self.region_keys(&reg);
-        let blocker = keys.iter().copied().find(|p| *p != k && (self.nodes.contains_key(p) || self.cover.get(p).is_some_and(|a| *a != k)));
-        if let Some(b) = blocker {
+        if let Some(b) = keys.iter().copied().find(|p| *p != k && self.nodes.contains_key(p)) {
             let label = self.wb.cell_label(b, Some(k.sheet));
             let err = CellError { msg: format!("#spill blocked: {label} is in the way"), span: None, kind: ErrKind::SpillBlocked(b) };
+            return (Err(err), changed);
+        }
+        let other = self.desired.iter().filter(|(a, d)| **a != k && d.overlaps(&reg)).map(|(a, d)| (d.r0, d.c0, *a)).min();
+        if let Some((_, _, b)) = other {
+            let label = self.wb.cell_label(b, Some(k.sheet));
+            let err = CellError { msg: format!("#spill blocked: overlaps the spill from {label}"), span: None, kind: ErrKind::SpillBlocked(b) };
             return (Err(err), changed);
         }
         for p in &keys {

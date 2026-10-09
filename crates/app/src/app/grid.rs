@@ -108,7 +108,7 @@ impl App {
                 i.pointer.interact_pos(),
                 i.pointer.primary_pressed(),
                 i.pointer.primary_down(),
-                i.pointer.button_double_clicked(PointerButton::Primary),
+                i.pointer.button_double_clicked(PointerButton::Primary) || i.pointer.button_triple_clicked(PointerButton::Primary),
                 i.pointer.secondary_pressed(),
                 i.modifiers,
             )
@@ -170,6 +170,9 @@ impl App {
         }
 
         if pressed && hovering {
+            self.press(ctx, g, pos, area, dbl, mods, in_cells, in_col_hdr, in_row_hdr);
+        } else if dbl && hovering && !self.editing_formula() {
+            // egui reports a double click on the second release, a frame after its press
             self.press(ctx, g, pos, area, dbl, mods, in_cells, in_col_hdr, in_row_hdr);
         }
 
@@ -418,10 +421,14 @@ impl App {
                 let shown = axis.from_screen(pos.y);
                 let canonical = axis.disp.to_canonical(shown);
                 let v = cell_disp.to_display(canonical);
-                // resolution: about 1/200 of the axis, never coarser than the literal
-                let step = (axis.y1 - axis.y0).abs() / 200.0 / cell_disp.factor.abs().max(1e-300) * axis.disp.factor.abs();
-                let dec = if step > 0.0 { (-step.log10()).ceil().max(0.0) as usize } else { 0 };
-                let decimals = dec.max(lit.decimals).min(10);
+                // keep the literal's own precision (as scrubbing does); Shift for about 1/200 of the axis
+                let decimals = if mods.shift {
+                    let step = (axis.y1 - axis.y0).abs() / 200.0 / cell_disp.factor.abs().max(1e-300) * axis.disp.factor.abs();
+                    let dec = if step > 0.0 { (-step.log10()).ceil().max(0.0) as usize } else { 0 };
+                    dec.max(lit.decimals).min(10)
+                } else {
+                    lit.decimals
+                };
                 let new = ops::replace_span(text, &lit.span, &ops::format_lit(v, decimals, false));
                 let key = *key;
                 if new != self.eng.wb.cell_text(key) {
@@ -503,7 +510,11 @@ impl App {
         // cells
         let mut anchors: HashSet<CellKey> = HashSet::new();
         let mut blockers: Vec<CellKey> = Vec::new();
+        let hover = ctx.pointer_hover_pos().filter(|_| ui.rect_contains_pointer(g.cells) && matches!(self.drag, Drag::None));
+        let mut too_wide: Option<String> = None;
         for r in rows.clone() {
+            // right edge of the cells already claimed by text overflowing in this row
+            let mut claimed = f32::NEG_INFINITY;
             for c in cols.clone() {
                 let Some(k) = s.key(r, c) else { continue };
                 let rect = g.cell(r, c);
@@ -521,11 +532,11 @@ impl App {
                         blockers.push(b);
                     }
                 }
-                if let Some((text, color, right)) = self.cell_display(k, pal) {
+                if let Some((mut text, color, right)) = self.cell_display(k, pal) {
                     let mut clip = rect;
+                    let needed = ctx.fonts_mut(|f| f.layout_no_wrap(text.clone(), font.clone(), color).size().x) + 10.0;
                     if !right {
                         // text overflows into empty cells to its right
-                        let needed = ctx.fonts_mut(|f| f.layout_no_wrap(text.clone(), font.clone(), color).size().x) + 10.0;
                         let mut c2 = c + 1;
                         while clip.width() < needed && c2 < g.col_x.len() - 1 && is_blank(r, c2) && c2 < cols.end + 8 {
                             clip.max.x = g.x(c2 + 1);
@@ -535,7 +546,26 @@ impl App {
                             let cover = Rect::from_min_max(Pos2::new(rect.right(), rect.top()), Pos2::new(clip.right() - 1.0, rect.bottom() - 1.0));
                             cp.rect_filled(cover, 0.0, pal.bg);
                         }
+                    } else if clip.width() < needed {
+                        // a number overflows into empty cells to its left; if it still doesn't fit
+                        // show ### rather than a clipped number that reads as a different one
+                        let mut c2 = c;
+                        while clip.width() < needed && c2 > 0 && c2 + 8 > c && is_blank(r, c2 - 1) && g.x(c2 - 1) >= claimed {
+                            c2 -= 1;
+                            clip.min.x = g.x(c2);
+                        }
+                        if clip.width() < needed {
+                            clip = rect;
+                            if hover.is_some_and(|p| rect.contains(p)) {
+                                too_wide = Some(text.clone());
+                            }
+                            text = "###".to_string();
+                        } else if clip.min.x < rect.min.x {
+                            let cover = Rect::from_min_max(Pos2::new(clip.left(), rect.top()), Pos2::new(rect.left(), rect.bottom() - 1.0));
+                            cp.rect_filled(cover, 0.0, pal.bg);
+                        }
                     }
+                    claimed = claimed.max(clip.right());
                     let tp = cp.with_clip_rect(clip.shrink2(Vec2::new(3.0, 0.0)).intersect(g.cells));
                     let (pos, align) = if right {
                         (Pos2::new(rect.right() - 5.0, rect.center().y), Align2::RIGHT_CENTER)
@@ -545,6 +575,9 @@ impl App {
                     tp.text(pos, align, text, font.clone(), color);
                 }
             }
+        }
+        if let (Some(t), Some(p)) = (too_wide, hover) {
+            chart_view::tooltip(ctx, p, &t);
         }
         // spills and charts
         let mut chart_hits = Vec::new();
@@ -670,6 +703,10 @@ impl App {
         let w = (text_w + 24.0).max(cell.width()).min((g.cells.right() - cell.left()).max(cell.width()));
         let rect = Rect::from_min_size(cell.min, Vec2::new(w, cell.height()));
         ui.painter().rect_filled(rect, 0.0, pal.bg);
+        if matches!(self.eng.shown(ed.key), Shown::Error(_)) {
+            // the cell shows an error: tint so it's clear what's being edited
+            ui.painter().rect_filled(rect, 0.0, pal.err.gamma_multiply(0.10));
+        }
         ui.painter().rect_stroke(rect, 0.0, Stroke::new(2.0, pal.sel), StrokeKind::Inside);
         self.editor_rect = Some(rect);
         let mut child = ui.new_child(UiBuilder::new().max_rect(rect.shrink2(Vec2::new(5.0, 2.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));

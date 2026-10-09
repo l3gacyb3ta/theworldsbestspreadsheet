@@ -6,6 +6,26 @@ pub(super) struct EditorOut {
     pub lost_focus: bool,
 }
 
+/// Sheet-tab state: an inline rename, a delete waiting for confirmation, a tab being dragged.
+#[derive(Default)]
+pub(super) struct Tabs {
+    pub(super) rename: Option<(SheetId, String)>,
+    pub(super) focus_rename: bool,
+    pub(super) confirm_delete: Option<SheetId>,
+    pub(super) drag: Option<SheetId>,
+}
+
+enum TabAct {
+    Show(usize),
+    StartRename(SheetId),
+    Rename(SheetId, String),
+    /// (sheet, confirmed)
+    Delete(SheetId, bool),
+    Add,
+    Duplicate(SheetId),
+    Move(SheetId, usize),
+}
+
 impl App {
     /// Grid keyboard: only when no text field has focus.
     pub(super) fn keys(&mut self, ctx: &egui::Context) {
@@ -119,7 +139,7 @@ impl App {
         let kind = classify(&text);
         let tok = syntax::token_at(&text, at);
         let mut insert: Option<(Range<usize>, String)> = None;
-        ui.horizontal_wrapped(|ui| {
+        ui.horizontal(|ui| {
             ui.add_space(176.0);
             // 1. what the token at the caret is
             let hint = match tok.as_ref().map(|t| &t.tok) {
@@ -191,7 +211,7 @@ impl App {
         // 3. the stack at the caret
         if kind == Kind::Program {
             let s = self.eng.eval_scratch(&text, home);
-            ui.horizontal_wrapped(|ui| {
+            ui.horizontal(|ui| {
                 ui.add_space(176.0);
                 ui.label(RichText::new("stack").small().weak());
                 let before: Vec<&wbs_core::eval::TraceStep> = s.steps.iter().filter(|st| st.span.end <= at).collect();
@@ -273,15 +293,27 @@ impl App {
         }
     }
 
+    /// Byte span of the token a cell's error points at, if any.
+    pub(super) fn err_span(&self, k: CellKey) -> Option<Range<usize>> {
+        match self.eng.shown(k) {
+            Shown::Error(e) if e.kind == ErrKind::Local => e.span.clone(),
+            _ => self.eng.compile_error(k).and_then(|e| e.span.clone()),
+        }
+    }
+
     /// The shared formula editor (used in the cell and in the formula bar).
     pub(super) fn editor(&mut self, ui: &mut Ui, id: Id, width: f32, in_bar: bool) -> EditorOut {
         let ctx = ui.ctx().clone();
         let ed = self.edit.as_ref().unwrap();
         let refs = syntax::analyze(&ed.text, &self.eng.wb, ed.key.sheet);
+        // underline the error while the text is still what produced it
+        let orig = ed.orig.clone();
+        let err = self.err_span(ed.key);
         let font = FontId::proportional(FONT);
         let base = ui.visuals().text_color();
         let mut layouter = move |ui: &Ui, buf: &dyn egui::TextBuffer, _w: f32| {
-            let job = syntax::layout(buf.as_str(), &refs, None, font.clone(), base);
+            let err = err.as_ref().filter(|_| buf.as_str() == orig);
+            let job = syntax::layout(buf.as_str(), &refs, err, font.clone(), base);
             ui.fonts_mut(|f| f.layout_job(job))
         };
         let ed = self.edit.as_mut().unwrap();
@@ -401,10 +433,7 @@ impl App {
                 return;
             }
             // display mode: colored program, alt-drag numbers to scrub, click to edit
-            let err_span = match self.eng.shown(k) {
-                Shown::Error(e) if e.kind == ErrKind::Local => e.span.clone(),
-                _ => self.eng.compile_error(k).and_then(|e| e.span.clone()),
-            };
+            let err_span = self.err_span(k);
             let font = FontId::proportional(FONT);
             let job = syntax::layout(&text_now, &[], err_span.as_ref(), font, ui.visuals().text_color());
             let galley = ui.fonts_mut(|f| f.layout_job(job));
@@ -474,10 +503,33 @@ impl App {
                 }
             }
         });
+        // the hint strip always takes the same height, so starting an edit doesn't shift the grid
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), ASSIST_H), Sense::hover());
+        let mut strip = ui.new_child(UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)));
+        strip.set_clip_rect(rect.intersect(ui.clip_rect()));
         if self.edit.is_some() {
-            self.assist(ui);
+            self.assist(&mut strip);
+        } else {
+            self.idle_hint(&mut strip);
         }
         ui.add_space(2.0);
+    }
+
+    /// The hint strip when not editing: what kind of cell is selected.
+    fn idle_hint(&mut self, ui: &mut Ui) {
+        let k = {
+            let (r, c) = self.cursor;
+            self.key(r, c)
+        };
+        let kind = self.eng.kind(k);
+        let hint = match self.eng.spill_anchor(k) {
+            Some(a) if kind == Kind::Empty => format!("spilled from {} — read-only, edit the source", self.label(a)),
+            _ => kind_hint(kind).to_string(),
+        };
+        ui.horizontal(|ui| {
+            ui.add_space(176.0);
+            ui.label(RichText::new(hint).small().weak());
+        });
     }
 
     /// Tooltip text for the token at byte `at` of a cell's text.
@@ -517,45 +569,7 @@ impl App {
 
     pub(super) fn status_bar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            let mut switch = None;
-            for (i, s) in self.eng.wb.sheets.iter().enumerate() {
-                if ui.selectable_label(i == self.sheet_ix, &s.name).clicked() {
-                    switch = Some(i);
-                }
-            }
-            if ui.small_button("+").on_hover_text("add a sheet").clicked() {
-                let n = self.eng.wb.sheets.len() + 1;
-                let mut name = format!("Sheet{n}");
-                while self.eng.wb.sheet_by_name(&name).is_some() {
-                    name.push('_');
-                }
-                self.eng.wb.sheets.push(Sheet::new(&name, 200, 26));
-                switch = Some(self.eng.wb.sheets.len() - 1);
-            }
-            if let Some(i) = switch {
-                if i != self.sheet_ix {
-                    self.sheet_ix = i;
-                    self.anchor = (0, 0);
-                    self.cursor = (0, 0);
-                    self.scroll = Vec2::ZERO;
-                    self.sheet_name_buf = self.sheet().name.clone();
-                }
-            }
-            ui.separator();
-            if self.sheet_name_buf.is_empty() {
-                self.sheet_name_buf = self.sheet().name.clone();
-            }
-            let r = ui.add(TextEdit::singleline(&mut self.sheet_name_buf).desired_width(90.0).hint_text("sheet name"));
-            if r.lost_focus() {
-                let new = self.sheet_name_buf.trim().to_string();
-                if !new.is_empty() && new != self.sheet().name && self.eng.wb.sheet_by_name(&new).is_none() {
-                    let ix = self.sheet_ix;
-                    self.eng.wb.sheets[ix].name = new;
-                    self.eng.rebuild();
-                } else {
-                    self.sheet_name_buf = self.sheet().name.clone();
-                }
-            }
+            self.sheet_tabs(ui);
             ui.separator();
             let k = self.sheet().key(self.cursor.0, self.cursor.1);
             let msg = match k.map(|k| self.eng.shown(k)) {
@@ -567,6 +581,148 @@ impl App {
                 ui.label(if is_err { t.color(Color32::from_rgb(0xdc, 0x26, 0x26)) } else { t.weak() });
             }
         });
+    }
+
+    /// Click a tab to switch, double-click to rename, right-click for more, drag to reorder.
+    fn sheet_tabs(&mut self, ui: &mut Ui) {
+        let tabs: Vec<(SheetId, String)> = self.eng.wb.sheets.iter().map(|s| (s.id, s.name.clone())).collect();
+        let n = tabs.len();
+        let mut act = None;
+        let mut rects = Vec::with_capacity(n);
+        let mut dropped = false;
+        for (i, (id, name)) in tabs.iter().enumerate() {
+            let id = *id;
+            if let Some((_, buf)) = self.tabs.rename.as_mut().filter(|(r, _)| *r == id) {
+                let r = ui.add(TextEdit::singleline(buf).id(Id::new(("rename sheet", id.0))).desired_width(90.0));
+                if std::mem::take(&mut self.tabs.focus_rename) {
+                    r.request_focus();
+                }
+                if r.lost_focus() {
+                    let new = std::mem::take(buf);
+                    self.tabs.rename = None;
+                    if !ui.input(|i| i.key_pressed(Key::Escape)) {
+                        act = Some(TabAct::Rename(id, new));
+                    }
+                }
+                rects.push(r.rect);
+                continue;
+            }
+            let r = ui.add(egui::Button::selectable(i == self.sheet_ix, name.as_str()).sense(Sense::click_and_drag()));
+            if r.double_clicked() {
+                act = Some(TabAct::StartRename(id));
+            } else if r.clicked() {
+                act = Some(TabAct::Show(i));
+            }
+            if r.drag_started() {
+                self.tabs.drag = Some(id);
+            }
+            dropped |= r.drag_stopped();
+            r.context_menu(|ui| {
+                let mut item = |ui: &mut Ui, label: &str, enabled: bool, a: TabAct| {
+                    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                        act = Some(a);
+                        ui.close();
+                    }
+                };
+                item(ui, "Rename", true, TabAct::StartRename(id));
+                item(ui, "Duplicate", true, TabAct::Duplicate(id));
+                item(ui, "Move left", i > 0, TabAct::Move(id, i.saturating_sub(1)));
+                item(ui, "Move right", i + 1 < n, TabAct::Move(id, i + 1));
+                ui.separator();
+                item(ui, "Delete", n > 1, TabAct::Delete(id, false));
+            });
+            rects.push(r.rect);
+        }
+        if let Some(d) = self.tabs.drag {
+            let from = tabs.iter().position(|t| t.0 == d);
+            let at = ui.input(|i| i.pointer.latest_pos());
+            if let (Some(from), Some(p)) = (from, at) {
+                // the drop index counts the other tabs left of the pointer
+                let others: Vec<Rect> = rects.iter().enumerate().filter(|(j, _)| *j != from).map(|(_, r)| *r).collect();
+                let to = others.iter().filter(|r| r.center().x < p.x).count();
+                if to != from {
+                    let x = if to == 0 { others[0].left() - 2.0 } else { others[to - 1].right() + 2.0 };
+                    let y = rects[from].y_range();
+                    ui.painter().vline(x, y, Stroke::new(2.0, ui.visuals().selection.stroke.color));
+                }
+                if dropped && to != from {
+                    act = Some(TabAct::Move(d, to));
+                }
+            }
+            if dropped || from.is_none() {
+                self.tabs.drag = None;
+            }
+        }
+        if ui.small_button("+").on_hover_text("add a sheet").clicked() {
+            act = Some(TabAct::Add);
+        }
+        if let Some(d) = self.tabs.confirm_delete {
+            match self.eng.wb.sheet(d) {
+                None => self.tabs.confirm_delete = None,
+                Some(s) => {
+                    ui.separator();
+                    let msg = format!(
+                        "Delete {}? It defines {} units and dimensions; cells using them will show errors.",
+                        s.name,
+                        self.eng.declarations_on(d)
+                    );
+                    ui.label(RichText::new(msg).color(Color32::from_rgb(0xdc, 0x26, 0x26)));
+                    if ui.button("Delete sheet").clicked() {
+                        act = Some(TabAct::Delete(d, true));
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.tabs.confirm_delete = None;
+                    }
+                }
+            }
+        }
+        let Some(act) = act else { return };
+        let edit = match act {
+            TabAct::Show(i) => {
+                if i != self.sheet_ix {
+                    let prev = self.sid();
+                    self.show_sheet(i, prev);
+                }
+                return;
+            }
+            TabAct::StartRename(id) => {
+                let name = self.eng.wb.sheet(id).map(|s| s.name.clone()).unwrap_or_default();
+                self.tabs.rename = Some((id, name));
+                self.tabs.focus_rename = true;
+                return;
+            }
+            TabAct::Rename(id, name) => {
+                if self.eng.wb.sheet(id).is_some_and(|s| s.name == name.trim()) {
+                    return;
+                }
+                self.eng.rename_sheet_edit(id, &name)
+            }
+            TabAct::Delete(id, confirmed) => {
+                if !confirmed && self.eng.declarations_on(id) > 0 {
+                    self.tabs.confirm_delete = Some(id);
+                    return;
+                }
+                self.tabs.confirm_delete = None;
+                self.eng.delete_sheet_edit(id)
+            }
+            TabAct::Add => Ok(self.eng.add_sheet_edit(n)),
+            TabAct::Duplicate(id) => self.eng.duplicate_sheet_edit(id),
+            TabAct::Move(id, to) => Ok(Edit::MoveSheet { sheet: id, to }),
+        };
+        match edit {
+            Ok(e) => {
+                self.commit();
+                let deleted = match &e {
+                    Edit::DeleteSheet { sheet } => self.eng.wb.sheet(*sheet).map(|s| s.name.clone()),
+                    _ => None,
+                };
+                self.exec(e);
+                if let Some(name) = deleted {
+                    self.status = Some(format!("deleted sheet {name} — ⌘Z brings it back"));
+                }
+            }
+            Err(m) => self.status = Some(m),
+        }
     }
 
     pub(super) fn inspector(&mut self, ui: &mut Ui) {
@@ -803,6 +959,9 @@ impl App {
         });
     }
 }
+
+/// Height of the hint strip under the formula bar (two rows: hint, stack).
+const ASSIST_H: f32 = 42.0;
 
 const HELP: &str = "\
 =  program: postfix, the cell's value is the top of the stack

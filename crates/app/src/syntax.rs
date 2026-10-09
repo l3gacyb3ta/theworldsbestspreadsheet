@@ -53,7 +53,7 @@ pub fn analyze(text: &str, wb: &Workbook, home: SheetId) -> Vec<RefHi> {
                 };
                 sid.map(|s| (s, r.row, r.col, r.row, r.col))
             }
-            Tok::Range(a, b) => {
+            Tok::Range(a, b, _) => {
                 let sid = match &a.sheet {
                     Some(n) => wb.sheet_by_name(n).map(|s| s.id),
                     None => Some(home),
@@ -113,6 +113,11 @@ pub fn layout(text: &str, refs: &[RefHi], err: Option<&Range<usize>>, font: Font
                 s.1 = r.color;
             }
         }
+        // the `?` of `A1:B5?` sits just outside the range's span: colour it like the range
+        let gaps: Vec<(Range<usize>, Color32)> =
+            styles.iter().filter(|s| text[s.0.end..].starts_with('?') && refs.iter().any(|r| r.span == s.0)).map(|s| (s.0.end..s.0.end + 1, s.1)).collect();
+        styles.extend(gaps);
+        styles.sort_by_key(|s| s.0.start);
     }
     let mut pos = 0;
     let push = |job: &mut LayoutJob, range: Range<usize>, color: Color32| {
@@ -138,4 +143,22 @@ pub fn layout(text: &str, refs: &[RefHi], err: Option<&Range<usize>>, font: Font
     }
     push(&mut job, pos..text.len(), base);
     job
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gap_marker_takes_the_range_colour() {
+        let wb = wbs_core::stdlib::default_workbook();
+        let text = "=A1:A3? sum";
+        let refs = analyze(text, &wb, wb.sheets[0].id);
+        assert_eq!(refs[0].span, 1..6);
+        let job = layout(text, &refs, None, FontId::default(), Color32::BLACK);
+        let colour_at = |i: usize| job.sections.iter().find(|s| s.byte_range.start.0 <= i && i < s.byte_range.end.0).unwrap().format.color;
+        assert_eq!(colour_at(1), refs[0].color);
+        assert_eq!(colour_at(6), refs[0].color); // the `?`
+        assert_eq!(colour_at(7), Color32::BLACK);
+    }
 }
