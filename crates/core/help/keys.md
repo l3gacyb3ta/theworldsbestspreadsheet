@@ -31,7 +31,8 @@
 | ⌘D | fill down |
 | ⌘E | accept "extend formula" |
 | ⌘S | save |
-| F1 | help for the current cell or word |
+| F1 | help for the current cell or word (again to close) |
+| ⌘/ | search help |
 
 ## Mouse
 

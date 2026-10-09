@@ -5,7 +5,10 @@ mod tests;
 
 use crate::chart_view::{PointHit, YAxis};
 use crate::demo;
+use crate::help_view::{self, Help, HelpAction, Page};
 use crate::syntax;
+use eframe::egui::RichText;
+use wbs_core::help;
 use eframe::egui::{
     self, text::CCursor, text::CCursorRange, Align2, Color32, CursorIcon, Event, FontId, Id, Key, Modifiers, Painter, PointerButton, Pos2,
     Rect, Sense, Stroke, StrokeKind, TextEdit, Ui, UiBuilder, Vec2,
@@ -176,9 +179,18 @@ pub struct App {
     /// Last frame's grid geometry (used by UI tests to aim at cells).
     #[cfg_attr(not(test), allow(dead_code))]
     geo: Option<Geo>,
+    help: Help,
 }
 
 impl App {
+    /// On first run (no saved file) open help at the welcome guide.
+    pub fn with_welcome(mut self) -> App {
+        if !self.path.exists() {
+            self.help.show_page(Page::Topic("welcome"));
+        }
+        self
+    }
+
     pub fn new(path: PathBuf) -> App {
         let (eng, status) = match std::fs::read_to_string(&path) {
             Ok(s) => match serde_json::from_str(&s) {
@@ -214,6 +226,7 @@ impl App {
             bar_scrub: None,
             input_scrub: None,
             geo: None,
+            help: Help::new(),
         }
     }
 
@@ -372,5 +385,11 @@ impl eframe::App for App {
             egui::ScrollArea::vertical().show(ui, |ui| self.inspector(ui));
         });
         egui::CentralPanel::no_frame().show(ui, |ui| self.grid(ui, dark));
+        let home = self.sid();
+        for a in self.help.ui(&ctx, &self.eng, home) {
+            match a {
+                HelpAction::Goto(k) => self.goto(k),
+            }
+        }
     }
 }

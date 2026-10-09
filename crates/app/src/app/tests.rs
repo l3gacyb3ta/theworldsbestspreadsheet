@@ -2,7 +2,7 @@
 //! snapshots to target/ui-shots/ for inspection.
 
 use super::*;
-use egui_kittest::Harness;
+use egui_kittest::{kittest::Queryable, Harness};
 
 fn harness() -> Harness<'static, App> {
     let mut h = Harness::builder()
@@ -232,4 +232,85 @@ fn formula_extension_offer() {
     assert_eq!(source(&h, "F28"), "=E28 dup *");
     assert_eq!(shown(&h, "F28"), "16");
     assert_eq!(source(&h, "F29"), "");
+}
+
+// ---- help system -------------------------------------------------------------
+
+#[test]
+fn f1_opens_help_for_the_selected_cell() {
+    let mut h = harness();
+    { let p = center(&h, "B10"); click(&mut h, p, Modifiers::NONE); }
+    key(&mut h, Key::F1);
+    assert!(h.state().help.open);
+    assert_eq!(*h.state().help.page(), Page::Topic("stack"));
+    h.run_steps(3);
+    shot(&mut h, "10_help_stack");
+    key(&mut h, Key::F1);
+    assert!(!h.state().help.open, "F1 again closes help");
+}
+
+#[test]
+fn f1_while_editing_explains_the_word_at_the_cursor() {
+    let mut h = harness();
+    { let p = center(&h, "E25"); click(&mut h, p, Modifiers::NONE); }
+    typ(&mut h, "=A10:A15 sum");
+    shot(&mut h, "11_assist_strip");
+    key(&mut h, Key::F1);
+    assert_eq!(*h.state().help.page(), Page::Word("sum"));
+    h.run_steps(3);
+    shot(&mut h, "12_help_word_sum");
+}
+
+#[test]
+fn completions_insert_words() {
+    let mut h = harness();
+    { let p = center(&h, "E25"); click(&mut h, p, Modifiers::NONE); }
+    typ(&mut h, "=A10:A15 mea");
+    h.run_steps(2);
+    // the completion button is labelled with the word
+    h.get_by_label("mean").click();
+    h.run_steps(3);
+    assert_eq!(h.state().edit.as_ref().unwrap().text, "=A10:A15 mean ");
+    key(&mut h, Key::Enter);
+    assert_eq!(shown(&h, "E25"), "3.5");
+}
+
+#[test]
+fn errors_are_explained_and_linked() {
+    let mut h = harness();
+    { let p = center(&h, "E25"); click(&mut h, p, Modifiers::NONE); }
+    typ(&mut h, "=B3 B5 +");
+    key(&mut h, Key::Enter);
+    { let p = center(&h, "E25"); click(&mut h, p, Modifiers::NONE); }
+    h.run_steps(2);
+    h.get_by_label("Units don't match");
+    shot(&mut h, "13_error_explained");
+    key(&mut h, Key::F1);
+    assert_eq!(*h.state().help.page(), Page::Topic("units"));
+}
+
+#[test]
+fn help_pages_render() {
+    let mut h = harness();
+    h.state_mut().help.show_page(Page::Reference);
+    h.run_steps(3);
+    shot(&mut h, "14_help_reference");
+    h.state_mut().help.show_page(Page::Units);
+    h.run_steps(3);
+    shot(&mut h, "15_help_units");
+    h.state_mut().help.try_in_playground("A1:A5 B1:B5 * sum", help_view::PlayCtx::Sample);
+    h.run_steps(3);
+    h.get_by_label("⇒ 550 m");
+    shot(&mut h, "16_playground");
+    h.state_mut().help.show_page(Page::YourWords);
+    h.run_steps(3);
+    h.get_by_label("npv");
+    // every guide renders without panicking
+    for t in help::topics() {
+        h.state_mut().help.show_page(Page::Topic(t.id));
+        h.run_steps(2);
+    }
+    h.state_mut().help.show_page(Page::Topic("units"));
+    h.run_steps(3);
+    shot(&mut h, "17_help_units_topic");
 }

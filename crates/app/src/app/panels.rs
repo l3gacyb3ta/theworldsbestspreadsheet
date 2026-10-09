@@ -12,11 +12,14 @@ impl App {
         let (events, mods) = ctx.input(|i| (i.events.clone(), i.modifiers));
         let focused = ctx.memory(|m| m.focused());
         for ev in &events {
-            if let Event::Key { key: Key::S, pressed: true, modifiers, .. } = ev {
-                if modifiers.command {
+            match ev {
+                Event::Key { key: Key::S, pressed: true, modifiers, .. } if modifiers.command => {
                     self.commit();
                     self.save();
                 }
+                Event::Key { key: Key::F1, pressed: true, .. } => self.context_help(),
+                Event::Key { key: Key::Slash, pressed: true, modifiers, .. } if modifiers.command => self.help.focus_search(),
+                _ => {}
             }
         }
         if self.edit.is_some() {
@@ -71,6 +74,161 @@ impl App {
                     }
                 }
                 _ => {}
+            }
+        }
+    }
+
+    /// F1: close help if open; otherwise open the page that explains what's
+    /// under the caret (when editing) or in the selected cell.
+    pub(super) fn context_help(&mut self) {
+        if self.help.open {
+            self.help.open = false;
+            return;
+        }
+        if let Some(ed) = &self.edit {
+            let at = syntax::char_to_byte(&ed.text, ed.cursor);
+            if let Some(t) = syntax::token_at(&ed.text, at) {
+                if let Some(d) = help::doc_for_token(&t.tok) {
+                    self.help.show_page(Page::Word(d.name));
+                    return;
+                }
+                if let wbs_core::lex::Tok::Word(w) = &t.tok {
+                    if self.eng.symbols().words.contains_key(w.as_str()) {
+                        self.help.show_page(Page::YourWords);
+                        return;
+                    }
+                }
+            }
+            self.help.show_page(Page::Topic(kind_topic(classify(&ed.text))));
+            return;
+        }
+        let k = {
+            let (r, c) = self.cursor;
+            self.key(r, c)
+        };
+        if let Shown::Error(e) = self.eng.shown(k) {
+            if let Some(h) = help::explain_error(&e.msg) {
+                self.help.show_page(Page::Topic(h.topic));
+                return;
+            }
+        }
+        let kind = self.eng.kind(k);
+        let topic = if kind == Kind::Empty && self.eng.spill_anchor(k).is_some() { "spill" } else { kind_topic(kind) };
+        self.help.show_page(Page::Topic(topic));
+    }
+
+    /// The editing hint strip: docs for the token at the caret, the stack at
+    /// that point, and completions.
+    fn assist(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+        let Some(ed) = &self.edit else { return };
+        let text = ed.text.clone();
+        let caret_ci = ed.cursor;
+        let in_bar = ed.in_bar;
+        let home = ed.key.sheet;
+        let at = syntax::char_to_byte(&text, caret_ci);
+        let kind = classify(&text);
+        let tok = syntax::token_at(&text, at);
+        let mut insert: Option<(Range<usize>, String)> = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.add_space(176.0);
+            // 1. what the token at the caret is
+            let hint = match tok.as_ref().map(|t| &t.tok) {
+                Some(wbs_core::lex::Tok::Word(w)) => help_view::word_hint(&self.eng, w).or_else(|| {
+                    self.eng.wb.names.get(w.as_str()).map(|n| format!("{w} — name for {}", self.eng.wb.cell_label(n.cell, Some(home))))
+                }),
+                Some(t) => help::doc_for_token(t).map(help_view::doc_line),
+                None => None,
+            };
+            match hint {
+                Some(h) => {
+                    if ui.link(RichText::new(h).monospace().size(12.0)).on_hover_text("F1 for full help").clicked() {
+                        self.context_help();
+                    }
+                }
+                None => {
+                    ui.label(RichText::new(kind_hint(kind)).small().weak());
+                }
+            }
+            // 2. completions for a partial word or unit
+            let mut cands: Vec<String> = Vec::new();
+            let mut replace: Option<Range<usize>> = None;
+            if let Some(t) = &tok {
+                if t.span.end == at {
+                    match &t.tok {
+                        wbs_core::lex::Tok::Word(w) if w.chars().next().is_some_and(|c| c.is_alphabetic()) => {
+                            let mut pool: Vec<String> = BUILTINS
+                                .iter()
+                                .map(|(n, _, _)| n.to_string())
+                                .filter(|n| n.chars().next().is_some_and(|c| c.is_alphabetic()))
+                                .collect();
+                            pool.extend(self.eng.symbols().words.keys().cloned());
+                            pool.extend(self.eng.wb.names.keys().cloned());
+                            cands = pool.into_iter().filter(|n| n.starts_with(w.as_str()) && n != w).collect();
+                            replace = Some(t.span.clone());
+                        }
+                        wbs_core::lex::Tok::Bad(_) | wbs_core::lex::Tok::Unit(_) | wbs_core::lex::Tok::To(_) => {
+                            // inside `[…`: complete the last unit name
+                            let src = &text[t.span.start..at];
+                            if let Some(open) = src.find('[') {
+                                let inner = &src[open + 1..];
+                                let frag_start = inner.rfind(['*', '/', '(', ' ']).map(|i| i + 1).unwrap_or(0);
+                                let frag = &inner[frag_start..];
+                                if !frag.is_empty() && !inner.ends_with(']') {
+                                    let start = t.span.start + open + 1 + frag_start;
+                                    cands = self.eng.symbols().units.keys().filter(|u| u.starts_with(frag) && *u != frag).cloned().collect();
+                                    replace = Some(start..at);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            cands.sort_by_key(|c| (c.len(), c.clone()));
+            cands.dedup();
+            if let Some(span) = replace {
+                if !cands.is_empty() {
+                    ui.label(RichText::new("   complete:").small().weak());
+                }
+                for c in cands.iter().take(8) {
+                    let tip = help_view::word_hint(&self.eng, c).unwrap_or_else(|| format!("[{c}]"));
+                    if ui.small_button(RichText::new(c).monospace()).on_hover_text(tip).clicked() {
+                        insert = Some((span.clone(), c.clone()));
+                    }
+                }
+            }
+        });
+        // 3. the stack at the caret
+        if kind == Kind::Program {
+            let s = self.eng.eval_scratch(&text, home);
+            ui.horizontal_wrapped(|ui| {
+                ui.add_space(176.0);
+                ui.label(RichText::new("stack").small().weak());
+                let before: Vec<&wbs_core::eval::TraceStep> = s.steps.iter().filter(|st| st.span.end <= at).collect();
+                match before.last() {
+                    Some(st) => help_view::stack_chips(ui, &st.stack),
+                    None => help_view::stack_chips(ui, &[]),
+                }
+                if let Err(e) = &s.result {
+                    let past_error = e.span.as_ref().is_none_or(|sp| sp.start < at);
+                    if past_error && at >= text.trim_end().len() {
+                        ui.label(RichText::new(format!("  ✗ {}", e.msg)).color(syntax::C_ERR).small());
+                    }
+                }
+            });
+        }
+        if let Some((span, word)) = insert {
+            if let Some(ed) = &mut self.edit {
+                ed.text.replace_range(span.clone(), &word);
+                let end = span.start + word.len();
+                if !ed.text[end..].starts_with(' ') && !word.is_empty() && !ed.text[..span.start].ends_with('[') {
+                    ed.text.insert(end, ' ');
+                }
+                let caret = ed.text[..end].chars().count() + usize::from(ed.text[end..].starts_with(' '));
+                ed.cursor = caret;
+                ed.in_bar = in_bar;
+                self.focus_req = Some((ctx.cumulative_pass_nr() + 1, caret));
             }
         }
     }
@@ -207,6 +365,14 @@ impl App {
             ui.separator();
             ui.toggle_value(&mut self.trace, "Trace").on_hover_text("Highlight precedents (blue) and dependents (orange) of the selected cell");
             ui.separator();
+            if ui.button("Help").on_hover_text("F1 — help for the selected cell or the word at the cursor").clicked() {
+                if self.help.open {
+                    self.help.open = false;
+                } else {
+                    self.help.open = true;
+                }
+            }
+            ui.separator();
             ui.label(egui::RichText::new(format!("recalc {:.2} ms · {}", self.last_recalc_ms, self.path.display())).weak().small());
         });
     }
@@ -271,6 +437,14 @@ impl App {
                     ctx.set_cursor_icon(CursorIcon::ResizeHorizontal);
                 } else {
                     ctx.set_cursor_icon(CursorIcon::Text);
+                    // hover a token for its documentation
+                    let ci = galley.cursor_from_pos(hp - pos).index.0;
+                    let at = syntax::char_to_byte(&text_now, ci);
+                    if hp.x <= pos.x + galley.size().x + 2.0 && kind.has_refs() {
+                        if let Some(tip) = self.token_tooltip(&text_now, at, k.sheet) {
+                            resp.clone().on_hover_text_at_pointer(tip);
+                        }
+                    }
                 }
             }
             if resp.drag_started() && alt {
@@ -310,7 +484,45 @@ impl App {
                 }
             }
         });
+        if self.edit.is_some() {
+            self.assist(ui);
+        }
         ui.add_space(2.0);
+    }
+
+    /// Tooltip text for the token at byte `at` of a cell's text.
+    fn token_tooltip(&self, text: &str, at: usize, home: SheetId) -> Option<String> {
+        use wbs_core::lex::Tok;
+        let t = syntax::token_at(text, at)?;
+        let src = &text[t.span.clone()];
+        let value = |prog: &str| match self.eng.eval_scratch(&format!("={prog}"), home).result {
+            Ok(v) => v.summary(6),
+            Err(e) => format!("error: {}", e.msg),
+        };
+        Some(match &t.tok {
+            Tok::Ref(_) | Tok::Range(..) => format!("{src} = {}", value(src)),
+            Tok::Word(w) if self.eng.wb.names.contains_key(w.as_str()) => {
+                let k = self.eng.wb.names[w.as_str()].cell;
+                format!("{w} — name for {} = {}", self.eng.wb.cell_label(k, Some(home)), value(w))
+            }
+            Tok::Word(w) => help_view::word_hint(&self.eng, w)?,
+            Tok::Unit(u) | Tok::To(u) => {
+                let names: Vec<String> = wbs_core::units::parse_unit(u)
+                    .map(|e| e.terms.into_iter().map(|(n, _)| n).collect())
+                    .unwrap_or_default();
+                let mut lines = vec![help::doc_for_token(&t.tok).map(help_view::doc_line).unwrap_or_default()];
+                for n in names {
+                    let info = self.eng.units_list().into_iter().find(|(m, ..)| *m == n);
+                    lines.push(match info {
+                        Some((_, k, Some(i))) => format!("[{n}]: {} · defined at {}", i.dim, self.eng.wb.cell_label(k, Some(home))),
+                        Some((_, k, None)) => format!("[{n}]: error in its definition at {}", self.eng.wb.cell_label(k, Some(home))),
+                        None => format!("[{n}]: unknown unit"),
+                    });
+                }
+                lines.join("\n")
+            }
+            tok => help::doc_for_token(tok).map(help_view::doc_line)?,
+        })
     }
 
     pub(super) fn status_bar(&mut self, ui: &mut Ui) {
@@ -374,10 +586,13 @@ impl App {
         ui.heading(self.label(k));
         let kind = self.eng.kind(k);
         let anchor = self.eng.spill_anchor(k);
-        ui.label(egui::RichText::new(match (kind, anchor) {
-            (Kind::Empty, Some(_)) => "spilled (read-only)".to_string(),
-            (k, _) => k.label().to_string(),
-        }).weak());
+        let (kind_label, topic) = match (kind, anchor) {
+            (Kind::Empty, Some(_)) => ("spilled (read-only)".to_string(), "spill"),
+            (k, _) => (k.label().to_string(), kind_topic(k)),
+        };
+        if ui.link(RichText::new(format!("{kind_label}  ?")).weak()).on_hover_text("what is this kind of cell?").clicked() {
+            self.help.show_page(Page::Topic(topic));
+        }
         if let Some(a) = anchor {
             if kind == Kind::Empty && ui.link(format!("source: {}", self.label(a))).clicked() {
                 self.goto(a);
@@ -415,6 +630,20 @@ impl App {
                     }
                     _ => {}
                 }
+                if let Some(h) = help::explain_error(&e.msg) {
+                    egui::Frame::new()
+                        .fill(ui.visuals().faint_bg_color)
+                        .corner_radius(6.0)
+                        .inner_margin(egui::Margin::same(8))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new(h.title).strong());
+                            ui.label(RichText::new(h.why).small());
+                            ui.label(RichText::new(format!("Fix: {}", h.fix)).small());
+                            if ui.link("Learn more").clicked() {
+                                self.help.show_page(Page::Topic(h.topic));
+                            }
+                        });
+                }
             }
             Shown::Empty => {
                 ui.label(egui::RichText::new("empty").weak());
@@ -422,6 +651,13 @@ impl App {
         }
         if let Some(g) = goto {
             self.goto(g);
+        }
+        if matches!(kind, Kind::Program) {
+            egui::CollapsingHeader::new("Step through").id_salt("step_through").show(ui, |ui| {
+                let text = self.eng.wb.cell_text(k);
+                let s = self.eng.trace_cell(k);
+                help_view::trace_table(ui, &text, &s);
+            });
         }
 
         ui.separator();
@@ -589,3 +825,26 @@ dim widgets · base [widget] widgets · [mi] = 1609.344 [m]
 Click cells while editing to insert references.
 Alt-drag a number (in a cell or here) to scrub it.
 Drag the selection's corner to fill.";
+
+/// The guide that explains a kind of cell.
+fn kind_topic(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Empty => "welcome",
+        Kind::Text | Kind::Number => "cells",
+        Kind::Program => "stack",
+        Kind::WordDef => "words",
+        Kind::UnitDecl => "defining-units",
+    }
+}
+
+/// What the hint strip says when the caret isn't on a known token.
+fn kind_hint(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Program => "program — values first, then the word: =2 3 +   ·   click cells to insert references   ·   F1 for help",
+        Kind::WordDef => "word definition — : name ( doc ) body ;",
+        Kind::UnitDecl => "unit declaration — dim name · base [unit] dim · [unit] = value",
+        Kind::Number => "number — optionally with a unit: 5 [m/s]",
+        Kind::Text => "text — start with = for a program, : for a word",
+        Kind::Empty => "type a value, or = to start a program",
+    }
+}

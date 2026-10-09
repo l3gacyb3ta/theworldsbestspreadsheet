@@ -72,6 +72,29 @@ is an ordinary, editable `units` sheet; exchange rates are inputs you can scrub.
   are draggable and write the cell; derived points show which inputs they'd
   solve for (goal-seek is future work).
 
+## Help system
+
+Press **F1** (or the toolbar's Help) for help about the selected cell — or, while
+editing, about the word at the cursor. ⌘/ searches.
+
+- **Guides** (`crates/core/help/*.md`): a small markdown dialect with
+  `[[word]]` / `[[#topic]]` links, tables, and ```` ```example ```` blocks whose
+  lines are `program ⇒ documented result`.
+- **Reference** (`crates/core/src/help.rs`, `WORDS`): stack effect, unit rule,
+  details, examples and see-also for every builtin and syntax form.
+- **Live pages**: units and user words are listed from the open workbook. A
+  comment after a word's name documents it: `: sq ( x -- x² ) dup * ;`.
+- **Context help**: a hint strip under the formula bar shows the doc for the token
+  at the cursor, the stack at that point, and completions. Hovering a token in the
+  formula bar shows its doc or value. The inspector explains errors in plain words
+  and can step through any program token by token.
+- **Playground**: run programs against the sample sheet or your workbook without
+  changing anything.
+
+Every example in the guides and reference is evaluated against a sample sheet
+by `cargo test`. A wrong documented result, a broken link, an undocumented
+builtin, or an error message without an explanation fails the build.
+
 ## Keys
 
 Arrows/⇧arrows, Enter/Tab, F2 or double-click to edit, Delete clears, ⌘C/⌘X/⌘V,
