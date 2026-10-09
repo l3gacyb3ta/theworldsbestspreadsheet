@@ -6,8 +6,13 @@ license-file = "../../LICENSE"
 
 [dependencies]
 wbs-core = { path = "../core" }
-eframe = "0.36"
+eframe = { version = "0.36", features = ["persistence"] }
 serde_json = "1"
+# Native file dialogs: AppKit on macOS, xdg-desktop-portal over D-Bus on Linux (no GTK needed).
+rfd = "0.17"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = { version = "0.21", default-features = false }
 
 [dev-dependencies]
 egui_kittest = { version = "0.36", features = ["wgpu", "snapshot", "eframe"] }

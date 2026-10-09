@@ -30,9 +30,16 @@
 | ⌘C ⌘X ⌘V | copy, cut, paste |
 | ⌘D | fill down |
 | ⌘E | accept "extend formula" |
-| ⌘S | save |
+| ⌘N | new workbook |
+| ⌘O | open a workbook |
+| ⌘S / ⇧⌘S | save / save as |
+| ⌘Q | quit (asks first if there are unsaved changes) |
 | F1 | help for the current cell or word (again to close) |
 | ⌘/ | search help |
+
+On Linux and Windows ⌘ is Ctrl. On macOS the same commands are in the menu bar;
+elsewhere they're in the File, Edit, View and Help menus at the top of the window.
+A • in the window title means there are unsaved changes.
 
 ## Mouse
 
