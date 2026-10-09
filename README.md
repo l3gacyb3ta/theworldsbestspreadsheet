@@ -101,3 +101,10 @@ Arrows/⇧arrows, Enter/Tab, F2 or double-click to edit, Delete clears, ⌘C/⌘
 ⌘Z/⇧⌘Z, ⌘D fill down, ⌘E accept "extend formula", ⌘S save. Alt-drag a number
 (in a cell or the formula bar) to scrub it, ⇧ for ×10. Right-click for
 insert/delete rows/columns and sort.
+
+## License
+
+[Peer Production License](LICENSE): a copyfarleft license (John Magyar and
+Dmytri Kleiner, derived from CC BY-NC-SA). You may use, share and adapt this
+work non-commercially. Commercial use is allowed only for worker-owned
+businesses or collectives that distribute all gains among their worker-owners.
