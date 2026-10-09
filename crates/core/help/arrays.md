@@ -14,6 +14,17 @@ A1:A5 len        ⇒ 5
 
 A range that's one row or one column is a list; anything wider is a table. Empty cells inside a range are an error — they're not quietly treated as zero.
 
+## Ranges with gaps
+
+If a range is meant to have empty cells — a column you're still filling in — write [[filled]] right after it. It reads only the non-empty cells, as a list (a table's are read row by row). The cells it keeps are checked as usual: they must share a unit, and a cell with an error is still an error.
+
+```example
+A4:A7 sum            ⇒ ! A6 is empty
+A4:A7 filled         ⇒ [4, 5]
+A4:A7 filled sum     ⇒ 9
+G1:H2 filled         ⇒ [1, 2, 3]
+```
+
 ## Elementwise words and broadcasting
 
 Arithmetic, comparisons and math functions work element by element. A single value is combined with every element.

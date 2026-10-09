@@ -71,6 +71,9 @@ impl Region {
     fn contains(&self, sheet: SheetId, r: usize, c: usize) -> bool {
         sheet == self.sheet && r >= self.r0 && r < self.r0 + self.rows && c >= self.c0 && c < self.c0 + self.cols
     }
+    fn overlaps(&self, o: &Region) -> bool {
+        self.sheet == o.sheet && self.r0 < o.r0 + o.rows && o.r0 < self.r0 + self.rows && self.c0 < o.c0 + o.cols && o.c0 < self.c0 + self.cols
+    }
 }
 
 /// What a grid position shows.
@@ -119,7 +122,10 @@ impl<'a> Env for View<'a> {
         self.0.ref_value(k)
     }
     fn range_value(&self, sheet: SheetId, a: &StoredRef, b: &StoredRef) -> Result<Value, String> {
-        self.0.range_value(sheet, a, b)
+        self.0.range_value(sheet, a, b, false)
+    }
+    fn range_filled(&self, sheet: SheetId, a: &StoredRef, b: &StoredRef) -> Result<Value, String> {
+        self.0.range_value(sheet, a, b, true)
     }
     fn unit_info(&self, name: &str) -> Result<UnitInfo, String> {
         let Some(k) = self.0.syms.units.get(name) else { return Err(format!("unknown unit {name}")) };
@@ -399,7 +405,10 @@ impl Engine {
         }
     }
 
-    fn range_value(&self, sheet: SheetId, a: &StoredRef, b: &StoredRef) -> Result<Value, String> {
+    /// The cells of a range as one array. With `filled`, empty cells are
+    /// skipped and the rest form a list, row by row; otherwise an empty cell
+    /// is an error.
+    fn range_value(&self, sheet: SheetId, a: &StoredRef, b: &StoredRef, filled: bool) -> Result<Value, String> {
         let s = self.wb.sheet(sheet).ok_or("sheet was deleted")?;
         let (r0, c0, r1, c1) = s.range_bounds(a, b).ok_or("range refers to deleted cells")?;
         let (nr, nc) = (r1 - r0 + 1, c1 - c0 + 1);
@@ -410,6 +419,9 @@ impl Engine {
         for r in r0..=r1 {
             for c in c0..=c1 {
                 let k = s.key(r, c).unwrap();
+                if filled && !self.nodes.contains_key(&k) && matches!(self.shown(k), Shown::Empty) {
+                    continue;
+                }
                 match self.scalar_at(k)? {
                     Value::Num(n) => {
                         if !texts.is_empty() {
@@ -442,7 +454,13 @@ impl Engine {
                 }
             }
         }
-        let shape = if nr == 1 || nc == 1 { vec![nr * nc] } else { vec![nr, nc] };
+        let shape = if filled {
+            vec![nums.len() + texts.len()]
+        } else if nr == 1 || nc == 1 {
+            vec![nr * nc]
+        } else {
+            vec![nr, nc]
+        };
         if !texts.is_empty() {
             return Ok(Value::Text(Text { shape, data: Arc::new(texts) }));
         }
@@ -832,7 +850,7 @@ impl Engine {
             let mut changed_positions: Vec<CellKey> = Vec::new();
             for k in &gone {
                 self.results.remove(k);
-                self.desired.remove(k);
+                changed_positions.extend(self.set_desired(*k, None));
                 if let Some(reg) = self.spills.remove(k) {
                     changed_positions.extend(self.uncover(&reg));
                 }
@@ -851,6 +869,7 @@ impl Engine {
                             kind: ErrKind::Cycle(path),
                         }),
                     );
+                    changed_positions.extend(self.set_desired(k, None));
                     if let Some(reg) = self.spills.remove(&k) {
                         changed_positions.extend(self.uncover(&reg));
                     }
@@ -934,8 +953,25 @@ impl Engine {
         keys
     }
 
+    /// Records the region an anchor wants. When it changes, every other anchor
+    /// whose wanted region overlaps the old or new one is returned: whether
+    /// those are blocked may have changed, so they must be placed again.
+    fn set_desired(&mut self, k: CellKey, reg: Option<Region>) -> Vec<CellKey> {
+        let old = match reg {
+            Some(r) => self.desired.insert(k, r),
+            None => self.desired.remove(&k),
+        };
+        if old == reg {
+            return vec![];
+        }
+        self.desired.iter().filter(|(a, d)| **a != k && [old, reg].iter().flatten().any(|r| r.overlaps(d))).map(|(a, _)| *a).collect()
+    }
+
     /// Updates spill bookkeeping for an anchor; returns positions whose
-    /// coverage changed. Turns the result into an error if blocked.
+    /// coverage changed (and anchors to place again). Turns the result into
+    /// an error if blocked: by content in its region, or by another anchor
+    /// whose wanted region overlaps it — then both are blocked, no matter
+    /// which was computed first.
     fn place_spill(&mut self, k: CellKey, res: CellResult) -> (CellResult, Vec<CellKey>) {
         let old = self.spills.remove(&k);
         let mut changed = Vec::new();
@@ -946,22 +982,27 @@ impl Engine {
             Ok(v) => v.spill_size(),
             Err(_) => (1, 1),
         };
-        if size == (1, 1) {
-            self.desired.remove(&k);
+        let pos = if size == (1, 1) { None } else { self.wb.pos(k) };
+        let Some((r0, c0)) = pos else {
+            changed.extend(self.set_desired(k, None));
             return (res, changed);
-        }
-        let Some((r0, c0)) = self.wb.pos(k) else { return (res, changed) };
+        };
         let reg = Region { sheet: k.sheet, r0, c0, rows: size.0, cols: size.1 };
-        self.desired.insert(k, reg);
+        changed.extend(self.set_desired(k, Some(reg)));
         if let Some(s) = self.wb.sheet_mut(k.sheet) {
             s.ensure_size(r0 + size.0, c0 + size.1);
         }
         // blocked?
         let keys = self.region_keys(&reg);
-        let blocker = keys.iter().copied().find(|p| *p != k && (self.nodes.contains_key(p) || self.cover.get(p).is_some_and(|a| *a != k)));
-        if let Some(b) = blocker {
+        if let Some(b) = keys.iter().copied().find(|p| *p != k && self.nodes.contains_key(p)) {
             let label = self.wb.cell_label(b, Some(k.sheet));
             let err = CellError { msg: format!("#spill blocked: {label} is in the way"), span: None, kind: ErrKind::SpillBlocked(b) };
+            return (Err(err), changed);
+        }
+        let other = self.desired.iter().filter(|(a, d)| **a != k && d.overlaps(&reg)).map(|(a, d)| (d.r0, d.c0, *a)).min();
+        if let Some((_, _, b)) = other {
+            let label = self.wb.cell_label(b, Some(k.sheet));
+            let err = CellError { msg: format!("#spill blocked: overlaps the spill from {label}"), span: None, kind: ErrKind::SpillBlocked(b) };
             return (Err(err), changed);
         }
         for p in &keys {
