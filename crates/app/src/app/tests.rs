@@ -332,6 +332,178 @@ fn help_pages_render() {
     shot(&mut h, "17_help_units_topic");
 }
 
+// ---- sheet tabs ----------------------------------------------------------------
+
+/// Short steps so two clicks count as a double-click.
+fn quick_harness() -> Harness<'static, App> {
+    let mut h = Harness::builder()
+        .with_size([1440.0, 900.0])
+        .with_step_dt(1.0 / 60.0)
+        .wgpu()
+        .build_eframe(|_| App::new(PathBuf::from("/nonexistent/ui-test.wbs.json")));
+    h.run_steps(3);
+    h
+}
+
+fn sheet_names(h: &Harness<'static, App>) -> Vec<String> {
+    h.state().eng.wb.sheets.iter().map(|s| s.name.clone()).collect()
+}
+
+fn tab(h: &Harness<'static, App>, name: &str) -> Pos2 {
+    h.get_by_label(name).rect().center()
+}
+
+fn double_click(h: &mut Harness<'static, App>, pos: Pos2) {
+    h.event(Event::PointerMoved(pos));
+    h.run_steps(1);
+    for _ in 0..2 {
+        press(h, pos, true, Modifiers::NONE);
+        press(h, pos, false, Modifiers::NONE);
+    }
+    h.run_steps(2);
+}
+
+fn tab_menu(h: &mut Harness<'static, App>, name: &str, item: &str) {
+    h.get_by_label(name).click_secondary();
+    h.run_steps(2);
+    h.get_by_label(item).click();
+    h.run_steps(3);
+}
+
+fn undo(h: &mut Harness<'static, App>) {
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run_steps(3);
+}
+
+#[test]
+fn sheet_tabs_add_rename_delete_undo() {
+    let mut h = quick_harness();
+    assert_eq!(sheet_names(&h), ["model", "units"]);
+    h.get_by_label("+").click();
+    h.run_steps(30); // long enough that the next click isn't a double-click
+    assert_eq!(sheet_names(&h), ["model", "units", "Sheet3"]);
+    assert_eq!(h.state().sheet_ix, 2, "the new sheet is shown");
+    // double-click renames inline
+    { let p = tab(&h, "Sheet3"); double_click(&mut h, p); }
+    assert!(h.state().tabs.rename.is_some());
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    typ(&mut h, "inputs");
+    shot(&mut h, "18_sheet_renaming");
+    key(&mut h, Key::Enter);
+    assert_eq!(sheet_names(&h), ["model", "units", "inputs"]);
+    assert!(h.state().tabs.rename.is_none());
+    { let p = center(&h, "A1"); click(&mut h, p, Modifiers::NONE); }
+    typ(&mut h, "7");
+    key(&mut h, Key::Enter);
+    // reference it from the model sheet
+    h.get_by_label("model").click();
+    h.run_steps(3);
+    assert_eq!(h.state().sheet_ix, 0);
+    { let p = center(&h, "H25"); click(&mut h, p, Modifiers::NONE); }
+    typ(&mut h, "=inputs!A1 2 *");
+    key(&mut h, Key::Enter);
+    assert_eq!(shown(&h, "H25"), "14");
+    shot(&mut h, "19_sheet_tabs");
+    // delete it from the tab's menu: the reference breaks visibly
+    tab_menu(&mut h, "inputs", "Delete");
+    assert_eq!(sheet_names(&h), ["model", "units"]);
+    assert_eq!(h.state().sheet_ix, 0);
+    assert_eq!(source(&h, "H25"), "=#ref! 2 *");
+    assert_eq!(shown(&h, "H25"), "ERR reference to a deleted sheet");
+    { let p = center(&h, "H25"); click(&mut h, p, Modifiers::NONE); }
+    shot(&mut h, "20_sheet_deleted");
+    // undo brings the sheet and the reference back
+    undo(&mut h);
+    assert_eq!(sheet_names(&h), ["model", "units", "inputs"]);
+    assert_eq!(h.state().sheet_ix, 2, "the restored sheet is shown");
+    assert_eq!(shown(&h, "A1"), "7");
+    h.get_by_label("model").click();
+    h.run_steps(3);
+    assert_eq!(source(&h, "H25"), "=inputs!A1 2 *");
+    assert_eq!(shown(&h, "H25"), "14");
+    // undo the formula, the 7, the rename, then the add; the shown sheet stays valid
+    undo(&mut h);
+    undo(&mut h);
+    undo(&mut h);
+    assert_eq!(sheet_names(&h), ["model", "units", "Sheet3"]);
+    undo(&mut h);
+    assert_eq!(sheet_names(&h), ["model", "units"]);
+    assert!(h.state().sheet_ix < 2);
+}
+
+#[test]
+fn sheet_rename_escape_and_invalid_names() {
+    let mut h = quick_harness();
+    { let p = tab(&h, "model"); double_click(&mut h, p); }
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    typ(&mut h, "units");
+    key(&mut h, Key::Enter);
+    assert_eq!(sheet_names(&h), ["model", "units"], "names stay unique");
+    assert!(h.state().status.as_deref().unwrap_or("").contains("already a sheet"));
+    { let p = tab(&h, "model"); double_click(&mut h, p); }
+    typ(&mut h, "zzz");
+    key(&mut h, Key::Escape);
+    assert_eq!(sheet_names(&h), ["model", "units"], "escape cancels");
+    assert!(h.state().undo.is_empty(), "nothing to undo");
+}
+
+#[test]
+fn sheet_duplicate_move_and_drag() {
+    let mut h = quick_harness();
+    tab_menu(&mut h, "model", "Duplicate");
+    assert_eq!(sheet_names(&h), ["model", "model copy", "units"]);
+    assert_eq!(h.state().sheet_ix, 1);
+    assert_eq!(shown(&h, "G22"), "4", "the copy computes on its own");
+    tab_menu(&mut h, "model copy", "Move right");
+    assert_eq!(sheet_names(&h), ["model", "units", "model copy"]);
+    assert_eq!(h.state().sheet_ix, 2, "the moved sheet stays shown");
+    // drag the last tab to the front
+    let from = tab(&h, "model copy");
+    let to = tab(&h, "model") - Vec2::new(20.0, 0.0);
+    h.event(Event::PointerMoved(from));
+    h.run_steps(1);
+    press(&mut h, from, true, Modifiers::NONE);
+    for i in 1..=6 {
+        h.event(Event::PointerMoved(from + (to - from) * (i as f32 / 6.0)));
+        h.run_steps(1);
+    }
+    assert_eq!(sheet_names(&h), ["model", "units", "model copy"], "nothing moves until the drop");
+    shot(&mut h, "21_sheet_dragging");
+    press(&mut h, to, false, Modifiers::NONE);
+    h.run_steps(2);
+    assert_eq!(sheet_names(&h), ["model copy", "model", "units"]);
+    assert_eq!(h.state().sheet_ix, 0);
+    shot(&mut h, "22_sheet_dragged");
+    undo(&mut h);
+    undo(&mut h);
+    undo(&mut h);
+    assert_eq!(sheet_names(&h), ["model", "units"]);
+    assert!(h.state().sheet_ix < 2);
+}
+
+#[test]
+fn deleting_units_asks_first() {
+    let mut h = quick_harness();
+    tab_menu(&mut h, "units", "Delete");
+    assert_eq!(sheet_names(&h), ["model", "units"], "not yet");
+    assert!(h.state().tabs.confirm_delete.is_some());
+    shot(&mut h, "23_delete_units_confirm");
+    h.get_by_label("Cancel").click();
+    h.run_steps(2);
+    assert!(h.state().tabs.confirm_delete.is_none());
+    tab_menu(&mut h, "units", "Delete");
+    h.get_by_label("Delete sheet").click();
+    h.run_steps(3);
+    assert_eq!(sheet_names(&h), ["model"]);
+    assert!(shown(&h, "B3").starts_with("ERR"), "{}", shown(&h, "B3"));
+    shot(&mut h, "24_units_deleted");
+    undo(&mut h);
+    assert_eq!(sheet_names(&h), ["model", "units"]);
+    h.get_by_label("model").click();
+    h.run_steps(3);
+    assert_eq!(shown(&h, "B3"), "120,000 USD");
+}
+
 // ---- papercuts -----------------------------------------------------------------
 
 fn grid_top(h: &Harness<'static, App>) -> f32 {

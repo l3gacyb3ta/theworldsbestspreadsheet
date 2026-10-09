@@ -169,7 +169,7 @@ pub struct App {
     chart_hits: Vec<(PointHit, YAxis)>,
     editor_rect: Option<Rect>,
     trace: bool,
-    sheet_name_buf: String,
+    tabs: panels::Tabs,
     last_recalc_ms: f64,
     scroll_into_view: bool,
     /// Formula-bar galley from last frame, for alt-scrub hit testing.
@@ -219,7 +219,7 @@ impl App {
             chart_hits: Vec::new(),
             editor_rect: None,
             trace: true,
-            sheet_name_buf: String::new(),
+            tabs: Default::default(),
             last_recalc_ms: 0.0,
             scroll_into_view: false,
             bar_galley: None,
@@ -251,7 +251,7 @@ impl App {
 
     fn exec(&mut self, e: Edit) {
         let t = std::time::Instant::now();
-        let inv = self.eng.apply(e);
+        let inv = self.apply_edit(e);
         self.last_recalc_ms = t.elapsed().as_secs_f64() * 1000.0;
         self.undo.push(inv);
         self.redo.clear();
@@ -259,14 +259,43 @@ impl App {
 
     fn undo(&mut self) {
         if let Some(e) = self.undo.pop() {
-            let inv = self.eng.apply(e);
+            let inv = self.apply_edit(e);
             self.redo.push(inv);
         }
     }
     fn redo(&mut self) {
         if let Some(e) = self.redo.pop() {
-            let inv = self.eng.apply(e);
+            let inv = self.apply_edit(e);
             self.undo.push(inv);
+        }
+    }
+
+    /// Applies an edit and keeps `sheet_ix` valid: it follows the sheet that was showing, or the
+    /// sheet a sheet edit added, moved or renamed; if the showing sheet was deleted, its neighbour.
+    fn apply_edit(&mut self, e: Edit) -> Edit {
+        let prev = self.sid();
+        let follow = match &e {
+            Edit::InsertSheet { sheet, .. } => sheet.id,
+            Edit::MoveSheet { sheet, .. } | Edit::RenameSheet { sheet, .. } => *sheet,
+            _ => prev,
+        };
+        let inv = self.eng.apply(e);
+        let wb = &self.eng.wb;
+        let ix = wb.sheet_index(follow).or(wb.sheet_index(prev)).unwrap_or(self.sheet_ix.min(wb.sheets.len() - 1));
+        self.show_sheet(ix, prev);
+        if self.edit.as_ref().is_some_and(|ed| self.eng.wb.sheet(ed.key.sheet).is_none()) {
+            self.edit = None;
+        }
+        inv
+    }
+
+    /// Switches to the sheet at `ix`; the selection and scroll reset unless it is still `prev`.
+    fn show_sheet(&mut self, ix: usize, prev: SheetId) {
+        self.sheet_ix = ix;
+        if self.sid() != prev {
+            self.anchor = (0, 0);
+            self.cursor = (0, 0);
+            self.scroll = Vec2::ZERO;
         }
     }
 

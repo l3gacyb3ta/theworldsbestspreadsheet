@@ -6,7 +6,7 @@
 
 use crate::eval::{run_program, run_traced, Env, TraceStep};
 use crate::ids::*;
-use crate::model::{classify, Cell, Kind, NameDef, Piece, StoredRef, Workbook};
+use crate::model::{classify, Cell, Kind, NameDef, Piece, Sheet, StoredRef, Workbook};
 use crate::parse::{declares, CompileError, Compiled, Compiler, Declares, Dep, Symbols};
 use crate::units::{Dim, Quant, UnitInfo};
 use crate::value::{Num, Prov, Text, Value};
@@ -94,6 +94,12 @@ pub enum Edit {
     DeleteCols { sheet: SheetId, at: usize, n: usize },
     PermuteRows { sheet: SheetId, at: usize, ids: Vec<RowId> },
     Names(BTreeMap<String, NameDef>),
+    /// Puts a whole sheet, with its own ids, at `at` in the tab order.
+    InsertSheet { at: usize, sheet: Box<Sheet> },
+    /// Removes a sheet; the inverse carries it whole, so undo restores the same ids.
+    DeleteSheet { sheet: SheetId },
+    MoveSheet { sheet: SheetId, to: usize },
+    RenameSheet { sheet: SheetId, name: String },
     Batch(Vec<Edit>),
 }
 
@@ -339,6 +345,9 @@ impl Engine {
     // ---- value access used by the interpreter ----------------------------
 
     fn ref_value(&self, k: CellKey) -> Result<Value, String> {
+        if self.wb.sheet(k.sheet).is_none() {
+            return Err("reference to a deleted sheet".into());
+        }
         if let Some(r) = self.results.get(&k) {
             return match r {
                 Ok(v) => {
@@ -570,6 +579,35 @@ impl Engine {
                 *structural = true;
                 Edit::Names(std::mem::replace(&mut self.wb.names, n))
             }
+            Edit::InsertSheet { at, sheet } => {
+                if self.wb.sheet(sheet.id).is_some() {
+                    return Edit::Batch(vec![]);
+                }
+                *structural = true;
+                let id = sheet.id;
+                let mut sheet = *sheet;
+                sheet.reindex();
+                self.wb.sheets.insert(at.min(self.wb.sheets.len()), sheet);
+                Edit::DeleteSheet { sheet: id }
+            }
+            Edit::DeleteSheet { sheet } => {
+                // the last sheet stays: the app always shows one
+                let Some(at) = self.wb.sheet_index(sheet).filter(|_| self.wb.sheets.len() > 1) else { return Edit::Batch(vec![]) };
+                *structural = true;
+                Edit::InsertSheet { at, sheet: Box::new(self.wb.sheets.remove(at)) }
+            }
+            Edit::MoveSheet { sheet, to } => {
+                let Some(from) = self.wb.sheet_index(sheet) else { return Edit::Batch(vec![]) };
+                *structural = true;
+                let s = self.wb.sheets.remove(from);
+                self.wb.sheets.insert(to.min(self.wb.sheets.len()), s);
+                Edit::MoveSheet { sheet, to: from }
+            }
+            Edit::RenameSheet { sheet, name } => {
+                let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
+                *structural = true;
+                Edit::RenameSheet { sheet, name: std::mem::replace(&mut s.name, name) }
+            }
             Edit::Batch(es) => {
                 let mut inv: Vec<Edit> = es.into_iter().map(|e| self.apply_raw(e, touched, structural)).collect();
                 inv.reverse();
@@ -626,6 +664,45 @@ impl Engine {
         Ok(self.apply(Edit::Names(names)))
     }
 
+    // ---- sheets: these build an edit for `apply` (and the undo stack) ----------
+
+    /// A new empty sheet at `at`, named `SheetN`.
+    pub fn add_sheet_edit(&self, at: usize) -> Edit {
+        let mut n = self.wb.sheets.len() + 1;
+        while self.wb.sheet_by_name(&format!("Sheet{n}")).is_some() {
+            n += 1;
+        }
+        Edit::InsertSheet { at, sheet: Box::new(Sheet::new(&format!("Sheet{n}"), 200, 26)) }
+    }
+
+    /// A copy right after the original. It keeps the row and column ids (cells are keyed by
+    /// sheet too, so nothing collides), which makes its own-sheet references point at the copy.
+    pub fn duplicate_sheet_edit(&self, sheet: SheetId) -> Result<Edit, String> {
+        let at = self.wb.sheet_index(sheet).ok_or("no such sheet")?;
+        let mut copy = self.wb.sheets[at].clone();
+        copy.id = SheetId(fresh_id());
+        copy.name = self.wb.free_sheet_name(&format!("{} copy", copy.name));
+        Ok(Edit::InsertSheet { at: at + 1, sheet: Box::new(copy) })
+    }
+
+    pub fn delete_sheet_edit(&self, sheet: SheetId) -> Result<Edit, String> {
+        self.wb.sheet_index(sheet).ok_or("no such sheet")?;
+        if self.wb.sheets.len() < 2 {
+            return Err("can't delete the only sheet".into());
+        }
+        Ok(Edit::DeleteSheet { sheet })
+    }
+
+    pub fn rename_sheet_edit(&self, sheet: SheetId, name: &str) -> Result<Edit, String> {
+        self.wb.sheet_index(sheet).ok_or("no such sheet")?;
+        Ok(Edit::RenameSheet { sheet, name: self.wb.check_sheet_name(name, Some(sheet))? })
+    }
+
+    /// Unit and dimension declarations on a sheet: deleting it turns their users into errors.
+    pub fn declarations_on(&self, sheet: SheetId) -> usize {
+        self.syms.units.values().chain(self.syms.dims.values()).filter(|k| k.sheet == sheet).count()
+    }
+
     // ---- graph maintenance ---------------------------------------------------
 
     fn all_content(&self) -> Vec<(CellKey, String)> {
@@ -668,9 +745,29 @@ impl Engine {
     }
 
     fn compile_node(&self, k: CellKey, text: &str) -> Node {
+        if let Some(e) = self.dead_sheet_ref(k) {
+            return Node { kind: classify(text), compiled: Err(e), deps: vec![] };
+        }
         let mut c = Compiler::new(&self.wb, &self.syms, k.sheet);
         let compiled = c.compile(text).map(Arc::new);
         Node { kind: classify(text), compiled, deps: c.deps }
+    }
+
+    /// A reference into a deleted sheet renders as `#ref!`; say which kind of deletion it was.
+    fn dead_sheet_ref(&self, k: CellKey) -> Option<CompileError> {
+        let mut at = 0;
+        for p in &self.wb.cell(k)?.pieces {
+            let len = self.wb.render(std::slice::from_ref(p), k.sheet).len();
+            let sheet = match p {
+                Piece::Ref(r) | Piece::Range(r, _) => r.sheet,
+                Piece::Text(_) => None,
+            };
+            if sheet.is_some_and(|s| self.wb.sheet(s).is_none()) {
+                return Some(CompileError { msg: "reference to a deleted sheet".into(), span: Some(at..at + len) });
+            }
+            at += len;
+        }
+        None
     }
 
     fn index_deps(&mut self, k: CellKey) {

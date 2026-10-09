@@ -646,6 +646,13 @@ pub const ERRORS: &[ErrorHelp] = &[
         topic: "stack",
     },
     ErrorHelp {
+        patterns: &["deleted sheet", "sheet was deleted"],
+        title: "Reference to a deleted sheet",
+        why: "The sheet this reference (or name) pointed into was deleted.",
+        fix: "Undo the deletion, or point the reference at a cell on another sheet.",
+        topic: "references",
+    },
+    ErrorHelp {
         patterns: &["deleted cell", "deleted cells", "#ref"],
         title: "Reference to a deleted cell",
         why: "The row or column this reference pointed to was deleted.",
