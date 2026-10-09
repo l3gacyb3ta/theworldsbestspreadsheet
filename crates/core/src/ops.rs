@@ -4,8 +4,9 @@
 use crate::engine::{Edit, Engine, Shown};
 use crate::ids::*;
 use crate::lex::{self, Tok};
-use crate::model::{classify, number_literal, Cell, Kind, Piece};
+use crate::model::{classify, number_literal, Cell, Kind, Piece, StoredRef, Workbook};
 use crate::value::{fmt_date, Value};
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 /// Inclusive cell rectangle on one sheet.
@@ -252,6 +253,163 @@ pub fn clear(e: &Engine, r: Rect) -> Edit {
     Edit::Cells(out)
 }
 
+/// Moves the cells of `src` so its top-left lands at `at` on `sheet`, as one undoable edit.
+/// One rule: every reference to a moved cell follows it, every reference to a cell it lands on
+/// becomes `#ref!` (that cell is gone, as if deleted), and nothing else is rewritten. A range
+/// counts as a reference to those cells only when all of its cells are; any other range is left
+/// alone. Names follow their cells the same way. A spill moves with its source; a spilled cell
+/// can't be moved on its own.
+pub fn move_cells(e: &mut Engine, src: Rect, sheet: SheetId, at: (usize, usize)) -> Result<Edit, String> {
+    let (dr, dc) = (at.0 as i64 - src.r0 as i64, at.1 as i64 - src.c0 as i64);
+    e.wb.sheet(sheet).ok_or("no such sheet")?;
+    e.wb.sheet_mut(src.sheet).ok_or("no such sheet")?.ensure_size(src.r1 + 1, src.c1 + 1);
+    let s = e.wb.sheet(src.sheet).unwrap();
+    // source position -> destination position: the block, plus the spills of sources in it
+    let mut spans: Vec<(usize, usize, usize, usize)> = vec![(src.r0, src.c0, src.rows(), src.cols())];
+    for r in src.r0..=src.r1 {
+        for c in src.c0..=src.c1 {
+            let k = s.key(r, c).unwrap();
+            if let Some(a) = e.spill_anchor(k).filter(|a| *a != k) {
+                if !s.pos(a).is_some_and(|(ar, ac)| src.contains(ar, ac)) {
+                    let at = e.wb.cell_label(k, Some(src.sheet));
+                    return Err(format!("{at} is spilled — move its source {} instead", e.wb.cell_label(a, Some(src.sheet))));
+                }
+            }
+            if let Some((nr, nc)) = e.spill_size(k) {
+                spans.push((r, c, nr, nc));
+            }
+        }
+    }
+    if sheet == src.sheet && dr == 0 && dc == 0 {
+        return Ok(Edit::Cells(vec![]));
+    }
+    let mut moved: HashMap<CellKey, CellKey> = HashMap::new();
+    let mut block = Vec::new();
+    for (r0, c0, nr, nc) in spans {
+        let dst = e.wb.sheet_mut(sheet).unwrap();
+        dst.ensure_size((r0 as i64 + dr) as usize + nr, (c0 as i64 + dc) as usize + nc);
+        for r in r0..r0 + nr {
+            for c in c0..c0 + nc {
+                let sk = e.wb.sheet(src.sheet).unwrap().key(r, c).unwrap();
+                let dk = e.wb.sheet(sheet).unwrap().key((r as i64 + dr) as usize, (c as i64 + dc) as usize).unwrap();
+                if moved.insert(sk, dk).is_none() && src.contains(r, c) {
+                    block.push((sk, dk));
+                }
+            }
+        }
+    }
+    let replaced: HashSet<CellKey> = block.iter().map(|(_, d)| *d).filter(|d| !moved.contains_key(d)).collect();
+    let wb = &e.wb;
+    let m = Mover { wb, moved: &moved, replaced: &replaced };
+    let mut out: HashMap<CellKey, Option<Cell>> = HashMap::new();
+    for (sk, _) in &block {
+        out.insert(*sk, None);
+    }
+    for (sk, dk) in &block {
+        out.insert(*dk, wb.cell(*sk).map(|c| Cell { pieces: m.pieces(&c.pieces, src.sheet, sheet) }));
+    }
+    let touched: HashSet<CellKey> = block.iter().flat_map(|(s, d)| [*s, *d]).collect();
+    for s in &wb.sheets {
+        for ((r, c), cell) in &s.cells {
+            let k = CellKey { sheet: s.id, row: *r, col: *c };
+            if touched.contains(&k) || !cell.pieces.iter().any(|p| !matches!(p, Piece::Text(_))) {
+                continue;
+            }
+            let pieces = m.pieces(&cell.pieces, s.id, s.id);
+            if pieces != cell.pieces {
+                out.insert(k, Some(Cell { pieces }));
+            }
+        }
+    }
+    let mut names = wb.names.clone();
+    names.retain(|_, d| !replaced.contains(&d.cell));
+    for d in names.values_mut() {
+        if let Some(k) = moved.get(&d.cell) {
+            d.cell = *k;
+        }
+    }
+    // a stable order keeps the edit (and its inverse) deterministic
+    let mut cells: Vec<(CellKey, Option<Cell>)> = out.into_iter().collect();
+    cells.sort_by_key(|(k, _)| (k.sheet.0, k.row.0, k.col.0));
+    let mut edits = vec![Edit::Cells(cells)];
+    if names != wb.names {
+        edits.push(Edit::Names(names));
+    }
+    Ok(Edit::Batch(edits))
+}
+
+/// Rewrites references for `move_cells`.
+struct Mover<'a> {
+    wb: &'a Workbook,
+    moved: &'a HashMap<CellKey, CellKey>,
+    replaced: &'a HashSet<CellKey>,
+}
+
+enum Fate {
+    Moved,
+    Replaced,
+    Stays,
+}
+
+impl Mover<'_> {
+    fn fate(&self, keys: &[CellKey]) -> Fate {
+        if keys.is_empty() {
+            Fate::Stays
+        } else if keys.iter().all(|k| self.moved.contains_key(k)) {
+            Fate::Moved
+        } else if keys.iter().all(|k| self.replaced.contains(k)) {
+            Fate::Replaced
+        } else {
+            Fate::Stays
+        }
+    }
+
+    /// The pieces of a cell that lived on `from` and now lives on `to`.
+    fn pieces(&self, pieces: &[Piece], from: SheetId, to: SheetId) -> Vec<Piece> {
+        // a reference without a sheet means the cell's own sheet, so it needs one if the two differ
+        let sheet_of = |orig: Option<SheetId>, target: SheetId| if orig.is_some() || target != to { Some(target) } else { None };
+        pieces
+            .iter()
+            .map(|p| match p {
+                Piece::Text(_) => p.clone(),
+                Piece::Ref(r) => {
+                    let k = CellKey { sheet: r.sheet.unwrap_or(from), row: r.row, col: r.col };
+                    match self.fate(&[k]) {
+                        Fate::Moved => {
+                            let n = self.moved[&k];
+                            Piece::Ref(StoredRef { sheet: sheet_of(r.sheet, n.sheet), row: n.row, col: n.col, ..*r })
+                        }
+                        Fate::Replaced => Piece::Text("#ref!".into()),
+                        Fate::Stays => Piece::Ref(StoredRef { sheet: sheet_of(r.sheet, k.sheet), ..*r }),
+                    }
+                }
+                Piece::Range(a, b) => {
+                    let sid = a.sheet.unwrap_or(from);
+                    let stays = Piece::Range(StoredRef { sheet: sheet_of(a.sheet, sid), ..*a }, *b);
+                    let Some(s) = self.wb.sheet(sid) else { return stays };
+                    let Some((r0, c0, r1, c1)) = s.range_bounds(a, b) else { return stays };
+                    // only a range no bigger than the moved block can be wholly inside it
+                    if (r1 - r0 + 1) * (c1 - c0 + 1) > self.moved.len().max(self.replaced.len()) {
+                        return stays;
+                    }
+                    let keys: Vec<CellKey> = (r0..=r1).flat_map(|r| (c0..=c1).map(move |c| (r, c))).filter_map(|(r, c)| s.key(r, c)).collect();
+                    match self.fate(&keys) {
+                        Fate::Moved => {
+                            let (ka, kb) = (self.moved[&s.key(r0, c0).unwrap()], self.moved[&s.key(r1, c1).unwrap()]);
+                            Piece::Range(
+                                StoredRef { sheet: sheet_of(a.sheet, ka.sheet), row: ka.row, col: ka.col, ..*a },
+                                StoredRef { row: kb.row, col: kb.col, ..*b },
+                            )
+                        }
+                        Fate::Replaced => Piece::Text("#ref!".into()),
+                        Fate::Stays => stays,
+                    }
+                }
+            })
+            .collect()
+    }
+}
+
 #[derive(PartialEq, PartialOrd)]
 enum SortKey {
     Num(f64),
@@ -405,5 +563,160 @@ mod tests {
         e.set_text(k(&e, s, 0, 1), "=A1 2 *");
         let offer = extension_offer(&e, k(&e, s, 0, 1)).unwrap();
         assert_eq!((offer.r0, offer.r1), (0, 4));
+    }
+
+    fn text(e: &Engine, s: SheetId, at: &str) -> String {
+        let r = crate::a1::parse_ref(at).unwrap();
+        e.wb.cell_text(k(e, s, r.row, r.col))
+    }
+    fn val(e: &Engine, s: SheetId, at: &str) -> String {
+        let r = crate::a1::parse_ref(at).unwrap();
+        match e.shown(k(e, s, r.row, r.col)) {
+            Shown::Value { value, dr, dc, .. } => value.display_at(dr, dc),
+            Shown::Error(err) => format!("ERR {}", err.msg),
+            Shown::Empty => String::new(),
+        }
+    }
+    fn put(e: &mut Engine, s: SheetId, cells: &[(&str, &str)]) {
+        for (at, t) in cells {
+            let r = crate::a1::parse_ref(at).unwrap();
+            e.set_text(k(e, s, r.row, r.col), t);
+        }
+    }
+    /// Every cell's text by position, and the names, for exact round-trip checks.
+    fn snapshot(e: &Engine) -> Vec<String> {
+        let mut out: Vec<String> = e
+            .wb
+            .sheets
+            .iter()
+            .flat_map(|s| s.cells.keys().map(move |(r, c)| CellKey { sheet: s.id, row: *r, col: *c }))
+            .map(|k| format!("{} {}", e.wb.cell_label(k, None), e.wb.cell_text(k)))
+            .collect();
+        out.extend(e.wb.names.iter().map(|(n, d)| format!("{n} -> {}", e.wb.cell_label(d.cell, None))));
+        out.sort();
+        out
+    }
+    /// Moves, checks that undo restores exactly and redo reapplies exactly.
+    fn mv(e: &mut Engine, src: Rect, sheet: SheetId, at: (usize, usize)) {
+        let before = snapshot(e);
+        let ed = move_cells(e, src, sheet, at).unwrap();
+        let inv = e.apply(ed);
+        let after = snapshot(e);
+        let redo = e.apply(inv);
+        assert_eq!(snapshot(e), before);
+        e.apply(redo);
+        assert_eq!(snapshot(e), after);
+    }
+
+    #[test]
+    fn move_references_follow() {
+        let (mut e, s) = setup();
+        put(&mut e, s, &[("A1", "1"), ("A2", "2"), ("B1", "=A1 10 *"), ("C1", "=A1:A2 sum"), ("C2", "=A1:A3? sum"), ("C3", "=$A$2")]);
+        mv(&mut e, Rect::span(s, (0, 0), (1, 0)), s, (0, 4));
+        assert_eq!(text(&e, s, "A1"), "");
+        assert_eq!(text(&e, s, "E1"), "1");
+        // single references and whole ranges follow, keeping their $ flags
+        assert_eq!(text(&e, s, "B1"), "=E1 10 *");
+        assert_eq!(val(&e, s, "B1"), "10");
+        assert_eq!(text(&e, s, "C1"), "=E1:E2 sum");
+        assert_eq!(val(&e, s, "C1"), "3");
+        assert_eq!(text(&e, s, "C3"), "=$E$2");
+        // a range only partly inside the moved block is left alone
+        assert_eq!(text(&e, s, "C2"), "=A1:A3? sum");
+    }
+
+    #[test]
+    fn moved_formulas_keep_their_targets() {
+        let (mut e, s) = setup();
+        put(&mut e, s, &[("A1", "1"), ("B1", "=A1 1 +"), ("B2", "=B1 2 *"), ("B3", "=B1:B2 sum")]);
+        mv(&mut e, Rect::span(s, (0, 1), (2, 1)), s, (4, 3));
+        // relative or not, a reference to a cell that didn't move still points at it
+        assert_eq!(text(&e, s, "D5"), "=A1 1 +");
+        // references to cells that moved along follow them
+        assert_eq!(text(&e, s, "D6"), "=D5 2 *");
+        assert_eq!(text(&e, s, "D7"), "=D5:D6 sum");
+        assert_eq!(val(&e, s, "D7"), "6");
+        // unlike paste, which moves relative references
+        let clip = copy(&e, Rect::cell(s, 4, 3));
+        let ed = paste(&mut e, &clip, s, (4, 5));
+        e.apply(ed);
+        assert_eq!(text(&e, s, "F5"), "=C1 1 +");
+    }
+
+    #[test]
+    fn move_replaces_destination_cells() {
+        let (mut e, s) = setup();
+        put(&mut e, s, &[("A1", "5"), ("D1", "7"), ("D2", "8"), ("B1", "=D1"), ("B2", "=D1:D1 sum"), ("B3", "=D1:D2 sum"), ("B4", "=D2")]);
+        e.set_name("seven", Some(k(&e, s, 0, 3)), false).unwrap();
+        e.set_name("five", Some(k(&e, s, 0, 0)), false).unwrap();
+        mv(&mut e, Rect::cell(s, 0, 0), s, (0, 3));
+        assert_eq!(text(&e, s, "D1"), "5");
+        // references to the cell the move landed on break, as if it was deleted
+        assert_eq!(text(&e, s, "B1"), "=#ref!");
+        assert_eq!(val(&e, s, "B1"), "ERR reference to a deleted cell");
+        assert_eq!(text(&e, s, "B2"), "=#ref! sum");
+        // a range that only touches it, and other cells, are left alone
+        assert_eq!(text(&e, s, "B3"), "=D1:D2 sum");
+        assert_eq!(val(&e, s, "B3"), "13");
+        assert_eq!(text(&e, s, "B4"), "=D2");
+        // names follow too: the replaced cell's name is gone
+        assert!(!e.wb.names.contains_key("seven"));
+        assert_eq!(e.wb.names["five"].cell, k(&e, s, 0, 3));
+        // undo brings the cell and its references back
+        let before = snapshot(&e);
+        let ed = move_cells(&mut e, Rect::cell(s, 0, 3), s, (0, 0)).unwrap();
+        let inv = e.apply(ed);
+        e.apply(inv);
+        assert_eq!(snapshot(&e), before);
+    }
+
+    #[test]
+    fn move_onto_itself_overlapping() {
+        let (mut e, s) = setup();
+        put(&mut e, s, &[("A1", "1"), ("A2", "2"), ("A3", "3"), ("B1", "=A1:A3 sum"), ("B2", "=A3"), ("B3", "=A4")]);
+        mv(&mut e, Rect::span(s, (0, 0), (2, 0)), s, (1, 0));
+        assert_eq!(text(&e, s, "A1"), "");
+        assert_eq!(text(&e, s, "A4"), "3");
+        assert_eq!(text(&e, s, "B1"), "=A2:A4 sum");
+        assert_eq!(text(&e, s, "B2"), "=A4");
+        // A4 was replaced (it didn't move itself)
+        assert_eq!(text(&e, s, "B3"), "=#ref!");
+        // a move to the same place does nothing
+        let ed = move_cells(&mut e, Rect::span(s, (1, 0), (3, 0)), s, (1, 0)).unwrap();
+        assert!(matches!(ed, Edit::Cells(ref c) if c.is_empty()));
+    }
+
+    #[test]
+    fn move_across_sheets() {
+        let (mut e, s) = setup();
+        let ed = e.add_sheet_edit(1);
+        e.apply(ed);
+        let t = e.wb.sheets[1].id;
+        assert_eq!(e.wb.sheets[1].name, "Sheet3");
+        put(&mut e, s, &[("A1", "4"), ("A2", "=A1 C1 +"), ("C1", "1"), ("B1", "=A1 2 *"), ("B2", "=A1:A2 sum")]);
+        put(&mut e, t, &[("D1", "=Sheet1!A2")]);
+        mv(&mut e, Rect::span(s, (0, 0), (1, 0)), t, (1, 1));
+        assert_eq!(text(&e, s, "B1"), "=Sheet3!B2 2 *");
+        assert_eq!(text(&e, s, "B2"), "=Sheet3!B2:B3 sum");
+        assert_eq!(val(&e, s, "B2"), "9");
+        // on the new sheet: the moved pair still refer to each other, and C1 stays on Sheet1
+        assert_eq!(text(&e, t, "B3"), "=B2 Sheet1!C1 +");
+        assert_eq!(text(&e, t, "D1"), "=Sheet3!B3");
+        assert_eq!(val(&e, t, "D1"), "5");
+    }
+
+    #[test]
+    fn move_takes_the_spill_along() {
+        let (mut e, s) = setup();
+        put(&mut e, s, &[("A1", "=3 range"), ("B1", "=A3"), ("B2", "=A1 sum")]);
+        assert_eq!(val(&e, s, "A3"), "2");
+        // a spilled cell can't move on its own
+        let err = move_cells(&mut e, Rect::cell(s, 1, 0), s, (5, 5)).unwrap_err();
+        assert!(err.contains("A2 is spilled"), "{err}");
+        mv(&mut e, Rect::cell(s, 0, 0), s, (0, 3));
+        assert_eq!(val(&e, s, "D3"), "2");
+        assert_eq!(text(&e, s, "B1"), "=D3");
+        assert_eq!(val(&e, s, "B1"), "2");
+        assert_eq!(text(&e, s, "B2"), "=D1 sum");
     }
 }

@@ -828,3 +828,118 @@ fn wide_numbers_never_look_like_other_numbers() {
     h.run_steps(2);
     shot(&mut h, "23_wide_number_hover");
 }
+
+// ---- moving cells --------------------------------------------------------------
+
+fn paste_clip(h: &mut Harness<'static, App>) {
+    let text = h.state().clip.as_ref().expect("nothing copied").text.clone();
+    h.event(Event::Paste(text));
+    h.run_steps(2);
+}
+
+#[test]
+fn cut_then_paste_moves_cells() {
+    let mut h = harness();
+    type_into(&mut h, "E24", "5");
+    type_into(&mut h, "E25", "=E24 2 *");
+    type_into(&mut h, "F24", "=E24 1 +");
+    { let p = center(&h, "E24"); click(&mut h, p, Modifiers::NONE); }
+    h.event(Event::Cut);
+    h.run_steps(2);
+    // a cut only marks the cells; nothing changes until the paste
+    assert_eq!(source(&h, "E24"), "5");
+    shot(&mut h, "24_cut_marked");
+    { let p = center(&h, "G27"); click(&mut h, p, Modifiers::NONE); }
+    paste_clip(&mut h);
+    shot(&mut h, "25_cut_pasted");
+    assert_eq!(source(&h, "E24"), "");
+    assert_eq!(source(&h, "G27"), "5");
+    assert_eq!(source(&h, "E25"), "=G27 2 *");
+    assert_eq!(source(&h, "F24"), "=G27 1 +");
+    assert_eq!(shown(&h, "E25"), "10");
+    // one undo step puts everything back, and redo moves it again
+    undo(&mut h);
+    assert_eq!(source(&h, "E24"), "5");
+    assert_eq!(source(&h, "G27"), "");
+    assert_eq!(source(&h, "E25"), "=E24 2 *");
+    command(&mut h, Command::Redo);
+    assert_eq!(source(&h, "E25"), "=G27 2 *");
+    // the cut is used up: pasting again copies the moved cells
+    { let p = center(&h, "G28"); click(&mut h, p, Modifiers::NONE); }
+    paste_clip(&mut h);
+    assert_eq!(source(&h, "G28"), "5");
+    assert_eq!(source(&h, "G27"), "5");
+    assert_eq!(source(&h, "E25"), "=G27 2 *");
+    // a cut interrupted by an edit doesn't move: the paste copies
+    { let p = center(&h, "G27"); click(&mut h, p, Modifiers::NONE); }
+    h.event(Event::Cut);
+    h.run_steps(2);
+    type_into(&mut h, "F29", "1");
+    { let p = center(&h, "H27"); click(&mut h, p, Modifiers::NONE); }
+    paste_clip(&mut h);
+    assert_eq!(source(&h, "G27"), "5");
+    assert_eq!(source(&h, "H27"), "5");
+}
+
+#[test]
+fn spilled_cells_cant_be_cut_alone() {
+    let mut h = harness();
+    // A12 is part of the demo's spilled sequence
+    assert_eq!(source(&h, "A12"), "");
+    assert_eq!(shown(&h, "A12"), "3");
+    { let p = center(&h, "A12"); click(&mut h, p, Modifiers::NONE); }
+    h.event(Event::Cut);
+    h.run_steps(2);
+    { let p = center(&h, "G27"); click(&mut h, p, Modifiers::NONE); }
+    paste_clip(&mut h);
+    assert!(h.state().status.as_deref().unwrap_or("").contains("A12 is spilled"), "{:?}", h.state().status);
+    assert_eq!(source(&h, "G27"), "");
+}
+
+#[test]
+fn dragging_the_selection_border_moves_and_alt_copies() {
+    let mut h = harness();
+    type_into(&mut h, "E24", "5");
+    type_into(&mut h, "F24", "=E24 2 *");
+    { let p = center(&h, "E24"); click(&mut h, p, Modifiers::NONE); }
+    // press just inside the selection's left edge and drag to G27, with a snapshot mid-drag
+    let from = h.state().geo.as_ref().unwrap().cell(23, 4).left_center() + Vec2::new(1.0, 0.0);
+    let to = h.state().geo.as_ref().unwrap().cell(26, 6).left_center() + Vec2::new(1.0, 0.0);
+    h.event(Event::PointerMoved(from));
+    h.run_steps(1);
+    press(&mut h, from, true, Modifiers::NONE);
+    for i in 1..=6 {
+        h.event(Event::PointerMoved(from + (to - from) * (i as f32 / 6.0)));
+        h.run_steps(1);
+    }
+    assert!(matches!(h.state().drag, Drag::Move { copy: false, .. }));
+    shot(&mut h, "26_border_drag");
+    press(&mut h, to, false, Modifiers::NONE);
+    h.run_steps(2);
+    assert_eq!(source(&h, "E24"), "");
+    assert_eq!(source(&h, "G27"), "5");
+    assert_eq!(source(&h, "F24"), "=G27 2 *");
+    assert_eq!(h.state().cursor, (26, 6));
+    shot(&mut h, "27_border_dropped");
+    undo(&mut h);
+    assert_eq!(source(&h, "E24"), "5");
+    assert_eq!(source(&h, "F24"), "=E24 2 *");
+    command(&mut h, Command::Redo);
+    assert_eq!(source(&h, "G27"), "5");
+    // Alt-drag on the border copies
+    let from = h.state().geo.as_ref().unwrap().cell(26, 6).left_center() + Vec2::new(1.0, 0.0);
+    let to = h.state().geo.as_ref().unwrap().cell(26, 7).left_center() + Vec2::new(1.0, 0.0);
+    drag(&mut h, from, to, Modifiers::ALT);
+    assert_eq!(source(&h, "G27"), "5");
+    assert_eq!(source(&h, "H27"), "5");
+    assert_eq!(source(&h, "F24"), "=G27 2 *");
+    // Alt-drag inside the cell still scrubs
+    let c = center(&h, "H27");
+    drag(&mut h, c, c - Vec2::new(40.0, 0.0), Modifiers::ALT);
+    assert_eq!(source(&h, "H27"), "-5");
+    // a click just outside the selection's border selects the cell there
+    let edge = h.state().geo.as_ref().unwrap().cell(26, 7).left_center() - Vec2::new(2.0, 0.0);
+    click(&mut h, edge, Modifiers::NONE);
+    assert_eq!(h.state().cursor, (26, 6));
+    assert_eq!(source(&h, "G27"), "5");
+}

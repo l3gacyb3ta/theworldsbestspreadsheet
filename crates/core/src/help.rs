@@ -655,8 +655,8 @@ pub const ERRORS: &[ErrorHelp] = &[
     ErrorHelp {
         patterns: &["deleted cell", "deleted cells", "#ref"],
         title: "Reference to a deleted cell",
-        why: "The row or column this reference pointed to was deleted.",
-        fix: "Undo the deletion, or point the reference at another cell.",
+        why: "The row or column this reference pointed to was deleted, or moved cells were dropped on the cell.",
+        fix: "Undo the deletion or move, or point the reference at another cell.",
         topic: "references",
     },
     ErrorHelp {

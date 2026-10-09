@@ -49,12 +49,8 @@ impl App {
                     return;
                 }
                 Event::Copy => self.copy(ctx),
-                Event::Cut => {
-                    self.copy(ctx);
-                    let e = ops::clear(&self.eng, self.sel());
-                    self.exec(e);
-                }
-                Event::Paste(s) => self.paste(&s),
+                Event::Cut => self.cut(ctx),
+                Event::Paste(s) => self.paste(ctx, &s),
                 Event::Key { key, pressed: true, modifiers: m, .. } => {
                     let ext = m.shift;
                     match key {
@@ -78,6 +74,7 @@ impl App {
                         Key::Escape => {
                             self.offer = None;
                             self.status = None;
+                            self.cut = None;
                         }
                         _ => {}
                     }
@@ -249,17 +246,55 @@ impl App {
         self.clip = Some(clip);
     }
 
-    fn paste(&mut self, s: &str) {
+    /// ⌘X marks the selection; the next ⌘V moves it, unless the document changed in between.
+    fn cut(&mut self, ctx: &egui::Context) {
+        self.copy(ctx);
+        let sel = self.sel();
+        self.cut = Some((sel, files::fingerprint(&self.eng.wb)));
+        self.status = Some(format!("cut {}×{} — paste to move it", sel.rows(), sel.cols()));
+    }
+
+    fn paste(&mut self, ctx: &egui::Context, s: &str) {
         let sid = self.sid();
         let (r0, c0) = (self.anchor.0.min(self.cursor.0), self.anchor.1.min(self.cursor.1));
+        let ours = self.clip.as_ref().is_some_and(|clip| clip.text.trim_end() == s.trim_end().replace("\r\n", "\n"));        if let Some((src, fp)) = self.cut.take().filter(|(_, fp)| ours && *fp == files::fingerprint(&self.eng.wb)) {
+            if self.move_block(src, (r0, c0)) {
+                // the cut is used up: pasting again copies the cells from where they are now
+                self.copy(ctx);
+                self.status = Some(format!("moved {}×{}", src.rows(), src.cols()));
+            } else {
+                self.cut = Some((src, fp));
+            }
+            return;
+        }
         let edit = match &self.clip {
-            Some(clip) if clip.text.trim_end() == s.trim_end().replace("\r\n", "\n") => {
+            Some(clip) if ours => {
                 let clip = clip.clone();
                 ops::paste(&mut self.eng, &clip, sid, (r0, c0))
             }
             _ => ops::paste_text(&mut self.eng, s, sid, (r0, c0)),
         };
         self.exec(edit);
+    }
+
+    /// Moves `src` so its top-left is at `at` on this sheet and selects it there; false (with the
+    /// reason in the status bar) if it can't be moved.
+    pub(super) fn move_block(&mut self, src: CRect, at: (usize, usize)) -> bool {
+        let sid = self.sid();
+        match ops::move_cells(&mut self.eng, src, sid, at) {
+            Ok(e) => {
+                if !matches!(&e, Edit::Cells(c) if c.is_empty()) {
+                    self.exec(e);
+                }
+                self.anchor = at;
+                self.cursor = (at.0 + src.rows() - 1, at.1 + src.cols() - 1);
+                true
+            }
+            Err(msg) => {
+                self.status = Some(msg);
+                false
+            }
+        }
     }
 
     pub(super) fn fill_down(&mut self) {

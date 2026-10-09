@@ -7,6 +7,7 @@ The sheet is meant to be predictable, not clever. It never silently guesses, rew
 - **A range** is one array; **empty cells** are errors, not zeros ([[#arrays]]).
 - **A reference** points at a cell, not a position, so structure edits never break it ([[#references]]).
 - **Relative references** move only when you copy or fill.
+- **Moving cells** updates every reference to them, and references to the cells they replace become `#ref!`; nothing else is rewritten ([[#editing]]).
 - **Units** are checked on every operation; mismatches are reported where they occur ([[#units]]).
 - **Display units** compose and cancel identical factors, and are never renamed for you. The one exception: a dimensionless unit like % is absorbed into a dimensioned quantity.
 - **Spills** never overwrite anything ([[#spill]]).

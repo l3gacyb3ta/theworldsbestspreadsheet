@@ -27,7 +27,20 @@ Type a program next to a filled column and the sheet offers to extend it down to
 
 ## Copy and paste
 
-⌘C / ⌘X / ⌘V. Programs pasted inside the sheet move their relative references. Text pasted from elsewhere is split on tabs and newlines and typed into the cells.
+⌘C / ⌘V copies. Programs pasted inside the sheet move their relative references. Text pasted from elsewhere is split on tabs and newlines and typed into the cells.
+
+## Moving cells
+
+⌘X marks the selection with a dashed outline; the next ⌘V moves the cells there, on this sheet or another. Or drag the selection by its border; hold Alt while dropping to copy instead. A move is one undo step.
+
+Moving cells updates every reference to them; nothing else is rewritten:
+
+- References to a moved cell, from anywhere, follow it. A range follows only if all of its cells moved.
+- A moved program keeps pointing at the same cells, relative references included, unless those cells moved with it.
+- The cells a move lands on are replaced, so references to them become `#ref!`, as if they had been deleted. Undo brings them back.
+- A spill moves with its source. A spilled cell can't be moved on its own.
+
+A cut lasts until the paste, Escape, or any other edit; after that ⌘V copies.
 
 ## Rows and columns
 

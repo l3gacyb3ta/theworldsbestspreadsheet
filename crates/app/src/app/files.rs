@@ -142,6 +142,7 @@ impl App {
         self.undo.clear();
         self.redo.clear();
         self.clip = None;
+        self.cut = None;
         self.drag = Drag::None;
         self.offer = None;
         self.name_for = None;
