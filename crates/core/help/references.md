@@ -36,6 +36,13 @@ Tick **input** next to a name and the cell is tinted yellow and listed in the In
 
 A reference to an empty cell is an error, not zero. If you mean zero, type 0. This makes a missing input visible instead of silently wrong.
 
+The same goes for a range with an empty cell in it. When gaps are expected, say so: a range ending in `?` ([[A1:B5?]]) leaves its empty cells out.
+
+```example
+A1:A6 sum            ⇒ ! A6 is empty
+A1:A6? sum           ⇒ 15
+```
+
 ## Cycles
 
 If cells depend on each other in a loop, every cell in the loop shows `#cycle`, the loop is listed in the message, and the cells are highlighted red.

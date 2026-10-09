@@ -21,7 +21,9 @@ pub trait Env {
     /// Value of a referenced cell: the whole array for a spill source, the
     /// element for a spilled-into cell.
     fn cell_value(&self, k: CellKey) -> Result<Value, String>;
-    fn range_value(&self, sheet: SheetId, a: &StoredRef, b: &StoredRef) -> Result<Value, String>;
+    /// A range as one array. With `gaps` (`A1:B5?`) its empty cells are
+    /// skipped and the rest form a list, row by row.
+    fn range_value(&self, sheet: SheetId, a: &StoredRef, b: &StoredRef, gaps: bool) -> Result<Value, String>;
     fn unit_info(&self, name: &str) -> Result<UnitInfo, String>;
     fn word(&self, k: CellKey) -> Option<Arc<Compiled>>;
 }
@@ -211,7 +213,7 @@ impl<'e> Interp<'e> {
             OpKind::Num(x) => stack.push(Value::Num(Num::plain(*x))),
             OpKind::Str(s) => stack.push(Value::Text(Text { shape: vec![], data: Arc::new(vec![s.clone()]) })),
             OpKind::Ref(k) => stack.push(self.env.cell_value(*k)?),
-            OpKind::Range { sheet, a, b } => stack.push(self.env.range_value(*sheet, a, b)?),
+            OpKind::Range { sheet, a, b, gaps } => stack.push(self.env.range_value(*sheet, a, b, *gaps)?),
             OpKind::Unit(u) => {
                 let n = pop_num(stack, "a unit")?;
                 stack.push(Value::Num(self.apply_unit(n, u)?));

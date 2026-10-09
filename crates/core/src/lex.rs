@@ -17,7 +17,9 @@ pub enum Tok {
     /// `to[km/h]`
     To(String),
     Ref(A1Ref),
-    Range(A1Ref, A1Ref),
+    /// `A1:B5`; the flag is set for `A1:B5?`, a range that may have empty
+    /// cells (its span stops before the `?`).
+    Range(A1Ref, A1Ref, bool),
     /// A reference whose row/column was deleted.
     DeadRef,
     /// `/+`, `/max`, `/myword`
@@ -132,7 +134,7 @@ fn classify(chunk: &str) -> Tok {
     }
     if let Some((a, b)) = a1::parse_ref_or_range(chunk) {
         return match b {
-            Some(b) => Tok::Range(a, b),
+            Some(b) => Tok::Range(a, b, false),
             None => Tok::Ref(a),
         };
     }
@@ -227,7 +229,18 @@ pub fn lex(src: &str) -> Vec<Token> {
         while i < b.len() && !b[i].is_ascii_whitespace() && b[i] != b'[' && b[i] != b'"' {
             i += 1;
         }
-        out.push(Token { tok: classify(&src[start..i]), span: start..i });
+        // `A1:A9?` is a range that may have empty cells; the `?` is left out of its span
+        let chunk = &src[start..i];
+        let (tok, end) = match chunk.strip_suffix('?').filter(|c| !c.is_empty()) {
+            Some("#ref!") => (Tok::DeadRef, i),
+            Some(base) => match a1::parse_ref_or_range(base) {
+                Some((a, Some(b))) => (Tok::Range(a, b, true), i - 1),
+                Some((_, None)) => (Tok::Bad("? only applies to a range: A1:A9? reads the range's non-empty cells".into()), i),
+                None => (classify(chunk), i),
+            },
+            None => (classify(chunk), i),
+        };
+        out.push(Token { tok, span: start..end });
     }
     out
 }
@@ -243,7 +256,7 @@ mod tests {
         assert_eq!(
             toks("A1:A10 /+ 5[m/s] to[km/h] -3 - \"hi there\""),
             vec![
-                Tok::Range(a1::parse_ref("A1").unwrap(), a1::parse_ref("A10").unwrap()),
+                Tok::Range(a1::parse_ref("A1").unwrap(), a1::parse_ref("A10").unwrap(), false),
                 Tok::Reduce("+".into()),
                 Tok::Num(5.0),
                 Tok::Unit("m/s".into()),
@@ -260,6 +273,23 @@ mod tests {
             [Tok::Comment("x -- x²".into()), Tok::Word("dup".into())]
         );
         assert_eq!(toks("(m"), vec![Tok::Word("(m".into())]);
+    }
+    #[test]
+    fn ranges_with_gaps() {
+        let r = |s: &str| a1::parse_ref(s).unwrap();
+        let t = lex("A1:A10? sum");
+        assert_eq!(t[0].tok, Tok::Range(r("A1"), r("A10"), true));
+        assert_eq!(t[0].span, 0..6);
+        assert_eq!(t[1].tok, Tok::Word("sum".into()));
+        for s in ["$A$1:$B$5", "Sheet2!A1:B5", "'my sheet'!A1:B5"] {
+            let (a, b) = a1::parse_ref_or_range(s).unwrap();
+            let t = lex(&format!("{s}?"));
+            assert_eq!(t[0].tok, Tok::Range(a, b.unwrap(), true));
+            assert_eq!(t[0].span, 0..s.len());
+        }
+        assert!(matches!(&toks("A1?")[0], Tok::Bad(m) if m.starts_with("? only applies to a range")));
+        assert_eq!(toks("? x?"), vec![Tok::Word("?".into()), Tok::Word("x?".into())]);
+        assert_eq!(toks("#ref!?"), vec![Tok::DeadRef]);
     }
     #[test]
     fn dates() {
