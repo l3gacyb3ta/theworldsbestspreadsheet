@@ -24,7 +24,7 @@ pub trait Env {
     /// A range as one array. With `gaps` (`A1:B5?`) its empty cells are
     /// skipped and the rest form a list, row by row.
     fn range_value(&self, sheet: SheetId, a: &StoredRef, b: &StoredRef, gaps: bool) -> Result<Value, String>;
-    fn unit_info(&self, name: &str) -> Result<UnitInfo, String>;
+    fn unit_info(&self, name: &str) -> Result<Arc<UnitInfo>, String>;
     fn word(&self, k: CellKey) -> Option<Arc<Compiled>>;
 }
 
@@ -314,7 +314,7 @@ impl<'e> Interp<'e> {
         Ok(from_rows(out, "scan")?)
     }
 
-    fn lookup(&self, name: &str) -> R<UnitInfo> {
+    fn lookup(&self, name: &str) -> R<Arc<UnitInfo>> {
         self.env.unit_info(name)
     }
 
@@ -728,7 +728,7 @@ fn transpose(v: Value) -> R<Value> {
         }
         Value::Num(n) if n.rank() == 1 => {
             let k = n.len();
-            Ok(Value::Num(Num::with_shape(vec![1, k], (*n.data).clone(), n.q.clone())))
+            Ok(Value::Num(Num { shape: vec![1, k], data: n.data.clone(), q: n.q.clone(), prov: None }))
         }
         Value::Text(t) if t.shape.len() == 2 => {
             let (r, c) = (t.shape[0], t.shape[1]);

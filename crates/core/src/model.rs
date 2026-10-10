@@ -6,7 +6,8 @@ use crate::a1::{self, A1Ref};
 use crate::ids::*;
 use crate::lex::{self, Tok};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::collections::BTreeMap;
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct StoredRef {
@@ -129,7 +130,7 @@ pub struct Axis<I: Copy + Eq + std::hash::Hash> {
 
 impl<I: Copy + Eq + std::hash::Hash> Axis<I> {
     pub fn new(ids: Vec<I>) -> Self {
-        let mut a = Axis { order: ids, dead: HashSet::new(), alive: vec![], pos: HashMap::new(), tomb: HashMap::new() };
+        let mut a = Axis { order: ids, dead: HashSet::default(), alive: vec![], pos: HashMap::default(), tomb: HashMap::default() };
         a.reindex();
         a
     }
@@ -250,9 +251,9 @@ impl Sheet {
             name: name.to_string(),
             rows: Axis::new((0..rows).map(|_| RowId(fresh_id())).collect()),
             cols: Axis::new((0..cols).map(|_| ColId(fresh_id())).collect()),
-            cells: HashMap::new(),
-            row_heights: HashMap::new(),
-            col_widths: HashMap::new(),
+            cells: HashMap::default(),
+            row_heights: HashMap::default(),
+            col_widths: HashMap::default(),
         }
     }
     pub fn reindex(&mut self) {

@@ -456,7 +456,7 @@ impl<'e> Abs<'e> {
     fn resolve(&self, u: &UnitExpr) -> S<Option<units::Resolved>> {
         const UNKNOWN: &str = "\0unknown";
         let r = units::resolve(u, &mut |n| match self.env.unit(n) {
-            Some((Some(dim), affine)) => Ok(UnitInfo { name: n.into(), dim, factor: 1.0, affine: affine.then_some(0.0), delta: None }),
+            Some((Some(dim), affine)) => Ok(std::sync::Arc::new(UnitInfo::new(n.into(), dim, 1.0, affine.then_some(0.0), None))),
             _ => Err(UNKNOWN.into()),
         });
         match r {

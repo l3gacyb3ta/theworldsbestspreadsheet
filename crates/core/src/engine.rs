@@ -11,7 +11,8 @@ use crate::model::{classify, Cell, Kind, NameDef, Piece, Sheet, StoredRef, Workb
 use crate::parse::{declares, CompileError, Compiled, Compiler, Declares, Dep, OpKind, Symbols};
 use crate::units::{Dim, Quant, UnitInfo};
 use crate::value::{Num, Prov, Text, Value};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -134,6 +135,19 @@ pub struct Engine {
     pub cycles: Vec<Vec<CellKey>>,
     /// Number of cells evaluated by the last recalc (for diagnostics/tests).
     pub last_eval_count: usize,
+    /// Bumped whenever the dependency graph or spill coverage changes.
+    graph_gen: u64,
+    /// The last recalc's dirty set and evaluation order, reused while the same
+    /// cells change and the graph doesn't (scrubbing, goal-seek).
+    plan: Option<Plan>,
+}
+
+/// A recalc plan: valid for `seeds` while `graph_gen` hasn't moved.
+struct Plan {
+    gen: u64,
+    seeds: Vec<CellKey>,
+    dirty: HashSet<CellKey>,
+    order: Vec<CellKey>,
 }
 
 struct View<'a>(&'a Engine);
@@ -145,10 +159,10 @@ impl<'a> Env for View<'a> {
     fn range_value(&self, sheet: SheetId, a: &StoredRef, b: &StoredRef, gaps: bool) -> Result<Value, String> {
         self.0.range_value(sheet, a, b, gaps)
     }
-    fn unit_info(&self, name: &str) -> Result<UnitInfo, String> {
+    fn unit_info(&self, name: &str) -> Result<Arc<UnitInfo>, String> {
         let Some(k) = self.0.syms.units.get(name) else { return Err(format!("unknown unit {name}")) };
         match self.0.results.get(k) {
-            Some(Ok(Value::Unit(u))) => Ok((**u).clone()),
+            Some(Ok(Value::Unit(u))) => Ok(u.clone()),
             Some(Err(_)) => Err(format!("unit {name} has an error (at {})", self.0.wb.cell_label(*k, None))),
             _ => Err(format!("unit {name} isn't ready")),
         }
@@ -205,17 +219,19 @@ impl Engine {
     pub fn new(wb: Workbook) -> Engine {
         let mut e = Engine {
             wb,
-            nodes: HashMap::new(),
-            results: HashMap::new(),
-            statics: HashMap::new(),
-            spills: HashMap::new(),
-            desired: HashMap::new(),
-            cover: HashMap::new(),
-            rdeps: HashMap::new(),
+            nodes: HashMap::default(),
+            results: HashMap::default(),
+            statics: HashMap::default(),
+            spills: HashMap::default(),
+            desired: HashMap::default(),
+            cover: HashMap::default(),
+            rdeps: HashMap::default(),
             range_deps: Vec::new(),
             syms: Symbols::default(),
             cycles: Vec::new(),
             last_eval_count: 0,
+            graph_gen: 0,
+            plan: None,
         };
         e.wb.after_load();
         e.rebuild();
@@ -310,7 +326,7 @@ impl Engine {
 
     /// Literal number cells upstream of `k` (transitively), named inputs first.
     pub fn upstream_inputs(&self, k: CellKey) -> Vec<CellKey> {
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         let mut stack = vec![k];
         let mut found = Vec::new();
         while let Some(c) = stack.pop() {
@@ -498,18 +514,8 @@ impl Engine {
         }
         if let Some(r) = self.results.get(&k) {
             return match r {
-                Ok(v) => {
-                    let mut v = v.clone();
-                    if let Value::Num(n) = &mut v {
-                        let p: Vec<Prov> = if self.kind(k) == Kind::Number {
-                            vec![Prov::Literal(k); n.len()]
-                        } else {
-                            (0..n.len()).map(|i| Prov::Derived(k, i)).collect()
-                        };
-                        n.prov = Some(Arc::new(p));
-                    }
-                    Ok(v)
-                }
+                // provenance was stamped when the result was stored (see recalc)
+                Ok(v) => Ok(v.clone()),
                 Err(_) => Err(format!("{} has an error", self.wb.cell_label(k, None))),
             };
         }
@@ -962,8 +968,10 @@ impl Engine {
             self.nodes.insert(*k, n);
             self.index_deps(*k);
         }
+        self.graph_gen += 1;
+        self.plan = None;
         let all: Vec<CellKey> = self.nodes.keys().copied().collect();
-        self.recalc(all.into_iter().collect(), None);
+        self.recalc(all.into_iter().collect(), None, None);
     }
 
     fn cells_changed(&mut self, keys: &[CellKey]) {
@@ -988,6 +996,10 @@ impl Engine {
                 self.nodes.insert(k, n);
                 self.index_deps(k);
             }
+            // same dependencies (e.g. a scrubbed number): the graph, and so the plan, still hold
+            if !matches!((&old, self.nodes.get(&k)), (Some(o), Some(n)) if o.deps == n.deps) {
+                self.graph_gen += 1;
+            }
             // scrubbing a number never changes a dimension: nothing downstream needs the static pass again
             if !matches!((&old, self.nodes.get(&k)), (Some(o), Some(n)) if self.same_statics(k, o, n)) {
                 static_seeds.push(k);
@@ -1002,9 +1014,14 @@ impl Engine {
                 }
             }
         }
-        let dirty = self.closure(seeds);
-        let static_dirty = if static_seeds.is_empty() { HashSet::new() } else { self.closure(static_seeds) };
-        self.recalc(dirty, Some(static_dirty));
+        let static_dirty = if static_seeds.is_empty() { HashSet::default() } else { self.closure(static_seeds) };
+        let (dirty, order) = match self.plan.take().filter(|p| p.gen == self.graph_gen && p.seeds == seeds) {
+            Some(p) => (p.dirty, Some(p.order)),
+            None => (self.closure(seeds.clone()), None),
+        };
+        if let Some((dirty, order)) = self.recalc(dirty, Some(static_dirty), order) {
+            self.plan = Some(Plan { gen: self.graph_gen, seeds, dirty, order });
+        }
     }
 
     fn dependents_of_position(&self, p: CellKey) -> Vec<CellKey> {
@@ -1041,7 +1058,7 @@ impl Engine {
 
     /// Seeds plus everything downstream of them.
     fn closure(&self, seeds: Vec<CellKey>) -> HashSet<CellKey> {
-        let mut seen: HashSet<CellKey> = HashSet::new();
+        let mut seen: HashSet<CellKey> = HashSet::default();
         let mut stack = seeds;
         while let Some(k) = stack.pop() {
             if !seen.insert(k) {
@@ -1094,12 +1111,20 @@ impl Engine {
         out
     }
 
-    /// Recomputes `dirty` in dependency order. The static pass reruns on
-    /// `static_dirty` (all of `dirty` when `None`) and on nodes it hasn't seen.
-    fn recalc(&mut self, mut dirty: HashSet<CellKey>, mut static_dirty: Option<HashSet<CellKey>>) {
+    /// Recomputes `dirty` in dependency order (`order` when the caller has a
+    /// cached plan for it). The static pass reruns on `static_dirty` (all of
+    /// `dirty` when `None`) and on nodes it hasn't seen. Returns the dirty set
+    /// and order when they can be reused: one pass, no cycles, no spill changes.
+    fn recalc(
+        &mut self,
+        mut dirty: HashSet<CellKey>,
+        mut static_dirty: Option<HashSet<CellKey>>,
+        mut order_hint: Option<Vec<CellKey>>,
+    ) -> Option<(HashSet<CellKey>, Vec<CellKey>)> {
         self.last_eval_count = 0;
         self.cycles.retain(|cyc| !cyc.iter().any(|k| dirty.contains(k)));
-        for _pass in 0..8 {
+        let mut reusable: Option<Vec<CellKey>> = None;
+        for pass in 0..8 {
             // drop results/spills for cells that no longer have content
             let gone: Vec<CellKey> = dirty.iter().filter(|k| !self.nodes.contains_key(k)).copied().collect();
             let mut changed_positions: Vec<CellKey> = Vec::new();
@@ -1111,7 +1136,13 @@ impl Engine {
                     changed_positions.extend(self.uncover(&reg));
                 }
             }
-            let order = self.topo(&dirty);
+            let order = match order_hint.take() {
+                Some(o) => o.into_iter().map(|k| (k, None)).collect(),
+                None => self.topo(&dirty),
+            };
+            if pass == 0 && gone.is_empty() && order.iter().all(|(_, c)| c.is_none()) {
+                reusable = Some(order.iter().map(|(k, _)| *k).collect());
+            }
             for (k, cycle) in order {
                 if let Some(path) = cycle {
                     self.results.insert(
@@ -1138,13 +1169,26 @@ impl Engine {
                 }
                 self.last_eval_count += 1;
                 let res = self.evaluate(k);
-                let (res, changed) = self.place_spill(k, res);
+                let (mut res, changed) = self.place_spill(k, res);
                 changed_positions.extend(changed);
+                // Stamp the provenance a reference to this cell carries once, here, so
+                // every reference is an Arc clone instead of a fresh allocation.
+                if let Ok(Value::Num(n)) = &mut res {
+                    let p: Vec<Prov> = if self.kind(k) == Kind::Number {
+                        vec![Prov::Literal(k); n.len()]
+                    } else {
+                        (0..n.len()).map(|i| Prov::Derived(k, i)).collect()
+                    };
+                    n.prov = Some(Arc::new(p));
+                }
                 self.results.insert(k, res);
             }
             if changed_positions.is_empty() {
-                break;
+                return reusable.map(|o| (dirty, o));
             }
+            // spill coverage changed, so eval_deps and closure results may have too
+            self.graph_gen += 1;
+            reusable = None;
             // Positions whose spill coverage changed: their readers recompute.
             let mut next = Vec::new();
             for p in changed_positions {
@@ -1160,15 +1204,17 @@ impl Engine {
             // spill coverage changed: what references and ranges read has too
             static_dirty = None;
         }
+        None
     }
 
     /// Dependency order over the dirty set; cycle members come with their cycle.
     fn topo(&mut self, dirty: &HashSet<CellKey>) -> Vec<(CellKey, Option<Vec<CellKey>>)> {
-        let mut state: HashMap<CellKey, u8> = HashMap::new();
-        let mut in_cycle: HashMap<CellKey, Vec<CellKey>> = HashMap::new();
+        let mut state: HashMap<CellKey, u8> = HashMap::default();
+        let mut in_cycle: HashMap<CellKey, Vec<CellKey>> = HashMap::default();
         let mut order = Vec::with_capacity(dirty.len());
         let mut roots: Vec<CellKey> = dirty.iter().copied().filter(|k| self.nodes.contains_key(k)).collect();
-        roots.sort_by_key(|k| (self.wb.pos(*k), k.sheet));
+        // position lookups are hash lookups: compute each key once, not per comparison
+        roots.sort_by_cached_key(|k| (self.wb.pos(*k), k.sheet));
         for root in roots {
             if state.contains_key(&root) {
                 continue;
@@ -1313,7 +1359,7 @@ impl Engine {
             }
             Compiled::Base { unit, dim, .. } => {
                 self.dup_check(&self.syms.units, unit, k, "unit")?;
-                Ok(Value::Unit(Arc::new(UnitInfo { name: unit.clone(), dim: Dim::base(dim), factor: 1.0, affine: None, delta: None })))
+                Ok(Value::Unit(Arc::new(UnitInfo::new(unit.clone(), Dim::base(dim), 1.0, None, None))))
             }
             Compiled::UnitDef { name, body, offset } => {
                 self.dup_check(&self.syms.units, name, k, "unit")?;
@@ -1326,13 +1372,7 @@ impl Engine {
                 if f == 0.0 || !f.is_finite() {
                     return Err(local("a unit's size must be a finite non-zero number".into(), None));
                 }
-                Ok(Value::Unit(Arc::new(UnitInfo {
-                    name: name.clone(),
-                    dim: n.q.dim.clone(),
-                    factor: f,
-                    affine: *offset,
-                    delta: offset.map(|_| n.q.disp.clone()),
-                })))
+                Ok(Value::Unit(Arc::new(UnitInfo::new(name.clone(), n.q.dim.clone(), f, *offset, offset.map(|_| n.q.disp.clone())))))
             }
         }
     }

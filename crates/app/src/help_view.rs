@@ -420,7 +420,7 @@ impl Help {
         let mut base_of: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         for (name, _, info) in &units {
             if let Some(u) = info {
-                if let [(d, e)] = u.dim.0.as_slice() {
+                if let [(d, e)] = &*u.dim.0 {
                     if *e == wbs_core::rational::Rational::ONE && u.factor == 1.0 && u.affine.is_none() {
                         base_of.entry(d.to_string()).or_insert_with(|| name.clone());
                     }
