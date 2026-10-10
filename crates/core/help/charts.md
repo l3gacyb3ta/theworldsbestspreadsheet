@@ -36,7 +36,7 @@ If a point's y value comes straight from a number cell (through a range, a refer
 
 **Scatter and path points move in 2D; line points move only up and down.** On a `scatter` or `path`, the pointer's x writes the x value's cell and its y writes the y value's cell, each the same way (own decimals and unit; dates move in whole days, °C stays °C). A diagonal drag that writes two cells is one undo step. The chart's axes stay put until you let go.
 
-- **Only one axis from a cell**: if only x (or only y) comes straight from a number cell, only that axis moves; the cursor and the tooltip say which (`drag sideways to edit A3 — y is computed`).
+- **Only one axis from a cell**: if only x (or only y) comes straight from a number cell, only that axis moves; the cursor and the tooltip say which (`drag sideways to edit A3 — y is computed in C3, so only x moves`).
 - **Computed points**: a computed value is never solved for in 2D (that would be solving for two inputs at once). If x comes from a cell, the point moves sideways only, writing it. If neither does, a computed y goal-seeks as on a line (below), up and down only, and the tooltip says x stays.
 
 ### Goal-seek: dragging a computed point
