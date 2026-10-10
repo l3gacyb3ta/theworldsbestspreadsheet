@@ -31,6 +31,7 @@
 |---|---|
 | ⌘Z / ⇧⌘Z | undo / redo |
 | ⌘C ⌘X ⌘V | copy, cut, paste (cut then paste moves the cells) |
+| ⇧⌘C | copy the values the cells show, as literals (`5300 [m]`) |
 | ⌘D | fill down |
 | ⌘E | accept "extend formula" |
 | ⌘N | new workbook |
