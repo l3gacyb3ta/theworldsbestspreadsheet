@@ -1,6 +1,7 @@
 mod app;
 mod chart_view;
 mod demo;
+mod fonts;
 mod help_view;
 mod menus;
 mod prefs;

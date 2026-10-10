@@ -57,6 +57,7 @@ impl App {
                     Value::Unit(_) | Value::Dim(_) | Value::Word(_) => self.eng.wb.cell_text(k),
                     _ => value.display_at(dr, dc),
                 };
+                self.fonts.note(&text);
                 Some((text, color, right))
             }
         }
@@ -99,6 +100,7 @@ impl App {
         self.geo = Some(g.clone());
         self.paint(ui, &ctx, &pal, &g, area, dark, sid);
         self.cell_editor(ui, &g, &pal, sid);
+        self.ime_area(&ctx, g.cell(self.cursor.0, self.cursor.1));
         self.offer_banner(ui, &g, sid);
         self.context_menu(&resp);
     }

@@ -99,6 +99,10 @@ struct Editing {
     pick: Option<usize>,
     /// The completion list was closed with Escape (until the text or caret changes).
     comp_closed: bool,
+    /// An IME composition is in progress (its preedit text is part of `text`).
+    composing: bool,
+    /// Byte span of a composition started on a selected cell, held here until it's committed and the editor takes focus.
+    preedit: Option<Range<usize>>,
 }
 
 enum Drag {
@@ -219,6 +223,8 @@ pub struct App {
     queued: Vec<Command>,
     /// Synthetic input for the next frame (menu commands replayed as keys).
     inject: Vec<Event>,
+    /// System fonts for CJK, Arabic etc., loaded once such text appears.
+    fonts: crate::fonts::Fallbacks,
     native_menu: Option<crate::menus::NativeMenu>,
     name_buf: String,
     name_for: Option<CellKey>,
@@ -289,6 +295,7 @@ impl App {
             close_ok: false,
             queued: Vec::new(),
             inject: Vec::new(),
+            fonts: Default::default(),
             native_menu: None,
             name_buf: String::new(),
             name_for: None,
@@ -429,7 +436,7 @@ impl App {
         let orig = self.eng.wb.cell_text(k);
         let text = text.unwrap_or_else(|| orig.clone());
         let cursor = text.chars().count();
-        self.edit = Some(Editing { key: k, orig, text, cursor, ref_span: None, in_bar, pick: None, comp_closed: false });
+        self.edit = Some(Editing { key: k, orig, text, cursor, ref_span: None, in_bar, pick: None, comp_closed: false, composing: false, preedit: None });
         self.focus_req = Some((ctx.cumulative_pass_nr() + 1, cursor));
         self.offer = None;
     }
@@ -531,6 +538,7 @@ impl eframe::App for App {
         self.settings_ui(&ctx);
         self.document_ui(&ctx);
         self.autosave(&ctx);
+        self.fonts.load_if_wanted(&ctx);
         if let Some(m) = &self.native_menu {
             m.sync(self.trace, !self.undo.is_empty(), !self.redo.is_empty());
         }

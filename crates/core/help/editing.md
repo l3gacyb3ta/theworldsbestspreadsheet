@@ -13,6 +13,8 @@ While you edit a program:
 - **Tab** or **Enter** inserts the highlighted completion and keeps editing. With nothing highlighted they confirm the cell as usual.
 - **Escape** closes the completion list (until you type again); a second Escape cancels the edit.
 
+Input methods work in cells and the formula bar: start composing Japanese, Chinese or Korean on a selected cell and the edit begins with what you compose. While the input method is composing, Enter, Tab and Escape belong to it (Enter picks the conversion); press Enter again to confirm the cell. Text in other scripts shows with fonts found on your system; right-to-left text such as Arabic and Hebrew isn't laid out or edited properly yet.
+
 ## Fill
 
 Drag the small square at the bottom-right of the selection.
