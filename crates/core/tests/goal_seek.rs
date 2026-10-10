@@ -73,17 +73,17 @@ fn usd(e: &Engine, at: &str, v: f64) -> f64 {
 fn chart_points_know_which_element_they_are() {
     let e = model();
     let Some(Ok(Value::Chart(c))) = e.result(key(&e, "F3")) else { panic!() };
-    let prov = c.layers[0].ys.prov.as_ref().unwrap();
+    let prov = c.layers[0].ys.prov.to_vec(c.layers[0].ys.len()).unwrap();
     assert_eq!(prov[11], Prov::Derived(key(&e, "B10"), 11));
     assert_eq!(e.element_cell(key(&e, "B10"), 11), key(&e, "B21"));
     // a reference into the spill is that element of its source
     let mut e = e;
     set(&mut e, "A40", "=B21 B22 join B21 B22 join line");
     let Some(Ok(Value::Chart(c))) = e.result(key(&e, "A40")) else { panic!() };
-    assert_eq!(c.layers[0].ys.prov, None, "join computes: provenance is dropped");
+    assert!(c.layers[0].ys.prov.is_none(), "join computes: provenance is dropped");
     set(&mut e, "A40", "=A21:A22 B21:B22 line");
     let Some(Ok(Value::Chart(c))) = e.result(key(&e, "A40")) else { panic!() };
-    assert_eq!(c.layers[0].ys.prov.as_deref(), Some(&vec![Prov::Derived(key(&e, "B10"), 11), Prov::Derived(key(&e, "B10"), 12)]));
+    assert_eq!(c.layers[0].ys.prov.to_vec(2), Some(vec![Prov::Derived(key(&e, "B10"), 11), Prov::Derived(key(&e, "B10"), 12)]));
 }
 
 #[test]

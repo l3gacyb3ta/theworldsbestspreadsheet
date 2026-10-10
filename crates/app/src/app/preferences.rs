@@ -16,6 +16,8 @@ pub(super) struct Autosave {
     saved: bool,
     /// Why the last autosave failed (it tries again after another interval).
     failed: Option<String>,
+    /// The save under way: a snapshot being written by another thread.
+    pub(super) pending: Option<files::BackgroundSave>,
 }
 
 impl App {
@@ -103,6 +105,13 @@ impl App {
     /// or the save-changes prompt is up.
     pub(super) fn autosave(&mut self, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
+        if let Some(done) = self.autosave.pending.as_mut().and_then(|p| p.result()) {
+            let p = self.autosave.pending.take().unwrap();
+            self.autosave_done(ctx, p.revision, done);
+        }
+        if self.autosave.pending.is_some() {
+            return;
+        }
         let Some(interval) = self.autosave_interval().filter(|_| self.path.is_some()) else {
             self.autosave.since = None;
             return;
@@ -124,15 +133,43 @@ impl App {
             ctx.request_repaint_after(Duration::from_secs(1));
             return;
         }
-        let name = self.display_name();
-        if self.write_to(self.path.clone().unwrap()) {
-            self.autosave = Autosave { since: None, saved: true, failed: None };
-            self.status = Some(format!("autosaved {name}"));
-        } else {
-            self.autosave.failed = self.status.clone();
-            self.autosave.since = Some(now);
+        // serializing and writing a big workbook takes a while: a snapshot (cells are shared, so
+        // it's cheap) is written by another thread, which wakes the UI when it's done
+        let path = self.path.clone().unwrap();
+        self.autosave.pending = Some(files::BackgroundSave::start(ctx, self.eng.wb.clone(), path, self.eng.revision()));
+        // the status bar was drawn earlier in this frame, still counting down: show "autosaving" now
+        ctx.request_repaint();
+    }
+
+    /// Waits for an autosave still being written and takes in its result: before asking
+    /// about unsaved changes, which it may have just saved.
+    pub(super) fn settle_autosave(&mut self, ctx: &egui::Context) {
+        if let Some(mut p) = self.autosave.pending.take() {
+            let done = p.wait();
+            self.autosave_done(ctx, p.revision, done);
         }
-        // the status bar was drawn earlier in this frame, still counting down: show the result now
+    }
+
+    fn autosave_done(&mut self, ctx: &egui::Context, revision: u64, done: Result<u64, String>) {
+        match done {
+            Ok(fp) => {
+                self.saved_fp = fp;
+                // no edit since the snapshot: clean; otherwise compare with what was written
+                if self.eng.revision() == revision {
+                    self.dirty = false;
+                    self.dirty_rev = revision;
+                } else {
+                    self.dirty_stale = true;
+                }
+                self.autosave = Autosave { since: None, saved: true, failed: None, pending: None };
+                self.status = Some(format!("autosaved {}", self.display_name()));
+            }
+            Err(e) => {
+                self.status = Some(format!("save failed: {e}"));
+                self.autosave.failed = self.status.clone();
+                self.autosave.since = Some(ctx.input(|i| i.time));
+            }
+        }
         ctx.request_repaint();
     }
 
@@ -161,6 +198,7 @@ impl App {
             format!("autosave: {f}")
         } else if let (true, Some(t)) = (self.dirty, self.autosave.since) {
             match (self.autosave_guard(), (t + interval - now).ceil()) {
+                _ if self.autosave.pending.is_some() => "autosaving".to_string(),
                 (Some(g), left) if left <= 0.0 => g.to_string(),
                 (None, left) if left <= 0.0 => "autosaving".to_string(),
                 (_, left) => format!("autosave in {left} s"),

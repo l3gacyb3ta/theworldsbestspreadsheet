@@ -8,12 +8,49 @@ use std::fmt;
 use std::sync::Arc;
 
 /// Name → exponent terms, shared: every value carries a dimension and a display
-/// unit, so cloning them must not allocate.
-pub type Terms = Arc<[(Arc<str>, Rational)]>;
+/// unit, so cloning them must not allocate. None (dimensionless, no unit), the
+/// common case, is no pointer at all, so copying it touches no reference count.
+/// (A thin pointer: values carry two of these, and their size is copying cost.)
+#[derive(Clone, Default)]
+pub struct Terms(Option<Arc<Vec<(Arc<str>, Rational)>>>);
+
+impl Terms {
+    fn ptr_eq(a: &Terms, b: &Terms) -> bool {
+        match (&a.0, &b.0) {
+            (None, None) => true,
+            (Some(x), Some(y)) => Arc::ptr_eq(x, y),
+            _ => false,
+        }
+    }
+}
+
+impl std::ops::Deref for Terms {
+    type Target = [(Arc<str>, Rational)];
+    fn deref(&self) -> &Self::Target {
+        self.0.as_deref().map_or(&[], |v| v.as_slice())
+    }
+}
+
+impl From<Vec<(Arc<str>, Rational)>> for Terms {
+    fn from(v: Vec<(Arc<str>, Rational)>) -> Terms {
+        Terms(if v.is_empty() { None } else { Some(Arc::new(v)) })
+    }
+}
+
+impl PartialEq for Terms {
+    fn eq(&self, o: &Terms) -> bool {
+        Terms::ptr_eq(self, o) || **self == **o
+    }
+}
+
+impl fmt::Debug for Terms {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        (**self).fmt(f)
+    }
+}
 
 fn no_terms() -> Terms {
-    static EMPTY: std::sync::OnceLock<Terms> = std::sync::OnceLock::new();
-    EMPTY.get_or_init(|| Arc::from(Vec::new())).clone()
+    Terms(None)
 }
 
 /// Adds `o`'s exponents into `a`'s, keeping `a`'s order; zero exponents drop out.
@@ -65,7 +102,7 @@ impl Dim {
     }
     pub fn mul(&self, o: &Dim) -> Dim {
         let m = merge_terms(&self.0, &o.0, Rational::ONE);
-        if Arc::ptr_eq(&m, &self.0) || Arc::ptr_eq(&m, &o.0) || m.len() < 2 {
+        if Terms::ptr_eq(&m, &self.0) || Terms::ptr_eq(&m, &o.0) || m.len() < 2 {
             return Dim(m);
         }
         // dimensions are kept sorted so equal dimensions compare equal
