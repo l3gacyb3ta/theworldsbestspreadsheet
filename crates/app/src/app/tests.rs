@@ -1938,8 +1938,7 @@ fn inspector_sets_an_inputs_range() {
     h.run_steps(1);
     typ(&mut h, "12 [%]");
     key(&mut h, Key::Enter);
-    let def = h.state().eng.wb.names["growth"].clone();
-    assert_eq!((def.min.as_deref(), def.max.as_deref()), (Some("0 [%]"), Some("12 [%]")));
+    assert_eq!(h.state().eng.range_text("growth"), ("0 [%]".into(), "12 [%]".into()));
     assert!(h.query_by_label_contains("range not set").is_none());
     // a typed value outside it is an error on the input, kept as typed and explained
     type_into(&mut h, "B4", "-1 [%]");

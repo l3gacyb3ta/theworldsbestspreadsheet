@@ -1213,12 +1213,12 @@ impl App {
         });
     }
 
-    /// An input's min and max, each a number in its unit (`0 [1/s]`), set when a field loses focus;
-    /// one that doesn't fit is refused here, with why, and nothing changes.
+    /// An input's min and max, each a number in its unit (`0 [1/s]`) or a formula (`B7`, a name),
+    /// set when a field loses focus; one that doesn't fit is refused here, with why, and nothing changes.
     fn range_fields(&mut self, ui: &mut Ui, name: &str, k: CellKey) {
-        let def = self.eng.wb.names.get(name);
-        let stored = (def.and_then(|d| d.min.clone()).unwrap_or_default(), def.and_then(|d| d.max.clone()).unwrap_or_default());
-        // refilled when the selection or the stored range changes (undo, say)
+        // references shown in A1, as they are now
+        let stored = self.eng.range_text(name);
+        // refilled when the selection or the stored range changes (undo, an insert above B7, say)
         if self.range_for.as_ref() != Some(&(k, stored.clone())) {
             self.range_for = Some((k, stored.clone()));
             self.range_buf = stored.clone();

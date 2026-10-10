@@ -6,7 +6,7 @@ use wbs_core::bounds::InputRange;
 use wbs_core::engine::{Engine, ErrKind, Shown};
 use wbs_core::ids::CellKey;
 use wbs_core::model::Workbook;
-use wbs_core::ops::{cell_literal, scrub_value};
+use wbs_core::ops::{cell_literal, move_cells, scrub_value, Rect};
 use wbs_core::solve::Goal;
 use wbs_core::stdlib::default_workbook;
 
@@ -81,7 +81,7 @@ fn ranges_in_units_and_percent() {
     assert_eq!(e.set_range("growth", "0 [m]", "").unwrap_err(), "min 0 [m] is length, but growth is dimensionless");
     assert!(e.set_range("growth", "", "zero").unwrap_err().starts_with("max: "));
     assert_eq!(e.set_range("growth", "1", "0.5").unwrap_err(), "min 1 is more than max 0.5");
-    assert!(e.set_range("growth", "=B2", "").is_err(), "an end is a number, not a formula");
+    assert_eq!(e.set_range("growth", "\"low\"", "").unwrap_err(), "min: an end of a range is a number, not a text");
     assert_eq!(e.wb.names["growth"], before);
     // only inputs have ranges
     set(&mut e, "C1", "3 [km]");
@@ -164,18 +164,18 @@ fn range_changes_are_undoable_and_reevaluate_the_input() {
     assert_eq!(e.wb.names["damping"].min, None);
     assert_eq!(show(&e, "B2"), "-0.6 1/s");
     e.apply(redo);
-    assert_eq!(e.wb.names["damping"].min.as_deref(), Some("0 [1/s]"));
+    assert_eq!(e.range_text("damping").0, "0 [1/s]");
     assert_eq!(show(&e, "B1"), "ERR damping must be ≥ 0 [1/s]");
     // a rename keeps the range; unticking "input" drops it (one edit: undo brings both back)
     let k = key(&e, "B1");
     e.set_name("zeta", Some(k), true).unwrap();
-    assert_eq!(e.wb.names["zeta"].min.as_deref(), Some("0 [1/s]"));
+    assert_eq!(e.range_text("zeta").0, "0 [1/s]");
     assert_eq!(show(&e, "B1"), "ERR zeta must be ≥ 0 [1/s]");
     let undo = e.set_name("zeta", Some(k), false).unwrap();
     assert_eq!(e.wb.names["zeta"].min, None);
     assert_eq!(show(&e, "B1"), "-0.3 1/s");
     e.apply(undo);
-    assert_eq!(e.wb.names["zeta"].min.as_deref(), Some("0 [1/s]"));
+    assert_eq!(e.range_text("zeta").0, "0 [1/s]");
 }
 
 #[test]
@@ -210,4 +210,105 @@ fn files_without_ranges_load_and_ranges_round_trip() {
     assert_eq!(e2.wb.names["damping"], e.wb.names["damping"]);
     set(&mut e2, "B1", "-1 [1/s]");
     assert_eq!(show(&e2, "B1"), "ERR damping must be ≥ 0 [1/s]");
+}
+
+#[test]
+fn an_end_can_be_a_reference() {
+    let mut e = spring();
+    set(&mut e, "C1", "0.5 [1/s]");
+    e.set_range("damping", "0 [1/s]", "C1").unwrap();
+    assert_eq!(e.range_text("damping"), ("0 [1/s]".into(), "C1".into()));
+    // scrubbing the end's cell re-checks the input (the recalc plan is reused between steps)
+    for (v, b1, b2) in [
+        ("0.4", "0.3 1/s", "0.6 1/s"),
+        ("0.2", "ERR damping must be ≤ C1 (0.2 1/s)", "ERR B1 has an error"),
+        ("0.25", "ERR damping must be ≤ C1 (0.25 1/s)", "ERR B1 has an error"),
+        ("0.3", "0.3 1/s", "0.6 1/s"),
+        ("0.1", "ERR damping must be ≤ C1 (0.1 1/s)", "ERR B1 has an error"),
+        ("0.5", "0.3 1/s", "0.6 1/s"),
+    ] {
+        set(&mut e, "C1", &format!("{v} [1/s]"));
+        assert_eq!((show(&e, "B1"), show(&e, "B2")), (b1.to_string(), b2.to_string()), "C1 = {v}");
+    }
+    // scrubbing and goal-seek use its current value
+    let k = key(&e, "B1");
+    assert_eq!(e.input_range(k).unwrap().max, Some((0.5, "C1 (0.5 1/s)".into())));
+    set(&mut e, "C1", "0.4 [1/s]");
+    assert_eq!(e.input_range(k).unwrap().pin(0.9), (0.4, Some("max C1 (0.4 1/s)".into())));
+    // an end that stops fitting the input says so on the input
+    set(&mut e, "C1", "2 [m]");
+    assert_eq!(show(&e, "B1"), "ERR damping's range: max C1 is length, but damping is 1/time");
+    // and one that's empty or an error makes the range unusable, on the input too
+    set(&mut e, "C1", "");
+    assert_eq!(show(&e, "B1"), "ERR damping's range: max C1: Sheet1!C1 is empty");
+    set(&mut e, "C1", "=1 [m] 1 [s] +");
+    assert_eq!(show(&e, "B1"), "ERR damping's range: max C1: Sheet1!C1 has an error");
+    set(&mut e, "C1", "0.5 [1/s]");
+    assert_eq!(show(&e, "B1"), "0.3 1/s");
+    // a reference in the wrong dimension now is refused where it's set; an empty one is accepted
+    set(&mut e, "D1", "3 [m]");
+    assert_eq!(e.set_range("damping", "", "D1").unwrap_err(), "max D1 is length, but damping is 1/time");
+    assert_eq!(e.set_range("damping", "", "nothing").unwrap_err(), "max: unknown word or name nothing");
+    e.set_range("damping", "", "E1").unwrap();
+    assert_eq!(show(&e, "B1"), "ERR damping's range: max E1: Sheet1!E1 is empty");
+}
+
+#[test]
+fn an_end_can_be_a_name_or_a_formula() {
+    let mut e = spring();
+    set(&mut e, "C1", "0.2 [1/s]");
+    let c1 = key(&e, "C1");
+    e.set_name("max_damping", Some(c1), false).unwrap();
+    e.set_range("damping", "", "max_damping").unwrap();
+    assert_eq!(show(&e, "B1"), "ERR damping must be ≤ max_damping (0.2 1/s)");
+    set(&mut e, "C1", "0.3 [1/s]");
+    assert_eq!(show(&e, "B1"), "0.3 1/s");
+    e.set_range("damping", "", "max_damping 2 /").unwrap();
+    assert_eq!(e.range_text("damping").1, "max_damping 2 /");
+    assert_eq!(show(&e, "B1"), "ERR damping must be ≤ max_damping 2 / (0.15 1/s)");
+}
+
+#[test]
+fn references_in_ends_follow_their_cells() {
+    let mut e = spring();
+    set(&mut e, "C3", "0.5 [1/s]");
+    e.set_range("damping", "", "C3").unwrap();
+    let sid = e.wb.sheets[0].id;
+    // rows inserted above it
+    let ins = e.insert_rows_edit(sid, 1, 2);
+    let undo = e.apply(ins);
+    assert_eq!(e.range_text("damping").1, "C5");
+    set(&mut e, "C5", "0.1 [1/s]");
+    assert_eq!(show(&e, "B1"), "ERR damping must be ≤ C5 (0.1 1/s)");
+    set(&mut e, "C5", "0.5 [1/s]");
+    e.apply(undo);
+    assert_eq!(e.range_text("damping").1, "C3");
+    // a sort-free move of the cell
+    let mv = move_cells(&mut e, Rect::cell(sid, 2, 2), sid, (9, 5)).unwrap();
+    let undo = e.apply(mv);
+    assert_eq!(e.range_text("damping").1, "F10");
+    set(&mut e, "F10", "0.1 [1/s]");
+    assert_eq!(show(&e, "B1"), "ERR damping must be ≤ F10 (0.1 1/s)");
+    e.apply(undo);
+    assert_eq!(e.range_text("damping").1, "C3");
+    assert_eq!(show(&e, "B1"), "0.3 1/s");
+}
+
+#[test]
+fn goal_seek_uses_a_referenced_ends_value() {
+    let mut e = Engine::new(default_workbook());
+    set(&mut e, "B1", "-0.5");
+    set(&mut e, "B2", "=x x *");
+    set(&mut e, "C1", "-1");
+    let k = key(&e, "B1");
+    e.set_name("x", Some(k), true).unwrap();
+    e.set_range("x", "C1", "").unwrap();
+    let goal = Goal { target: key(&e, "B2"), index: 0, want: 4.0, tol: 1e-9, input: k, decimals: Some(3) };
+    assert_eq!(e.goal_seek(&goal).unwrap().text, "2.000");
+    set(&mut e, "C1", "-3");
+    assert_eq!(e.goal_seek(&goal).unwrap().text, "-2.000");
+    set(&mut e, "C1", "0");
+    set(&mut e, "B1", "0.5");
+    let err = e.goal_seek(&Goal { want: -1.0, ..goal }).unwrap_err();
+    assert!(err.starts_with("out of reach within x ≥ C1 (0): "), "{err}");
 }

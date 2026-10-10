@@ -113,7 +113,8 @@ pub(super) fn fingerprint(wb: &Workbook) -> u64 {
         sum.hash(&mut h);
     }
     for (n, d) in &wb.names {
-        (n, d.cell, d.input, &d.min, &d.max).hash(&mut h);
+        let end = |c: &Option<Cell>| c.as_ref().map(|c| wb.render(&c.pieces, d.cell.sheet));
+        (n, d.cell, d.input, end(&d.min), end(&d.max)).hash(&mut h);
     }
     for (k, v) in &wb.settings {
         (k, v.to_string()).hash(&mut h);

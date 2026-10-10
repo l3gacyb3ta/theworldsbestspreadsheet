@@ -392,8 +392,16 @@ pub fn move_cells(e: &mut Engine, src: Rect, sheet: SheetId, at: (usize, usize))
     let mut names = wb.names.clone();
     names.retain(|_, d| !replaced.contains(&d.cell));
     for d in names.values_mut() {
+        let home = d.cell.sheet;
         if let Some(k) = moved.get(&d.cell) {
             d.cell = *k;
+        }
+        // a range's ends are references like any other
+        for end in [&mut d.min, &mut d.max].into_iter().flatten() {
+            let pieces = m.pieces(&end.pieces, home, d.cell.sheet);
+            if pieces[..] != end.pieces[..] {
+                *end = Cell::new(pieces);
+            }
         }
     }
     // a stable order keeps the edit (and its inverse) deterministic
