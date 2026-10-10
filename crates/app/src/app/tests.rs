@@ -745,6 +745,37 @@ fn dirty_marker_follows_edits_and_undo() {
     assert!(h.state().is_dirty());
 }
 
+/// Dragging a header border resizes live; the whole drag is one undo step, back to the default size.
+#[test]
+fn header_border_drag_is_one_undo_step() {
+    let mut h = harness();
+    let (ix, undo0) = (h.state().sheet_ix, h.state().undo.len());
+    let (cid, rid) = (h.state().eng.wb.sheets[ix].cols.ids()[7], h.state().eng.wb.sheets[ix].rows.ids()[2]);
+    let width = |h: &Harness<'static, App>| h.state().eng.wb.sheets[ix].col_widths.get(&cid).copied();
+    let height = |h: &Harness<'static, App>| h.state().eng.wb.sheets[ix].row_heights.get(&rid).copied();
+    assert_eq!(width(&h), None);
+    let g = h.state().geo.clone().unwrap();
+    // H's right border in the column header, then row 3's bottom border in the row header
+    let from = Pos2::new(g.x(8), g.cells.top() - 6.0);
+    drag(&mut h, from, from + Vec2::new(60.0, 0.0), Modifiers::NONE);
+    assert_eq!(width(&h), Some(DEF_W + 60.0));
+    assert_eq!(h.state().undo.len(), undo0 + 1, "one step for the whole drag");
+    assert!(h.state().dirty);
+    let from = Pos2::new(g.cells.left() - 6.0, g.y(3));
+    drag(&mut h, from, from + Vec2::new(0.0, 30.0), Modifiers::NONE);
+    assert_eq!(height(&h), Some(DEF_H + 30.0));
+    assert_eq!(h.state().undo.len(), undo0 + 2);
+    key_cmd(&mut h, Key::Z);
+    assert_eq!(height(&h), None);
+    assert_eq!(width(&h), Some(DEF_W + 60.0));
+    key_cmd(&mut h, Key::Z);
+    assert_eq!(width(&h), None, "back to the default, not a stored default width");
+    assert!(!h.state().dirty);
+    h.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+    h.run_steps(2);
+    assert_eq!(width(&h), Some(DEF_W + 60.0));
+}
+
 #[test]
 fn save_as_then_save() {
     let mut h = harness();

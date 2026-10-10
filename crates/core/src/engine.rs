@@ -99,23 +99,46 @@ pub enum Shown<'a> {
     Error(&'a CellError),
 }
 
-/// A reversible change to the document.
+/// A reversible change to the document. Every edit and its inverse name rows, columns and sheets
+/// by id, never by position, so an undo still hits the right rows after other edits moved them.
+/// A row or column place is "in front of this row" (`None`: at the end), a sheet's place is "after
+/// this sheet" (`None`: first), so new sheets appended at the end never shift it.
 #[derive(Clone, Debug)]
 pub enum Edit {
     Cells(Vec<(CellKey, Option<Cell>)>),
-    InsertRows { sheet: SheetId, at: usize, ids: Vec<RowId> },
-    DeleteRows { sheet: SheetId, at: usize, n: usize },
-    InsertCols { sheet: SheetId, at: usize, ids: Vec<ColId> },
-    DeleteCols { sheet: SheetId, at: usize, n: usize },
-    PermuteRows { sheet: SheetId, at: usize, ids: Vec<RowId> },
-    Names(BTreeMap<String, NameDef>),
-    /// Puts a whole sheet, with its own ids, at `at` in the tab order.
-    InsertSheet { at: usize, sheet: Box<Sheet> },
-    /// Removes a sheet; the inverse carries it whole, so undo restores the same ids.
+    /// New rows, in front of row `before` (alive or deleted). Inverse: `DeleteRows`.
+    InsertRows { sheet: SheetId, before: Option<RowId>, ids: Vec<RowId> },
+    /// Hides rows where they are; their cells stay, hidden. Inverse: `RestoreRows`.
+    DeleteRows { sheet: SheetId, ids: Vec<RowId> },
+    RestoreRows { sheet: SheetId, ids: Vec<RowId> },
+    InsertCols { sheet: SheetId, before: Option<ColId>, ids: Vec<ColId> },
+    DeleteCols { sheet: SheetId, ids: Vec<ColId> },
+    RestoreCols { sheet: SheetId, ids: Vec<ColId> },
+    /// A sort: each `(row, place)` puts `row` where row `place` was; the rows are a permutation
+    /// of the places. Inverse: the same pairs swapped (plus the range corners it rewrote).
+    PermuteRows { sheet: SheetId, moves: Vec<(RowId, RowId)> },
+    /// Sets (`Some`) or removes one name. Inverse: the name's old definition.
+    Name { name: String, def: Option<NameDef> },
+    /// `None` is the default size.
+    RowHeight { sheet: SheetId, row: RowId, height: Option<f32> },
+    ColWidth { sheet: SheetId, col: ColId, width: Option<f32> },
+    /// Puts a whole new sheet, with its own ids, after sheet `after`. Inverse: `DeleteSheet`.
+    InsertSheet { after: Option<SheetId>, sheet: Box<Sheet> },
+    /// Hides a sheet with everything in it (`Workbook::deleted_sheets`). Inverse: `RestoreSheet`.
     DeleteSheet { sheet: SheetId },
-    MoveSheet { sheet: SheetId, to: usize },
+    RestoreSheet { sheet: SheetId, after: Option<SheetId> },
+    MoveSheet { sheet: SheetId, after: Option<SheetId> },
     RenameSheet { sheet: SheetId, name: String },
     Batch(Vec<Edit>),
+}
+
+impl Edit {
+    /// Per-name edits turning the names table `old` into `new`.
+    pub fn names(old: &BTreeMap<String, NameDef>, new: &BTreeMap<String, NameDef>) -> Vec<Edit> {
+        let gone = old.keys().filter(|n| !new.contains_key(*n)).map(|n| Edit::Name { name: n.clone(), def: None });
+        let set = new.iter().filter(|(n, d)| old.get(*n) != Some(*d)).map(|(n, d)| Edit::Name { name: n.clone(), def: Some(d.clone()) });
+        gone.chain(set).collect()
+    }
 }
 
 pub struct Engine {
@@ -652,7 +675,7 @@ impl Engine {
         let inv = self.apply_raw(e, &mut touched, &mut structural);
         if structural {
             self.rebuild();
-        } else {
+        } else if !touched.is_empty() {
             self.cells_changed(&touched);
         }
         inv
@@ -663,7 +686,9 @@ impl Engine {
             Edit::Cells(cells) => {
                 let mut inv = Vec::with_capacity(cells.len());
                 for (k, cell) in cells {
-                    let Some(s) = self.wb.sheet_mut(k.sheet) else { continue };
+                    // a deleted sheet's cells can still change, hidden, like a deleted row's
+                    let wb = &mut self.wb;
+                    let Some(s) = wb.sheets.iter_mut().chain(&mut wb.deleted_sheets).find(|s| s.id == k.sheet) else { continue };
                     let old = match cell {
                         Some(c) => s.cells.insert((k.row, k.col), c),
                         None => s.cells.remove(&(k.row, k.col)),
@@ -674,44 +699,47 @@ impl Engine {
                 inv.reverse();
                 Edit::Cells(inv)
             }
-            Edit::InsertRows { sheet, at, ids } => {
-                *structural = true;
-                let n = ids.len();
-                if let Some(s) = self.wb.sheet_mut(sheet) {
-                    s.rows.insert(at, &ids);
-                }
-                Edit::DeleteRows { sheet, at, n }
-            }
-            Edit::InsertCols { sheet, at, ids } => {
-                *structural = true;
-                let n = ids.len();
-                if let Some(s) = self.wb.sheet_mut(sheet) {
-                    s.cols.insert(at, &ids);
-                }
-                Edit::DeleteCols { sheet, at, n }
-            }
-            Edit::DeleteRows { sheet, at, n } => {
-                *structural = true;
+            Edit::InsertRows { sheet, before, ids } => {
                 let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
-                let (ids, removed) = s.delete_rows(at, n);
-                let cells = removed.into_iter().map(|((r, c), cell)| (CellKey { sheet, row: r, col: c }, Some(cell))).collect();
-                Edit::Batch(vec![Edit::InsertRows { sheet, at, ids }, Edit::Cells(cells)])
-            }
-            Edit::DeleteCols { sheet, at, n } => {
                 *structural = true;
+                s.rows.insert_before(before, &ids);
+                Edit::DeleteRows { sheet, ids }
+            }
+            Edit::InsertCols { sheet, before, ids } => {
                 let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
-                let (ids, removed) = s.delete_cols(at, n);
-                let cells = removed.into_iter().map(|((r, c), cell)| (CellKey { sheet, row: r, col: c }, Some(cell))).collect();
-                Edit::Batch(vec![Edit::InsertCols { sheet, at, ids }, Edit::Cells(cells)])
-            }
-            Edit::PermuteRows { sheet, at, ids } => {
                 *structural = true;
+                s.cols.insert_before(before, &ids);
+                Edit::DeleteCols { sheet, ids }
+            }
+            Edit::DeleteRows { sheet, ids } => {
+                let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
+                *structural = true;
+                Edit::RestoreRows { sheet, ids: s.rows.set_dead(&ids, true) }
+            }
+            Edit::RestoreRows { sheet, ids } => {
+                let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
+                *structural = true;
+                Edit::DeleteRows { sheet, ids: s.rows.set_dead(&ids, false) }
+            }
+            Edit::DeleteCols { sheet, ids } => {
+                let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
+                *structural = true;
+                Edit::RestoreCols { sheet, ids: s.cols.set_dead(&ids, true) }
+            }
+            Edit::RestoreCols { sheet, ids } => {
+                let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
+                *structural = true;
+                Edit::DeleteCols { sheet, ids: s.cols.set_dead(&ids, false) }
+            }
+            Edit::PermuteRows { sheet, moves } => {
                 // Ranges keep covering the same block of rows: a sort moves
                 // cells within a range, it doesn't move the range.
                 let before = self.range_bounds_on(sheet);
                 let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
-                let old = s.rows.ids()[at..at + ids.len()].to_vec();
-                s.rows.permute(at, &ids);
+                if !s.rows.permute(&moves) {
+                    return Edit::Batch(vec![]);
+                }
+                *structural = true;
                 let mut restore = Vec::new();
                 for (k, cell, bounds) in before {
                     let s = self.wb.sheet(sheet).unwrap();
@@ -731,13 +759,35 @@ impl Engine {
                         restore.push((k, Some(cell)));
                     }
                 }
-                Edit::Batch(vec![Edit::PermuteRows { sheet, at, ids: old }, Edit::Cells(restore)])
+                let back = moves.into_iter().map(|(row, place)| (place, row)).collect();
+                Edit::Batch(vec![Edit::PermuteRows { sheet, moves: back }, Edit::Cells(restore)])
             }
-            Edit::Names(n) => {
+            Edit::Name { name, def } => {
                 *structural = true;
-                Edit::Names(std::mem::replace(&mut self.wb.names, n))
+                let old = match def {
+                    Some(d) => self.wb.names.insert(name.clone(), d),
+                    None => self.wb.names.remove(&name),
+                };
+                Edit::Name { name, def: old }
             }
-            Edit::InsertSheet { at, sheet } => {
+            // sizes don't change any value: no recalc
+            Edit::RowHeight { sheet, row, height } => {
+                let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
+                let old = match height {
+                    Some(h) => s.row_heights.insert(row, h),
+                    None => s.row_heights.remove(&row),
+                };
+                Edit::RowHeight { sheet, row, height: old }
+            }
+            Edit::ColWidth { sheet, col, width } => {
+                let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
+                let old = match width {
+                    Some(w) => s.col_widths.insert(col, w),
+                    None => s.col_widths.remove(&col),
+                };
+                Edit::ColWidth { sheet, col, width: old }
+            }
+            Edit::InsertSheet { after, sheet } => {
                 if self.wb.sheet(sheet.id).is_some() {
                     return Edit::Batch(vec![]);
                 }
@@ -745,21 +795,35 @@ impl Engine {
                 let id = sheet.id;
                 let mut sheet = *sheet;
                 sheet.reindex();
-                self.wb.sheets.insert(at.min(self.wb.sheets.len()), sheet);
+                self.wb.deleted_sheets.retain(|s| s.id != id);
+                self.place_sheet(sheet, after);
                 Edit::DeleteSheet { sheet: id }
             }
             Edit::DeleteSheet { sheet } => {
                 // the last sheet stays: the app always shows one
                 let Some(at) = self.wb.sheet_index(sheet).filter(|_| self.wb.sheets.len() > 1) else { return Edit::Batch(vec![]) };
                 *structural = true;
-                Edit::InsertSheet { at, sheet: Box::new(self.wb.sheets.remove(at)) }
+                let after = self.sheet_before(at);
+                let s = self.wb.sheets.remove(at);
+                self.wb.deleted_sheets.push(s);
+                Edit::RestoreSheet { sheet, after }
             }
-            Edit::MoveSheet { sheet, to } => {
+            Edit::RestoreSheet { sheet, after } => {
+                let Some(at) = self.wb.deleted_sheets.iter().position(|s| s.id == sheet) else { return Edit::Batch(vec![]) };
+                *structural = true;
+                let mut s = self.wb.deleted_sheets.remove(at);
+                s.reindex();
+                self.place_sheet(s, after);
+                Edit::DeleteSheet { sheet }
+            }
+            Edit::MoveSheet { sheet, after } => {
                 let Some(from) = self.wb.sheet_index(sheet) else { return Edit::Batch(vec![]) };
                 *structural = true;
+                let old = self.sheet_before(from);
+                let after = if after == Some(sheet) { old } else { after };
                 let s = self.wb.sheets.remove(from);
-                self.wb.sheets.insert(to.min(self.wb.sheets.len()), s);
-                Edit::MoveSheet { sheet, to: from }
+                self.place_sheet(s, after);
+                Edit::MoveSheet { sheet, after: old }
             }
             Edit::RenameSheet { sheet, name } => {
                 let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
@@ -772,6 +836,20 @@ impl Engine {
                 Edit::Batch(inv)
             }
         }
+    }
+
+    /// Puts a sheet right after `after` in the tab order: first if `None`, last if that sheet isn't showing.
+    fn place_sheet(&mut self, s: Sheet, after: Option<SheetId>) {
+        let at = match after {
+            None => 0,
+            Some(a) => self.wb.sheet_index(a).map_or(self.wb.sheets.len(), |i| i + 1),
+        };
+        self.wb.sheets.insert(at, s);
+    }
+
+    /// The sheet left of tab position `at`: the place a sheet at `at` is "after".
+    fn sheet_before(&self, at: usize) -> Option<SheetId> {
+        at.checked_sub(1).and_then(|i| self.wb.sheets.get(i)).map(|s| s.id)
     }
 
     /// Every cell holding ranges on `sheet`, with each range piece's bounds.
@@ -819,18 +897,43 @@ impl Engine {
                 names.insert(name.to_string(), NameDef { cell, input });
             }
         }
-        Ok(self.apply(Edit::Names(names)))
+        let edits = Edit::names(&self.wb.names, &names);
+        Ok(self.apply(Edit::Batch(edits)))
+    }
+
+    // ---- rows and columns: these turn the positions the user sees into an edit by id ----
+
+    /// `n` new rows so that the first is at visible row `at` (`at` = the row count appends).
+    pub fn insert_rows_edit(&self, sheet: SheetId, at: usize, n: usize) -> Edit {
+        let before = self.wb.sheet(sheet).and_then(|s| s.rows.get(at));
+        Edit::InsertRows { sheet, before, ids: (0..n).map(|_| RowId(fresh_id())).collect() }
+    }
+
+    pub fn delete_rows_edit(&self, sheet: SheetId, at: usize, n: usize) -> Edit {
+        let ids = self.wb.sheet(sheet).map(|s| s.rows.ids().iter().skip(at).take(n).copied().collect()).unwrap_or_default();
+        Edit::DeleteRows { sheet, ids }
+    }
+
+    pub fn insert_cols_edit(&self, sheet: SheetId, at: usize, n: usize) -> Edit {
+        let before = self.wb.sheet(sheet).and_then(|s| s.cols.get(at));
+        Edit::InsertCols { sheet, before, ids: (0..n).map(|_| ColId(fresh_id())).collect() }
+    }
+
+    pub fn delete_cols_edit(&self, sheet: SheetId, at: usize, n: usize) -> Edit {
+        let ids = self.wb.sheet(sheet).map(|s| s.cols.ids().iter().skip(at).take(n).copied().collect()).unwrap_or_default();
+        Edit::DeleteCols { sheet, ids }
     }
 
     // ---- sheets: these build an edit for `apply` (and the undo stack) ----------
 
-    /// A new empty sheet at `at`, named `SheetN`.
+    /// A new empty sheet at tab position `at`, named `SheetN`.
     pub fn add_sheet_edit(&self, at: usize) -> Edit {
         let mut n = self.wb.sheets.len() + 1;
         while self.wb.sheet_by_name(&format!("Sheet{n}")).is_some() {
             n += 1;
         }
-        Edit::InsertSheet { at, sheet: Box::new(Sheet::new(&format!("Sheet{n}"), 200, 26)) }
+        let after = self.sheet_before(at.min(self.wb.sheets.len()));
+        Edit::InsertSheet { after, sheet: Box::new(Sheet::new(&format!("Sheet{n}"), 200, 26)) }
     }
 
     /// A copy right after the original. It keeps the row and column ids (cells are keyed by
@@ -840,7 +943,14 @@ impl Engine {
         let mut copy = self.wb.sheets[at].clone();
         copy.id = SheetId(fresh_id());
         copy.name = self.wb.free_sheet_name(&format!("{} copy", copy.name));
-        Ok(Edit::InsertSheet { at: at + 1, sheet: Box::new(copy) })
+        Ok(Edit::InsertSheet { after: Some(sheet), sheet: Box::new(copy) })
+    }
+
+    /// Moves a sheet so it ends up at tab position `to` (past the end: last).
+    pub fn move_sheet_edit(&self, sheet: SheetId, to: usize) -> Edit {
+        let others: Vec<SheetId> = self.wb.sheets.iter().map(|s| s.id).filter(|id| *id != sheet).collect();
+        let after = to.min(others.len()).checked_sub(1).map(|i| others[i]);
+        Edit::MoveSheet { sheet, after }
     }
 
     pub fn delete_sheet_edit(&self, sheet: SheetId) -> Result<Edit, String> {
@@ -991,7 +1101,8 @@ impl Engine {
             self.unindex_deps(k);
             let old = self.nodes.remove(&k);
             let text = self.wb.cell_text(k);
-            if !text.trim().is_empty() {
+            // a cell in a deleted row or column is kept but hidden: not part of the graph (as in `rebuild`)
+            if !text.trim().is_empty() && self.wb.pos(k).is_some() {
                 let n = self.compile_node(k, &text);
                 self.nodes.insert(k, n);
                 self.index_deps(k);

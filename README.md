@@ -59,6 +59,9 @@ is an ordinary, editable `units` sheet; exchange rates are inputs you can scrub.
   a reference.
 - **Rows/columns are tombstoned lists** (like a list CRDT): deleting the end row of
   a range shrinks the range instead of breaking it, and undo revives the ids.
+  A deleted row, column or sheet keeps its cells, hidden, so undo brings them back
+  with any edit made to them since. Every edit and its undo name rows, columns and
+  sheets by id, never by position (groundwork for collaboration, #18).
 - **Sorting** moves rows by id, so single references follow their cells; ranges
   over the sorted block keep covering the same block.
 - **Dimensions are propagated statically** (SPEC §4, `crates/core/src/dims.rs`): an

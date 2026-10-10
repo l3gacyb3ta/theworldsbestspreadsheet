@@ -154,13 +154,13 @@ fn deleting_units_leaves_errors_not_panics() {
 #[test]
 fn move_sheet_and_undo() {
     let (mut e, _, d) = with_data();
-    let inv = e.apply(Edit::MoveSheet { sheet: d, to: 2 });
+    let inv = e.apply(e.move_sheet_edit(d, 2));
     assert_eq!(names(&e), ["Sheet1", "units", "data"]);
     let redo = e.apply(inv);
     assert_eq!(names(&e), ["Sheet1", "data", "units"]);
     e.apply(redo);
     let s1 = sid(&e, "Sheet1");
-    e.apply(Edit::MoveSheet { sheet: s1, to: 99 });
+    e.apply(e.move_sheet_edit(s1, 99));
     assert_eq!(names(&e), ["units", "data", "Sheet1"]);
     assert_eq!(show(&mut e, s1, "A2"), "6");
 }

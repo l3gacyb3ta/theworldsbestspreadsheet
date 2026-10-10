@@ -332,9 +332,7 @@ pub fn move_cells(e: &mut Engine, src: Rect, sheet: SheetId, at: (usize, usize))
     let mut cells: Vec<(CellKey, Option<Cell>)> = out.into_iter().collect();
     cells.sort_by_key(|(k, _)| (k.sheet.0, k.row.0, k.col.0));
     let mut edits = vec![Edit::Cells(cells)];
-    if names != wb.names {
-        edits.push(Edit::Names(names));
-    }
+    edits.extend(Edit::names(&wb.names, &names));
     Ok(Edit::Batch(edits))
 }
 
@@ -448,7 +446,9 @@ pub fn sort_rows(e: &Engine, r: Rect, col: usize, ascending: bool) -> Edit {
         };
         if ascending { o } else { o.reverse() }
     });
-    Edit::PermuteRows { sheet: r.sheet, at: r.r0, ids: rows.into_iter().map(|x| x.1).collect() }
+    // the i-th sorted row takes the place of the i-th row as it was
+    let places = (r.r0..=r.r1).map(|row| s.rows.get(row).unwrap());
+    Edit::PermuteRows { sheet: r.sheet, moves: rows.into_iter().map(|x| x.1).zip(places).collect() }
 }
 
 /// After entering a program at `k`: if the column beside it continues below
