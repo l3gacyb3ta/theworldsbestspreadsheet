@@ -150,6 +150,8 @@ impl App {
                     }
                 } else if self.fill_handle(g).contains(pos) && self.edit.is_none() {
                     ctx.set_cursor_icon(CursorIcon::Crosshair);
+                } else if self.on_sel_border(g, pos, mods) {
+                    ctx.set_cursor_icon(if mods.alt { CursorIcon::Copy } else { CursorIcon::Grab });
                 } else if mods.alt {
                     let (r, c) = (g.row_at(pos.y), g.col_at(pos.x));
                     if let Some(k) = self.sheet().key(r, c) {
@@ -207,6 +209,15 @@ impl App {
         let s = self.sel();
         let br = g.rect(s.r0, s.c0, s.r1, s.c1).right_bottom();
         Rect::from_center_size(br, Vec2::splat(9.0))
+    }
+    /// Within a few points of the selection's outline (not its fill handle): dragging there moves the selection.
+    fn on_sel_border(&self, g: &Geo, pos: Pos2, mods: Modifiers) -> bool {
+        if self.edit.is_some() || mods.shift || mods.command || self.fill_handle(g).contains(pos) {
+            return false;
+        }
+        let s = self.sel();
+        let r = g.rect(s.r0, s.c0, s.r1, s.c1);
+        r.expand(3.0).contains(pos) && !r.shrink(3.0).contains(pos)
     }
     fn chart_hit(&self, pos: Pos2) -> Option<(&PointHit, &YAxis)> {
         self.chart_hits
@@ -313,7 +324,13 @@ impl App {
                 }
             }
         }
-        // 3. alt-drag scrubs a literal number
+        // 3. dragging the selection's border moves it (Alt: copies); scrubbing is Alt-drag inside a cell
+        if !dbl && self.on_sel_border(g, pos, mods) {
+            let s = self.sel();
+            self.drag = Drag::Move { src: s, grab: (r, c), dst: s, copy: mods.alt };
+            return;
+        }
+        // 4. alt-drag scrubs a literal number
         if mods.alt && self.edit.is_none() {
             let k = self.eng.wb.sheets[ix].key(r, c).unwrap();
             let text = self.eng.wb.cell_text(k);
@@ -323,13 +340,13 @@ impl App {
                 return;
             }
         }
-        // 4. fill handle
+        // 5. fill handle
         if self.edit.is_none() && self.fill_handle(g).contains(pos) {
             let s = self.sel();
             self.drag = Drag::Fill { src: s, dst: s };
             return;
         }
-        // 5. plain selection
+        // 6. plain selection
         self.commit();
         if dbl {
             self.select(r, c, false);
@@ -342,7 +359,7 @@ impl App {
     }
 
     fn drag_update(&mut self, ctx: &egui::Context, g: &Geo, pos: Pos2, mods: Modifiers) {
-        let autoscroll = matches!(self.drag, Drag::Select | Drag::Ref { .. } | Drag::Fill { .. });
+        let autoscroll = matches!(self.drag, Drag::Select | Drag::Ref { .. } | Drag::Fill { .. } | Drag::Move { .. });
         if autoscroll {
             let c = g.cells;
             let mut d = Vec2::ZERO;
@@ -391,6 +408,13 @@ impl App {
                     CRect { c0: c, ..s }
                 };
                 ctx.set_cursor_icon(CursorIcon::Crosshair);
+            }
+            Drag::Move { src, grab, dst, copy } => {
+                let r0 = (src.r0 + r).saturating_sub(grab.0);
+                let c0 = (src.c0 + c).saturating_sub(grab.1);
+                *dst = CRect { r0, c0, r1: r0 + src.rows() - 1, c1: c0 + src.cols() - 1, ..*src };
+                *copy = mods.alt;
+                ctx.set_cursor_icon(if mods.alt { CursorIcon::Copy } else { CursorIcon::Grabbing });
             }
             Drag::Col { col, x0, w0 } => {
                 let w = (*w0 + pos.x - *x0).max(24.0);
@@ -450,6 +474,18 @@ impl App {
                     self.anchor = (dst.r0, dst.c0);
                     self.cursor = (dst.r1, dst.c1);
                 }
+            }
+            // a press on the border that didn't go anywhere is a click on the cell under it
+            Drag::Move { src, grab, dst, .. } if src == dst => self.select(grab.0, grab.1, false),
+            Drag::Move { src, dst, copy: true, .. } => {
+                let clip = ops::copy(&self.eng, src);
+                let e = ops::paste(&mut self.eng, &clip, dst.sheet, (dst.r0, dst.c0));
+                self.exec(e);
+                self.anchor = (dst.r0, dst.c0);
+                self.cursor = (dst.r1, dst.c1);
+            }
+            Drag::Move { src, dst, .. } => {
+                self.move_block(src, (dst.r0, dst.c0));
             }
             Drag::Scrub { key, orig, .. } | Drag::Point { key, orig, .. } => {
                 if self.eng.wb.cell(key) != orig.as_ref() {
@@ -662,6 +698,17 @@ impl App {
         }
         if let Drag::Fill { dst, .. } = &self.drag {
             dashed_rect(&cp, g.rect(dst.r0, dst.c0, dst.r1, dst.c1), Stroke::new(1.5, pal.sel));
+        }
+        // where a border drag will drop, and the cells waiting for a paste to move them
+        if let Drag::Move { src, dst, .. } = &self.drag {
+            if src != dst {
+                let r = g.rect(dst.r0, dst.c0, dst.r1, dst.c1);
+                cp.rect_filled(r, 0.0, pal.sel_fill);
+                dashed_rect(&cp, r.shrink(1.0), Stroke::new(2.0, pal.sel));
+            }
+        }
+        if let Some((cut, _)) = self.cut.filter(|(c, _)| c.sheet == sid) {
+            dashed_rect(&cp, g.rect(cut.r0, cut.c0, cut.r1, cut.c1).shrink(3.5), Stroke::new(1.5, pal.sel));
         }
 
         // headers

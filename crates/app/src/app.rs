@@ -105,6 +105,8 @@ enum Drag {
     Select,
     Ref { start: (usize, usize) },
     Fill { src: CRect, dst: CRect },
+    /// Dragging the selection by its border: `grab` is the cell under the press; Alt copies instead.
+    Move { src: CRect, grab: (usize, usize), dst: CRect, copy: bool },
     Col { col: usize, x0: f32, w0: f32 },
     Row { row: usize, y0: f32, h0: f32 },
     Scrub { key: CellKey, orig: Option<Cell>, text: String, lit: Lit, x0: f32 },
@@ -168,6 +170,8 @@ pub struct App {
     undo: Vec<Edit>,
     redo: Vec<Edit>,
     clip: Option<Clip>,
+    /// Cells marked by ⌘X, with the document fingerprint then: the next paste moves them if nothing changed since.
+    cut: Option<(CRect, u64)>,
     drag: Drag,
     offer: Option<(CellKey, CRect)>,
     status: Option<String>,
@@ -234,6 +238,7 @@ impl App {
             undo: Vec::new(),
             redo: Vec::new(),
             clip: None,
+            cut: None,
             drag: Drag::None,
             offer: None,
             status: Some(status),
@@ -301,6 +306,7 @@ impl App {
     }
 
     fn exec(&mut self, e: Edit) {
+        self.cut = None;
         let t = std::time::Instant::now();
         let inv = self.apply_edit(e);
         self.last_recalc_ms = t.elapsed().as_secs_f64() * 1000.0;
@@ -309,12 +315,14 @@ impl App {
     }
 
     fn undo(&mut self) {
+        self.cut = None;
         if let Some(e) = self.undo.pop() {
             let inv = self.apply_edit(e);
             self.redo.push(inv);
         }
     }
     fn redo(&mut self) {
+        self.cut = None;
         if let Some(e) = self.redo.pop() {
             let inv = self.apply_edit(e);
             self.undo.push(inv);
@@ -385,6 +393,7 @@ impl App {
     fn commit(&mut self) {
         let Some(ed) = self.edit.take() else { return };
         if ed.text != ed.orig {
+            self.cut = None;
             let t = std::time::Instant::now();
             let inv = self.eng.set_text(ed.key, &ed.text);
             self.last_recalc_ms = t.elapsed().as_secs_f64() * 1000.0;

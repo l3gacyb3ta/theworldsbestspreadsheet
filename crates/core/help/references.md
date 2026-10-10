@@ -18,6 +18,8 @@ Inserting, deleting, moving or sorting rows and columns never breaks or rewrites
 
 "Relative" matters only when you copy or fill: then a relative reference moves with the formula, and an `$`-absolute one stays put.
 
+Moving cells (cut and paste, or dragging the selection's border) is the one edit that changes references: every reference to a moved cell is updated to its new place, and references to the cells it lands on become `#ref!`. A range follows only if all of its cells moved. Nothing else is rewritten. See [[#editing]].
+
 ## Sheets
 
 References point at sheets the same way, so managing sheets never rewrites a formula. Double-click a tab to rename it, right-click it to duplicate, move or delete it, and drag tabs to reorder them. All of these are undoable.
