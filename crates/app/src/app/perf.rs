@@ -71,6 +71,21 @@ fn perf_frames() {
     let file = std::env::var("WBS_PERF_FILE").expect("WBS_PERF_FILE");
     let frames: usize = std::env::var("WBS_PERF_FRAMES").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
     let ctx = egui::Context::default();
+    if std::env::var("WBS_PERF_OPEN_STAGES").is_ok() {
+        let ms = |t: Instant| t.elapsed().as_secs_f64() * 1000.0;
+        let t = Instant::now();
+        let s = std::fs::read_to_string(&file).unwrap();
+        println!("read {:.1}", ms(t));
+        let t = Instant::now();
+        let wb: wbs_core::model::Workbook = serde_json::from_str(&s).unwrap();
+        println!("parse {:.1}", ms(t));
+        let t = Instant::now();
+        let e = Engine::new(wb);
+        println!("engine {:.1}", ms(t));
+        let t = Instant::now();
+        drop(e);
+        println!("drop {:.1}", ms(t));
+    }
     let t = Instant::now();
     let mut app = App::new(PathBuf::from(&file));
     println!("open: {:.1} ms", t.elapsed().as_secs_f64() * 1000.0);

@@ -4,8 +4,16 @@ version = "0.1.0"
 edition = "2021"
 license-file = "../../LICENSE"
 
+[features]
+default = ["mimalloc"]
+# A faster allocator (C, built with `cc`; macOS, Windows, Linux, BSD). Recalc, compiling and
+# the UI allocate a lot of small values: a 21k-cell recalc is ~1.6x and a rebuild ~1.8x
+# faster with it than with glibc's. `--no-default-features` builds without it.
+mimalloc = ["dep:mimalloc"]
+
 [dependencies]
 wbs-core = { path = "../core" }
+mimalloc = { version = "0.1", default-features = false, optional = true }
 eframe = { version = "0.36", features = ["persistence"] }
 serde_json = "1"
 rustc-hash = "2.1"

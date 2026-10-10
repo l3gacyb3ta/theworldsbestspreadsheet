@@ -10,6 +10,10 @@ mod syntax;
 
 use std::path::PathBuf;
 
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> eframe::Result {
     let arg = std::env::args().nth(1).map(PathBuf::from);
     let options = eframe::NativeOptions {

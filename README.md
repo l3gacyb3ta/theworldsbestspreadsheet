@@ -34,6 +34,21 @@ cargo test            # core unit + engine tests, and headless UI tests
 The UI tests drive the real app with synthetic input through `egui_kittest` and
 write rendered snapshots to `target/ui-shots/`.
 
+The app uses mimalloc as its allocator (a C library built with `cc`; recalcs and
+rebuilds of big sheets are ~1.6-1.8x faster than with glibc's malloc).
+`cargo build -p wbs --no-default-features` builds without it.
+
+Benchmarks, for profiling with a real workbook:
+
+```bash
+cargo run --release -p wbs-core --example bench                 # 3,000-cell scrub
+cargo run --release -p wbs-core --example bench_file  -- f.wbs.json [name] [steps]  # load, save, scrub each named input
+cargo run --release -p wbs-core --example bench_edits -- f.wbs.json sheet A1   # retype, insert/delete a row
+cargo run --release -p wbs-core --example bench_open  -- f.wbs.json
+WBS_PERF_FILE=f.wbs.json WBS_PERF_SHEET=sheet WBS_PERF_SCRUB=name \
+  cargo test --release -p wbs perf_frames -- --ignored --nocapture   # UI frame times
+```
+
 ## Cells, in one sentence each
 
 - `=` starts a program. It runs on an empty stack; the cell's value is the one value left.

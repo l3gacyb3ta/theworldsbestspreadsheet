@@ -26,7 +26,7 @@ fn main() {
     let sid = e.wb.sheets[six].id;
     let orig = e.wb.cell_text(k);
     if std::env::var("ONLY_ROWS").is_ok() {
-        time("insert+delete row (undo)", 12, |_| {
+        time("insert+delete row (undo)", std::env::var("ONLY_ROWS").unwrap().parse().unwrap_or(12), |_| {
             let inv = e.apply(e.insert_rows_edit(sid, r.row, 1));
             e.apply(inv);
         });
