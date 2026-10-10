@@ -16,29 +16,109 @@ pub enum Prov {
     Derived(CellKey, usize),
 }
 
+/// Per-element provenance of an array, dropped by any operation that computes.
+/// The common cases (a cell's own value, one element of it) don't allocate.
+#[derive(Clone, Debug, Default)]
+pub enum Provs {
+    #[default]
+    None,
+    /// A cell's whole value: element `i` is `Literal(k)` for a number literal, else `Derived(k, i)`.
+    Cell(CellKey, bool),
+    /// A single element.
+    One(Prov),
+    List(Arc<[Prov]>),
+}
+
+impl Provs {
+    pub fn is_none(&self) -> bool {
+        matches!(self, Provs::None)
+    }
+    /// Provenance of element `i` (`Prov::None` when unknown).
+    pub fn get(&self, i: usize) -> Prov {
+        match self {
+            Provs::None => Prov::None,
+            Provs::Cell(k, true) => Prov::Literal(*k),
+            Provs::Cell(k, false) => Prov::Derived(*k, i),
+            Provs::One(p) => if i == 0 { *p } else { Prov::None },
+            Provs::List(l) => l.get(i).copied().unwrap_or(Prov::None),
+        }
+    }
+    /// The first `n` elements' provenance (`None` when there's none).
+    pub fn to_vec(&self, n: usize) -> Option<Vec<Prov>> {
+        (!self.is_none()).then(|| (0..n).map(|i| self.get(i)).collect())
+    }
+}
+
+impl PartialEq for Provs {
+    fn eq(&self, o: &Provs) -> bool {
+        match (self, o) {
+            (Provs::None, Provs::None) => true,
+            (Provs::None, _) | (_, Provs::None) => false,
+            (Provs::Cell(a, x), Provs::Cell(b, y)) => a == b && x == y,
+            (Provs::One(a), Provs::One(b)) => a == b,
+            (Provs::List(a), Provs::List(b)) => a == b,
+            // mixed representations: element by element, as far as either says anything
+            _ => {
+                let n = |p: &Provs| match p {
+                    Provs::List(l) => l.len(),
+                    _ => 1,
+                };
+                (0..n(self).max(n(o))).all(|i| self.get(i) == o.get(i))
+            }
+        }
+    }
+}
+
+/// An array's magnitudes: a scalar is stored inline, an array is one shared allocation.
+#[derive(Clone, Debug)]
+pub enum Data {
+    One(f64),
+    Many(Arc<[f64]>),
+}
+
+impl std::ops::Deref for Data {
+    type Target = [f64];
+    fn deref(&self) -> &[f64] {
+        match self {
+            Data::One(x) => std::slice::from_ref(x),
+            Data::Many(a) => a,
+        }
+    }
+}
+
+impl PartialEq for Data {
+    fn eq(&self, o: &Data) -> bool {
+        **self == **o
+    }
+}
+
+impl From<Vec<f64>> for Data {
+    fn from(v: Vec<f64>) -> Data {
+        if v.len() == 1 { Data::One(v[0]) } else { Data::Many(v.into()) }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Num {
     pub shape: Vec<usize>,
-    /// One allocation per array (a scalar is the common case).
-    pub data: Arc<[f64]>,
+    pub data: Data,
     pub q: Quant,
-    /// Per-element provenance; dropped by any operation that computes.
-    pub prov: Option<Arc<Vec<Prov>>>,
+    pub prov: Provs,
 }
 
 impl Num {
     pub fn scalar(x: f64, q: Quant) -> Num {
-        Num { shape: vec![], data: Arc::new([x]), q, prov: None }
+        Num { shape: vec![], data: Data::One(x), q, prov: Provs::None }
     }
     pub fn plain(x: f64) -> Num {
         Num::scalar(x, Quant::none())
     }
     pub fn vector(v: Vec<f64>, q: Quant) -> Num {
-        Num { shape: vec![v.len()], data: v.into(), q, prov: None }
+        Num { shape: vec![v.len()], data: v.into(), q, prov: Provs::None }
     }
     pub fn with_shape(shape: Vec<usize>, v: Vec<f64>, q: Quant) -> Num {
         debug_assert_eq!(shape.iter().product::<usize>(), v.len());
-        Num { shape, data: v.into(), q, prov: None }
+        Num { shape, data: v.into(), q, prov: Provs::None }
     }
     pub fn rank(&self) -> usize {
         self.shape.len()

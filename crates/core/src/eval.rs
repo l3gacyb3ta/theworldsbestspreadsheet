@@ -7,7 +7,7 @@ use crate::model::StoredRef;
 use crate::parse::{Builtin, Callee, Compiled, Op, OpKind};
 use crate::rational::Rational;
 use crate::units::{self, Dim, DispUnit, Quant, UnitExpr, UnitInfo};
-use crate::value::{broadcast2, Num, Text, Value};
+use crate::value::{broadcast2, Num, Provs, Text, Value};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -115,10 +115,17 @@ fn same_dims(a: &Quant, b: &Quant, what: &str) -> R<()> {
 }
 
 fn map(n: &Num, q: Quant, f: impl Fn(f64) -> f64) -> Num {
+    if n.shape.is_empty() {
+        return Num::scalar(f(n.data[0]), q);
+    }
     Num::with_shape(n.shape.clone(), n.data.iter().map(|x| f(*x)).collect(), q)
 }
 
 fn zip(a: &Num, b: &Num, q: Quant, f: impl Fn(f64, f64) -> f64) -> R<Num> {
+    // two scalars: the common case, without building a shape or a vector
+    if a.shape.is_empty() && b.shape.is_empty() {
+        return Ok(Num::scalar(f(a.data[0], b.data[0]), q));
+    }
     let (shape, data) = broadcast2(a, b, f)?;
     Ok(Num::with_shape(shape, data, q))
 }
@@ -354,7 +361,7 @@ impl<'e> Interp<'e> {
             _ => {}
         }
         n.q.disp = r.disp;
-        n.prov = None;
+        n.prov = Provs::None;
         Ok(n)
     }
 
@@ -728,7 +735,7 @@ fn transpose(v: Value) -> R<Value> {
         }
         Value::Num(n) if n.rank() == 1 => {
             let k = n.len();
-            Ok(Value::Num(Num { shape: vec![1, k], data: n.data.clone(), q: n.q.clone(), prov: None }))
+            Ok(Value::Num(Num { shape: vec![1, k], data: n.data.clone(), q: n.q.clone(), prov: Provs::None }))
         }
         Value::Text(t) if t.shape.len() == 2 => {
             let (r, c) = (t.shape[0], t.shape[1]);

@@ -147,6 +147,15 @@ struct GoalDrag {
     solve_ms: f64,
 }
 
+/// The selected cell's precedents and dependents with their positions, for the trace
+/// overlay and the inspector. A cell can have thousands: kept while the graph holds.
+struct TraceSets {
+    key: CellKey,
+    gen: u64,
+    pre: Vec<(CellKey, Option<(usize, usize)>)>,
+    dep: Vec<(CellKey, Option<(usize, usize)>)>,
+}
+
 /// Per-frame grid geometry.
 #[derive(Clone)]
 struct Geo {
@@ -241,6 +250,7 @@ pub struct App {
     goal_live_ms: f64,
     editor_rect: Option<Rect>,
     trace: bool,
+    trace_sets: Option<std::rc::Rc<TraceSets>>,
     tabs: panels::Tabs,
     last_recalc_ms: f64,
     scroll_into_view: bool,
@@ -310,6 +320,7 @@ impl App {
             goal_live_ms: 50.0,
             editor_rect: None,
             trace: true,
+            trace_sets: None,
             tabs: Default::default(),
             last_recalc_ms: 0.0,
             scroll_into_view: false,
@@ -352,6 +363,16 @@ impl App {
     fn key(&mut self, r: usize, c: usize) -> CellKey {
         let ix = self.sheet_ix;
         self.eng.wb.sheets[ix].key_grow(r, c)
+    }
+    fn trace_sets(&mut self, k: CellKey) -> std::rc::Rc<TraceSets> {
+        let gen = self.eng.graph_generation();
+        if let Some(t) = self.trace_sets.as_ref().filter(|t| t.key == k && t.gen == gen) {
+            return t.clone();
+        }
+        let at = |v: Vec<CellKey>| v.into_iter().map(|c| (c, self.eng.wb.pos(c))).collect();
+        let t = std::rc::Rc::new(TraceSets { key: k, gen, pre: at(self.eng.precedents(k)), dep: at(self.eng.dependents(k)) });
+        self.trace_sets = Some(t.clone());
+        t
     }
     fn sel(&self) -> CRect {
         CRect::span(self.sid(), self.anchor, self.cursor)

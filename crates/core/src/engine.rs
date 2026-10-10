@@ -10,7 +10,7 @@ use crate::ids::*;
 use crate::model::{classify, Cell, Kind, NameDef, Piece, Sheet, StoredRef, Workbook};
 use crate::parse::{declares, CompileError, Compiled, Compiler, Declares, Dep, OpKind, Symbols};
 use crate::units::{Dim, Quant, UnitInfo};
-use crate::value::{Num, Prov, Text, Value};
+use crate::value::{Num, Prov, Provs, Text, Value};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -578,7 +578,7 @@ impl Engine {
                 let x = *n.data.get(i).ok_or_else(|| format!("{} is an empty array", label()))?;
                 let prov = if anchor == k && self.kind(k) == Kind::Number { Prov::Literal(k) } else { Prov::Derived(anchor, i) };
                 let mut s = Num::scalar(x, n.q.clone());
-                s.prov = Some(Arc::new(vec![prov]));
+                s.prov = Provs::One(prov);
                 Ok(Value::Num(s))
             }
             Value::Text(t) => {
@@ -632,7 +632,7 @@ impl Engine {
                             }
                         }
                         nums.push(n.data[0]);
-                        prov.push(n.prov.as_ref().map(|p| p[0]).unwrap_or(Prov::None));
+                        prov.push(n.prov.get(0));
                     }
                     Value::Text(t) => {
                         if !nums.is_empty() {
@@ -655,7 +655,7 @@ impl Engine {
             return Ok(Value::Text(Text { shape, data: Arc::new(texts) }));
         }
         let mut n = Num::with_shape(shape, nums, q.map(|x| x.0).unwrap_or_else(Quant::none));
-        n.prov = Some(Arc::new(prov));
+        n.prov = Provs::List(prov.into());
         Ok(Value::Num(n))
     }
 
@@ -669,6 +669,12 @@ impl Engine {
             Some(Cell { pieces: self.wb.parse_text(text, k.sheet) })
         };
         self.apply(Edit::Cells(vec![(k, cell)]))
+    }
+
+    /// Changes whenever the dependency graph, spill coverage or the sheets' row and column
+    /// order may have: precedents, dependents and their positions are the same while it doesn't.
+    pub fn graph_generation(&self) -> u64 {
+        self.graph_gen
     }
 
     /// Counts applied edits. Changes to `wb` made without an edit don't count.
@@ -1294,12 +1300,7 @@ impl Engine {
                 // Stamp the provenance a reference to this cell carries once, here, so
                 // every reference is an Arc clone instead of a fresh allocation.
                 if let Ok(Value::Num(n)) = &mut res {
-                    let p: Vec<Prov> = if self.kind(k) == Kind::Number {
-                        vec![Prov::Literal(k); n.len()]
-                    } else {
-                        (0..n.len()).map(|i| Prov::Derived(k, i)).collect()
-                    };
-                    n.prov = Some(Arc::new(p));
+                    n.prov = Provs::Cell(k, self.kind(k) == Kind::Number);
                 }
                 self.results.insert(k, res);
             }
@@ -1452,7 +1453,7 @@ impl Engine {
     fn evaluate(&self, k: CellKey) -> CellResult {
         let Some(n) = self.nodes.get(&k) else { return Err(local("no content".into(), None)) };
         let compiled = match &n.compiled {
-            Ok(c) => c.clone(),
+            Ok(c) => c,
             Err(e) => return Err(CellError { msg: e.msg.clone(), span: e.span.clone(), kind: ErrKind::Local }),
         };
         // A unit error found statically is this cell's, whatever its inputs hold.
@@ -1460,15 +1461,25 @@ impl Engine {
             return Err(local(e.msg.clone(), e.span.clone()));
         }
         // An error in a referenced cell is reported as upstream, not here.
-        if let Some(up) = self.first_upstream_error(k) {
-            let label = self.wb.cell_label(up, Some(k.sheet));
-            return Err(CellError { msg: format!("{label} has an error"), span: None, kind: ErrKind::Upstream(up) });
-        }
+        let upstream = || {
+            self.first_upstream_error(n, k).map(|up| {
+                let label = self.wb.cell_label(up, Some(k.sheet));
+                CellError { msg: format!("{label} has an error"), span: None, kind: ErrKind::Upstream(up) }
+            })
+        };
         let env = View(self);
-        match &*compiled {
+        if let Compiled::Program(ops) = &**compiled {
+            // A program reads every cell it references, and reading one with an error fails:
+            // one that ran had none upstream, so only a failure needs the check.
+            return run_program(&env, ops).map_err(|e| upstream().unwrap_or_else(|| local(e.msg, e.span)));
+        }
+        if let Some(e) = upstream() {
+            return Err(e);
+        }
+        match &**compiled {
             Compiled::Empty => Err(local("empty".into(), None)),
             Compiled::Text(t) => Ok(Value::text(t)),
-            Compiled::Program(ops) => run_program(&env, ops).map_err(|e| local(e.msg, e.span)),
+            Compiled::Program(_) => unreachable!(),
             Compiled::WordDef { name, .. } => {
                 self.dup_check(&self.syms.words, name, k, "word")?;
                 Ok(Value::Word(name.clone()))
@@ -1507,9 +1518,8 @@ impl Engine {
         }
     }
 
-    fn first_upstream_error(&self, k: CellKey) -> Option<CellKey> {
+    fn first_upstream_error(&self, n: &Node, k: CellKey) -> Option<CellKey> {
         // Only direct cell references; ranges report through range_value.
-        let n = self.nodes.get(&k)?;
         for d in &n.deps {
             if let Dep::Cell(p) = d {
                 let src = if self.nodes.contains_key(p) { Some(*p) } else { self.cover.get(p).copied() };

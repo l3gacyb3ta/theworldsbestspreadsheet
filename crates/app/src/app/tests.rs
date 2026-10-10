@@ -198,7 +198,7 @@ fn drag_bar_writes_literal() {
         .state()
         .chart_hits
         .iter()
-        .find(|(p, _)| matches!(p.prov, Prov::Literal(_)) && p.label.starts_with("Q4"))
+        .find(|(p, a)| matches!(p.prov, Prov::Literal(_)) && h.state().hit_label(p, a).starts_with("Q4"))
         .map(|(p, _)| p.pos)
         .expect("Q4 bar is draggable");
     drag(&mut h, hit, hit - Vec2::new(0.0, 40.0), Modifiers::NONE);
@@ -212,7 +212,7 @@ fn drag_bar_writes_literal() {
     let k = h.state().eng.wb.sheets[0].key(45, 1).unwrap();
     h.state_mut().eng.set_text(k, "135.00 [widget]");
     h.run_steps(2);
-    let hit = h.state().chart_hits.iter().find(|(p, _)| p.label.starts_with("Q3")).map(|(p, _)| p.pos).unwrap();
+    let hit = h.state().chart_hits.iter().find(|(p, a)| h.state().hit_label(p, a).starts_with("Q3")).map(|(p, _)| p.pos).unwrap();
     drag(&mut h, hit, hit - Vec2::new(0.0, 23.0), Modifiers::NONE);
     let src = source(&h, "B46");
     assert!(src != "135.00 [widget]" && src.ends_with("[widget]"), "{src}");

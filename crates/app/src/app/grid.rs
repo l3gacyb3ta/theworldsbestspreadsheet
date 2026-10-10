@@ -130,11 +130,12 @@ impl App {
             } else if in_row_hdr && self.row_border(g, pos).is_some() {
                 ctx.set_cursor_icon(CursorIcon::ResizeRow);
             } else if in_cells {
-                if let Some((hit, _)) = self.chart_hit(pos) {
+                if let Some((hit, axis)) = self.chart_hit(pos) {
+                    let label = self.hit_label(hit, axis);
                     match hit.prov {
                         Prov::Literal(k) => {
                             ctx.set_cursor_icon(CursorIcon::ResizeVertical);
-                            chart_view::tooltip(ctx, pos, &format!("{}\ndrag to edit {}", hit.label, self.label(k)));
+                            chart_view::tooltip(ctx, pos, &format!("{label}\ndrag to edit {}", self.label(k)));
                         }
                         Prov::Derived(k, i) => {
                             let elem = self.eng.element_cell(k, i);
@@ -149,9 +150,9 @@ impl App {
                                     format!("drag to goal-seek {}{switch}", self.input_name(pick))
                                 }
                             };
-                            chart_view::tooltip(ctx, pos, &format!("{}\n{from}\n{how}", hit.label));
+                            chart_view::tooltip(ctx, pos, &format!("{label}\n{from}\n{how}"));
                         }
-                        Prov::None => chart_view::tooltip(ctx, pos, &format!("{}\ncomputed by the chart's own program — not draggable", hit.label)),
+                        Prov::None => chart_view::tooltip(ctx, pos, &format!("{label}\ncomputed by the chart's own program — not draggable")),
                     }
                 } else if self.fill_handle(g).contains(pos) && self.edit.is_none() {
                     ctx.set_cursor_icon(CursorIcon::Crosshair);
@@ -224,6 +225,14 @@ impl App {
         let r = g.rect(s.r0, s.c0, s.r1, s.c1);
         r.expand(3.0).contains(pos) && !r.shrink(3.0).contains(pos)
     }
+    /// A chart point's `x → y`.
+    pub(super) fn hit_label(&self, hit: &PointHit, axis: &YAxis) -> String {
+        match axis.anchor.and_then(|a| self.eng.result(a)) {
+            Some(Ok(Value::Chart(c))) => chart_view::point_label(c, hit.layer, hit.index),
+            _ => String::new(),
+        }
+    }
+
     fn chart_hit(&self, pos: Pos2) -> Option<(&PointHit, &YAxis)> {
         self.chart_hits
             .iter()
@@ -717,6 +726,8 @@ impl App {
 
     #[allow(clippy::too_many_arguments)]
     fn paint(&mut self, ui: &mut Ui, ctx: &egui::Context, pal: &Pal, g: &Geo, area: Rect, dark: bool, sid: SheetId) {
+        let cur = self.sheet().key(self.cursor.0, self.cursor.1);
+        let trace = cur.filter(|_| self.trace && self.edit.is_none()).map(|k| self.trace_sets(k));
         let painter = ui.painter_at(area);
         painter.rect_filled(g.cells, 0.0, pal.bg);
         let cp = painter.with_clip_rect(g.cells);
@@ -855,27 +866,18 @@ impl App {
                 }
             }
         }
-        // trace
-        let cur = s.key(self.cursor.0, self.cursor.1);
-        if self.trace && self.edit.is_none() {
-            if let Some(k) = cur {
-                let pre_c = Color32::from_rgb(0x3b, 0x82, 0xf6);
-                let dep_c = Color32::from_rgb(0xf9, 0x73, 0x16);
-                for p in self.eng.precedents(k) {
-                    if p.sheet == sid {
-                        if let Some((r, c)) = self.eng.wb.pos(p) {
-                            cp.rect_filled(g.cell(r, c), 0.0, pre_c.gamma_multiply(0.10));
-                            cp.rect_stroke(g.cell(r, c).shrink(1.0), 0.0, Stroke::new(1.0, pre_c.gamma_multiply(0.7)), StrokeKind::Inside);
-                        }
+        // trace (only what's on screen: a cell can have thousands of dependents)
+        if let Some(t) = &trace {
+            let pre_c = Color32::from_rgb(0x3b, 0x82, 0xf6);
+            let dep_c = Color32::from_rgb(0xf9, 0x73, 0x16);
+            for (cells, color, edge) in [(&t.pre, pre_c, 0.7), (&t.dep, dep_c, 0.8)] {
+                for (k, at) in cells {
+                    let Some((r, c)) = *at else { continue };
+                    if k.sheet != sid || !rows.contains(&r) || !cols.contains(&c) {
+                        continue;
                     }
-                }
-                for d in self.eng.dependents(k) {
-                    if d.sheet == sid {
-                        if let Some((r, c)) = self.eng.wb.pos(d) {
-                            cp.rect_filled(g.cell(r, c), 0.0, dep_c.gamma_multiply(0.10));
-                            cp.rect_stroke(g.cell(r, c).shrink(1.0), 0.0, Stroke::new(1.0, dep_c.gamma_multiply(0.8)), StrokeKind::Inside);
-                        }
-                    }
+                    cp.rect_filled(g.cell(r, c), 0.0, color.gamma_multiply(0.10));
+                    cp.rect_stroke(g.cell(r, c).shrink(1.0), 0.0, Stroke::new(1.0, color.gamma_multiply(edge)), StrokeKind::Inside);
                 }
             }
         }
