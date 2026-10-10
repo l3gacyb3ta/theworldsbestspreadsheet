@@ -8,7 +8,10 @@ While you edit a program:
 
 - **Click a cell** to insert its reference at the cursor. **Drag** across cells to insert a range. Click another sheet's tab first to reference across sheets.
 - Each reference gets its own colour, in the text and on the grid.
-- The **hint strip** under the formula bar explains the word at the cursor, shows the stack at that point, and offers completions for words, names and units. Click a completion to insert it.
+- The **hint strip** under the formula bar explains the word at the cursor, shows the stack at that point, and offers completions for words, names and units. Click a completion to insert it, or use the keyboard.
+- **↓ / ↑** highlight a completion, and the strip shows what it does. Nothing is highlighted until you press ↓; ↑ from the first one goes back to what you typed.
+- **Tab** or **Enter** inserts the highlighted completion and keeps editing. With nothing highlighted they confirm the cell as usual.
+- **Escape** closes the completion list (until you type again); a second Escape cancels the edit.
 
 ## Fill
 

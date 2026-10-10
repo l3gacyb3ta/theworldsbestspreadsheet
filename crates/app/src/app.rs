@@ -94,6 +94,10 @@ struct Editing {
     ref_span: Option<Range<usize>>,
     /// Which editor had focus last (formula bar or in-cell).
     in_bar: bool,
+    /// The completion highlighted with ↓/↑ (none until the first ↓).
+    pick: Option<usize>,
+    /// The completion list was closed with Escape (until the text or caret changes).
+    comp_closed: bool,
 }
 
 enum Drag {
@@ -365,7 +369,7 @@ impl App {
         let orig = self.eng.wb.cell_text(k);
         let text = text.unwrap_or_else(|| orig.clone());
         let cursor = text.chars().count();
-        self.edit = Some(Editing { key: k, orig, text, cursor, ref_span: None, in_bar });
+        self.edit = Some(Editing { key: k, orig, text, cursor, ref_span: None, in_bar, pick: None, comp_closed: false });
         self.focus_req = Some((ctx.cumulative_pass_nr() + 1, cursor));
         self.offer = None;
     }
