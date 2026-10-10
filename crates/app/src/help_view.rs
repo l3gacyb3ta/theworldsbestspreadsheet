@@ -1,8 +1,13 @@
 //! The help window: guides, reference, live units/words pages, search and
 //! the playground. Content comes from `wbs_core::help`.
+//!
+//! Help is its own OS window (an immediate egui viewport, so it can borrow the
+//! engine). Where viewports are embedded (headless tests, backends without
+//! multi-window support) it is an `egui::Window` inside the main window.
 
+use crate::app::Command;
 use crate::syntax;
-use eframe::egui::{self, Color32, FontId, RichText, TextEdit, Ui};
+use eframe::egui::{self, Color32, Event, FontId, Rect, RichText, TextEdit, Ui, ViewportCommand, ViewportId};
 use wbs_core::engine::{Engine, Scratch};
 use wbs_core::help::{self, Block, Category, Hit, Inline, WordDoc, ERRORS, SAMPLE, SAMPLE_NAMES, WORDS};
 use wbs_core::ids::{CellKey, SheetId};
@@ -27,6 +32,8 @@ pub enum PlayCtx {
 /// What the help window asks the app to do.
 pub enum HelpAction {
     Goto(CellKey),
+    /// A document shortcut (⌘S, ⌘O…) pressed while the help window had focus.
+    Command(Command),
 }
 
 pub struct Help {
@@ -40,9 +47,25 @@ pub struct Help {
     play_ctx: PlayCtx,
     focus_search: bool,
     scroll_top: bool,
+    /// Drawn inside the main window rather than as its own OS window.
+    embedded: bool,
+    /// The OS window has keyboard focus.
+    focused: bool,
+    /// Bring the OS window to the front on the next frame.
+    raise: bool,
+    /// Edit commands from the menu bar to replay in the help window.
+    forward: Vec<Command>,
+    /// The OS window's outer position and inner size, and where it reopens.
+    geom: Option<Rect>,
+    restore: Option<Rect>,
 }
 
 const MONO: f32 = 13.0;
+pub const TITLE: &str = "Help — the world's best spreadsheet";
+
+fn viewport_id() -> ViewportId {
+    ViewportId::from_hash_of("help")
+}
 
 impl Help {
     pub fn new() -> Help {
@@ -57,6 +80,12 @@ impl Help {
             play_ctx: PlayCtx::Sample,
             focus_search: false,
             scroll_top: false,
+            embedded: true,
+            focused: false,
+            raise: false,
+            forward: Vec::new(),
+            geom: None,
+            restore: None,
         }
     }
 
@@ -72,8 +101,52 @@ impl Help {
             self.fwd.clear();
         }
         self.query.clear();
-        self.open = true;
         self.scroll_top = true;
+        self.show();
+    }
+
+    /// Opens help where it was, in front.
+    pub fn show(&mut self) {
+        self.open = true;
+        self.raise = true;
+    }
+
+    pub fn close(&mut self) {
+        self.open = false;
+        self.focused = false;
+        self.forward.clear();
+        if self.geom.is_some() {
+            self.restore = self.geom;
+        }
+    }
+
+    /// Help is drawn inside the main window (as of the last frame).
+    pub fn embedded(&self) -> bool {
+        self.embedded
+    }
+
+    /// The help window is its own OS window and has keyboard focus.
+    pub fn has_focus(&self) -> bool {
+        self.open && !self.embedded && self.focused
+    }
+
+    /// Hands an edit command (undo, copy…) to the focused help window.
+    pub fn forward(&mut self, c: Command) {
+        self.forward.push(c);
+    }
+
+    /// "x y w h": the OS window's position and size, for eframe storage.
+    pub fn geometry(&self) -> Option<String> {
+        self.geom.or(self.restore).map(|r| format!("{} {} {} {}", r.min.x, r.min.y, r.width(), r.height()))
+    }
+
+    pub fn set_geometry(&mut self, s: &str) {
+        let v: Vec<f32> = s.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+        if let [x, y, w, h] = v[..] {
+            if w >= 200.0 && h >= 150.0 {
+                self.restore = Some(Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h)));
+            }
+        }
     }
 
     pub fn try_in_playground(&mut self, program: &str, ctx: PlayCtx) {
@@ -83,7 +156,7 @@ impl Help {
     }
 
     pub fn focus_search(&mut self) {
-        self.open = true;
+        self.show();
         self.focus_search = true;
     }
 
@@ -102,23 +175,82 @@ impl Help {
         }
     }
 
-    pub fn ui(&mut self, ctx: &egui::Context, eng: &Engine, home: SheetId) -> Vec<HelpAction> {
+    /// Shows help if it's open. `keys` are the app shortcuts to act on when
+    /// they're pressed in the help window: F1 closes it, ⌘/ searches, the rest go to the app.
+    pub fn ui(&mut self, ctx: &egui::Context, eng: &Engine, home: SheetId, keys: &[Command]) -> Vec<HelpAction> {
         let mut actions = Vec::new();
+        self.embedded = ctx.embed_viewports();
         if !self.open {
             return actions;
         }
-        let mut open = self.open;
-        let screen = ctx.content_rect();
-        egui::Window::new("Help")
-            .open(&mut open)
-            .default_size([820.0, 660.0])
-            .default_pos([(screen.right() - 840.0).max(screen.left() + 10.0), screen.top() + 60.0])
-            .min_width(520.0)
-            .max_width(1000.0)
-            .resizable(true)
-            .collapsible(false)
-            .show(ctx, |ui| self.contents(ui, eng, home, &mut actions));
-        self.open = open;
+        if self.embedded {
+            self.raise = false;
+            let mut open = self.open;
+            let screen = ctx.content_rect();
+            egui::Window::new("Help")
+                .open(&mut open)
+                .default_size([820.0, 660.0])
+                .default_pos([(screen.right() - 840.0).max(screen.left() + 10.0), screen.top() + 60.0])
+                .min_width(520.0)
+                .max_width(1000.0)
+                .resizable(true)
+                .collapsible(false)
+                .show(ctx, |ui| self.contents(ui, eng, home, &mut actions));
+            if !open {
+                self.close();
+            }
+            return actions;
+        }
+        let mut vb = egui::ViewportBuilder::default().with_title(TITLE).with_min_inner_size([520.0, 360.0]);
+        vb = match self.restore {
+            Some(r) => vb.with_position(r.min).with_inner_size(r.size()),
+            None => vb.with_inner_size([880.0, 720.0]),
+        };
+        ctx.show_viewport_immediate(viewport_id(), vb, |ui, class| {
+            let ctx = ui.ctx().clone();
+            // in the fallback (a backend without multi-window support) input is the main window's and handled there
+            if class == egui::ViewportClass::Immediate {
+                let (close, focused, outer, inner) = ctx.input(|i| {
+                    let v = i.viewport();
+                    (v.close_requested(), v.focused.unwrap_or(false), v.outer_rect, v.inner_rect)
+                });
+                self.focused = focused;
+                if let (Some(o), Some(i)) = (outer, inner) {
+                    self.geom = Some(Rect::from_min_size(o.min, i.size()));
+                }
+                if std::mem::take(&mut self.raise) {
+                    ctx.send_viewport_cmd(ViewportCommand::Focus);
+                }
+                for c in std::mem::take(&mut self.forward) {
+                    match c {
+                        Command::Cut => ctx.send_viewport_cmd(ViewportCommand::RequestCut),
+                        Command::Copy => ctx.send_viewport_cmd(ViewportCommand::RequestCopy),
+                        Command::Paste => ctx.send_viewport_cmd(ViewportCommand::RequestPaste),
+                        // the menu's key equivalent swallowed the keystroke: replay it for the focused field
+                        c => {
+                            if let Some(s) = c.shortcut() {
+                                let ev = Event::Key { key: s.logical_key, physical_key: None, pressed: true, repeat: false, modifiers: s.modifiers };
+                                ctx.input_mut(|i| i.events.push(ev));
+                            }
+                        }
+                    }
+                }
+                for &c in keys {
+                    let Some(s) = c.shortcut() else { continue };
+                    if ctx.input_mut(|i| i.consume_shortcut(&s)) {
+                        match c {
+                            Command::Help => self.close(),
+                            Command::SearchHelp => self.focus_search(),
+                            c => actions.push(HelpAction::Command(c)),
+                        }
+                    }
+                }
+                if close {
+                    self.close();
+                }
+            }
+            egui::CentralPanel::default().show(ui, |ui| self.contents(ui, eng, home, &mut actions));
+        });
         actions
     }
 

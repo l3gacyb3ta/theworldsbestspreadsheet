@@ -267,6 +267,14 @@ impl App {
         app
     }
 
+    /// Where the help window opens, from `Help::geometry` saved last run.
+    pub fn with_help_geometry(mut self, g: Option<String>) -> App {
+        if let Some(g) = g {
+            self.help.set_geometry(&g);
+        }
+        self
+    }
+
     /// Use the native menu bar where there is one (macOS).
     pub fn with_native_menu(mut self, ctx: &egui::Context) -> App {
         self.native_menu = crate::menus::NativeMenu::install(ctx);
@@ -455,9 +463,16 @@ impl eframe::App for App {
         });
         egui::CentralPanel::no_frame().show(ui, |ui| self.grid(ui, dark));
         let home = self.sid();
-        for a in self.help.ui(&ctx, &self.eng, home) {
+        let keys = if self.confirm.is_none() { self.owned_keys() } else { &[] };
+        for a in self.help.ui(&ctx, &self.eng, home, keys) {
             match a {
-                HelpAction::Goto(k) => self.goto(k),
+                HelpAction::Goto(k) => {
+                    self.goto(k);
+                    if !self.help.embedded() {
+                        ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+                    }
+                }
+                HelpAction::Command(c) => self.run(&ctx, c),
             }
         }
         self.document_ui(&ctx);
@@ -477,8 +492,13 @@ impl eframe::App for App {
         if let Some(p) = self.path.as_ref().and_then(|p| std::path::absolute(p).ok()) {
             storage.set_string(LAST_FILE_KEY, p.display().to_string());
         }
+        if let Some(g) = self.help.geometry() {
+            storage.set_string(HELP_WINDOW_KEY, g);
+        }
     }
 }
 
 /// eframe storage key for the most recently opened/saved workbook.
 pub const LAST_FILE_KEY: &str = "last_file";
+/// eframe storage key for the help window's position and size.
+pub const HELP_WINDOW_KEY: &str = "help_window";

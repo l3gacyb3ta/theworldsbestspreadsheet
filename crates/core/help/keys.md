@@ -37,7 +37,7 @@
 | ⌘O | open a workbook |
 | ⌘S / ⇧⌘S | save / save as |
 | ⌘Q | quit (asks first if there are unsaved changes) |
-| F1 | help for the current cell or word (again to close) |
+| F1 | help for the current cell or word; in the help window, closes it |
 | ⌘/ | search help |
 
 On Linux and Windows ⌘ is Ctrl. On macOS the same commands are in the menu bar;
