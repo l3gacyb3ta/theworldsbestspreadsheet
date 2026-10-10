@@ -265,7 +265,7 @@ fn charts() {
     match e.shown(k) {
         Shown::Value { value: wbs_core::value::Value::Chart(c), .. } => {
             assert_eq!(c.title.as_deref(), Some("squares"));
-            assert_eq!(c.layers[0].ys.data.as_slice(), &[1.0, 4.0, 9.0]);
+            assert_eq!(&*c.layers[0].ys.data, &[1.0, 4.0, 9.0]);
         }
         _ => panic!("expected chart, got {}", show(&e, "B1")),
     }
@@ -489,4 +489,57 @@ fn range_gaps_marker_round_trips() {
     set(&mut e, "E1", "=Sheet1!A1:A3? sum");
     assert_eq!(e.wb.cell_text(key(&e, "E1")), "=Sheet1!A1:A3? sum");
     assert_eq!(show(&e, "E1"), "4");
+}
+
+/// Recalc plans are reused while the same cells change and the graph doesn't.
+/// Interleave scrubs that reuse a plan with edits that change the graph (new
+/// dependents, changed references, spills growing, blocked and unblocked) and
+/// check every displayed value against an engine rebuilt from scratch.
+#[test]
+fn cached_recalc_plans_stay_correct() {
+    let mut e = eng();
+    set(&mut e, "A1", "2");
+    set(&mut e, "A2", "=A1 3 *");
+    set(&mut e, "A3", "=A2 A1 +");
+    set(&mut e, "B1", "=3 range A1 *"); // fixed-size spill: scrubbing A1 reuses the plan
+    set(&mut e, "C1", "=B1 sum");
+    set(&mut e, "C2", "=B2 10 *");
+    let check = |e: &Engine, step: &str| {
+        let fresh = Engine::new(serde_json::from_str(&serde_json::to_string(&e.wb).unwrap()).unwrap());
+        for r in ["A1", "A2", "A3", "B1", "B2", "B3", "C1", "C2", "C3", "D1", "F1", "F2", "F3", "F4", "F5"] {
+            assert_eq!(show(e, r), show(&fresh, r), "{r} after {step}");
+        }
+    };
+    let steps: &[(&str, &str)] = &[
+        ("A1", "3"),
+        ("A1", "4"),
+        ("A1", "5"), // scrubs reusing one plan
+        ("C3", "=A3 2 *"),
+        ("A1", "6"),
+        ("A1", "7"), // a new dependent appears
+        ("A2", "=A1 4 *"),
+        ("A1", "8"), // formula edit with the same references
+        ("A2", "=C1 1 +"),
+        ("A1", "9"),
+        ("A1", "2"), // references changed
+        // the scrubbed cell itself gains references, closing a cycle
+        ("A1", "=C2 1 +"),
+        ("A1", "3"),
+        ("A1", "4"),
+        ("F1", "=A1 range"),
+        ("A1", "3"),
+        ("A1", "4"), // a spill that grows with every scrub
+        ("F3", "x"),
+        ("A1", "5"),
+        ("A1", "2"), // blocked, then shrinks clear of the blocker
+        ("F3", ""),
+        ("A1", "4"),
+        ("D1", "=A1 A3 +"),
+        ("A1", "5"),
+        ("A1", "6"),
+    ];
+    for (cell, text) in steps {
+        set(&mut e, cell, text);
+        check(&e, &format!("{cell} := {text}"));
+    }
 }

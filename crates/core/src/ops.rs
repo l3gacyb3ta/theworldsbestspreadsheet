@@ -6,7 +6,7 @@ use crate::ids::*;
 use crate::lex::{self, Tok};
 use crate::model::{classify, number_literal, Cell, Kind, Piece, StoredRef, Workbook};
 use crate::value::{fmt_date, Value};
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::ops::Range;
 
 /// Inclusive cell rectangle on one sheet.
@@ -283,7 +283,7 @@ pub fn move_cells(e: &mut Engine, src: Rect, sheet: SheetId, at: (usize, usize))
     if sheet == src.sheet && dr == 0 && dc == 0 {
         return Ok(Edit::Cells(vec![]));
     }
-    let mut moved: HashMap<CellKey, CellKey> = HashMap::new();
+    let mut moved: HashMap<CellKey, CellKey> = HashMap::default();
     let mut block = Vec::new();
     for (r0, c0, nr, nc) in spans {
         let dst = e.wb.sheet_mut(sheet).unwrap();
@@ -301,7 +301,7 @@ pub fn move_cells(e: &mut Engine, src: Rect, sheet: SheetId, at: (usize, usize))
     let replaced: HashSet<CellKey> = block.iter().map(|(_, d)| *d).filter(|d| !moved.contains_key(d)).collect();
     let wb = &e.wb;
     let m = Mover { wb, moved: &moved, replaced: &replaced };
-    let mut out: HashMap<CellKey, Option<Cell>> = HashMap::new();
+    let mut out: HashMap<CellKey, Option<Cell>> = HashMap::default();
     for (sk, _) in &block {
         out.insert(*sk, None);
     }

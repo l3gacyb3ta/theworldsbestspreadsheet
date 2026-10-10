@@ -19,7 +19,8 @@ pub enum Prov {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Num {
     pub shape: Vec<usize>,
-    pub data: Arc<Vec<f64>>,
+    /// One allocation per array (a scalar is the common case).
+    pub data: Arc<[f64]>,
     pub q: Quant,
     /// Per-element provenance; dropped by any operation that computes.
     pub prov: Option<Arc<Vec<Prov>>>,
@@ -27,17 +28,17 @@ pub struct Num {
 
 impl Num {
     pub fn scalar(x: f64, q: Quant) -> Num {
-        Num { shape: vec![], data: Arc::new(vec![x]), q, prov: None }
+        Num { shape: vec![], data: Arc::new([x]), q, prov: None }
     }
     pub fn plain(x: f64) -> Num {
         Num::scalar(x, Quant::none())
     }
     pub fn vector(v: Vec<f64>, q: Quant) -> Num {
-        Num { shape: vec![v.len()], data: Arc::new(v), q, prov: None }
+        Num { shape: vec![v.len()], data: v.into(), q, prov: None }
     }
     pub fn with_shape(shape: Vec<usize>, v: Vec<f64>, q: Quant) -> Num {
         debug_assert_eq!(shape.iter().product::<usize>(), v.len());
-        Num { shape, data: Arc::new(v), q, prov: None }
+        Num { shape, data: v.into(), q, prov: None }
     }
     pub fn rank(&self) -> usize {
         self.shape.len()

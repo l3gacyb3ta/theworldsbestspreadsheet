@@ -5,7 +5,7 @@ use crate::ids::*;
 use crate::lex::{self, Tok, Token};
 use crate::model::{classify, Kind, StoredRef, Workbook};
 use crate::units::{parse_unit, UnitExpr};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 

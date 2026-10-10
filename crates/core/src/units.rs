@@ -7,35 +7,74 @@ use crate::rational::Rational;
 use std::fmt;
 use std::sync::Arc;
 
-#[derive(Clone, PartialEq, Debug, Default)]
-pub struct Dim(pub Vec<(Arc<str>, Rational)>);
+/// Name → exponent terms, shared: every value carries a dimension and a display
+/// unit, so cloning them must not allocate.
+pub type Terms = Arc<[(Arc<str>, Rational)]>;
+
+fn no_terms() -> Terms {
+    static EMPTY: std::sync::OnceLock<Terms> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(|| Arc::from(Vec::new())).clone()
+}
+
+/// Adds `o`'s exponents into `a`'s, keeping `a`'s order; zero exponents drop out.
+fn merge_terms(a: &Terms, o: &Terms, sign: Rational) -> Terms {
+    if o.is_empty() {
+        return a.clone();
+    }
+    if a.is_empty() && sign == Rational::ONE {
+        return o.clone();
+    }
+    let mut v = a.to_vec();
+    for (n, e) in o.iter() {
+        let e = e.mul(sign);
+        match v.iter_mut().find(|(m, _)| m == n) {
+            Some(slot) => slot.1 = slot.1.add(e),
+            None => v.push((n.clone(), e)),
+        }
+    }
+    v.retain(|(_, e)| !e.is_zero());
+    if v.is_empty() { no_terms() } else { v.into() }
+}
+
+fn pow_terms(a: &Terms, r: Rational) -> Terms {
+    if r == Rational::ONE || a.is_empty() {
+        return a.clone();
+    }
+    let v: Vec<_> = a.iter().map(|(n, e)| (n.clone(), e.mul(r))).filter(|(_, e)| !e.is_zero()).collect();
+    if v.is_empty() { no_terms() } else { v.into() }
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct Dim(pub Terms);
+
+impl Default for Dim {
+    fn default() -> Dim {
+        Dim::none()
+    }
+}
 
 impl Dim {
     pub fn none() -> Dim {
-        Dim(Vec::new())
+        Dim(no_terms())
     }
     pub fn base(name: &str) -> Dim {
-        Dim(vec![(name.into(), Rational::ONE)])
+        Dim(vec![(name.into(), Rational::ONE)].into())
     }
     pub fn is_none(&self) -> bool {
         self.0.is_empty()
     }
     pub fn mul(&self, o: &Dim) -> Dim {
-        let mut v = self.0.clone();
-        for (n, e) in &o.0 {
-            match v.iter_mut().find(|(m, _)| m == n) {
-                Some(slot) => slot.1 = slot.1.add(*e),
-                None => v.push((n.clone(), *e)),
-            }
+        let m = merge_terms(&self.0, &o.0, Rational::ONE);
+        if Arc::ptr_eq(&m, &self.0) || Arc::ptr_eq(&m, &o.0) || m.len() < 2 {
+            return Dim(m);
         }
-        v.retain(|(_, e)| !e.is_zero());
+        // dimensions are kept sorted so equal dimensions compare equal
+        let mut v = m.to_vec();
         v.sort_by(|a, b| a.0.cmp(&b.0));
-        Dim(v)
+        Dim(v.into())
     }
     pub fn pow(&self, r: Rational) -> Dim {
-        let mut v: Vec<_> = self.0.iter().map(|(n, e)| (n.clone(), e.mul(r))).collect();
-        v.retain(|(_, e)| !e.is_zero());
-        Dim(v)
+        Dim(pow_terms(&self.0, r))
     }
     pub fn inv(&self) -> Dim {
         self.pow(Rational::int(-1))
@@ -81,36 +120,27 @@ pub fn format_terms(terms: &[(Arc<str>, Rational)]) -> String {
 /// affine unit (°C, °F, date).
 #[derive(Clone, PartialEq, Debug)]
 pub struct DispUnit {
-    pub terms: Vec<(Arc<str>, Rational)>,
+    pub terms: Terms,
     pub factor: f64,
     pub offset: f64,
 }
 
 impl DispUnit {
     pub fn none() -> DispUnit {
-        DispUnit { terms: Vec::new(), factor: 1.0, offset: 0.0 }
+        DispUnit { terms: no_terms(), factor: 1.0, offset: 0.0 }
     }
     pub fn named(name: &str, factor: f64) -> DispUnit {
-        DispUnit { terms: vec![(name.into(), Rational::ONE)], factor, offset: 0.0 }
+        DispUnit { terms: vec![(name.into(), Rational::ONE)].into(), factor, offset: 0.0 }
     }
     pub fn is_none(&self) -> bool {
         self.terms.is_empty()
     }
     pub fn mul(&self, o: &DispUnit) -> DispUnit {
-        let mut v = self.terms.clone();
-        for (n, e) in &o.terms {
-            match v.iter_mut().find(|(m, _)| m == n) {
-                Some(slot) => slot.1 = slot.1.add(*e),
-                None => v.push((n.clone(), *e)),
-            }
-        }
-        v.retain(|(_, e)| !e.is_zero());
-        DispUnit { terms: v, factor: self.factor * o.factor, offset: 0.0 }
+        DispUnit { terms: merge_terms(&self.terms, &o.terms, Rational::ONE), factor: self.factor * o.factor, offset: 0.0 }
     }
     pub fn pow(&self, r: Rational) -> DispUnit {
-        let mut v: Vec<_> = self.terms.iter().map(|(n, e)| (n.clone(), e.mul(r))).collect();
-        v.retain(|(_, e)| !e.is_zero());
-        DispUnit { terms: v, factor: self.factor.powf(r.to_f64()), offset: 0.0 }
+        let factor = if r == Rational::ONE { self.factor } else { self.factor.powf(r.to_f64()) };
+        DispUnit { terms: pow_terms(&self.terms, r), factor, offset: 0.0 }
     }
     pub fn to_display(&self, canonical: f64) -> f64 {
         (canonical - self.offset) / self.factor
@@ -166,6 +196,15 @@ pub struct UnitInfo {
     pub affine: Option<f64>,
     /// For affine units: how differences display.
     pub delta: Option<DispUnit>,
+    /// `[name]` as a display unit, built once so applying a unit doesn't allocate.
+    pub disp: DispUnit,
+}
+
+impl UnitInfo {
+    pub fn new(name: Arc<str>, dim: Dim, factor: f64, affine: Option<f64>, delta: Option<DispUnit>) -> UnitInfo {
+        let disp = DispUnit { terms: vec![(name.clone(), Rational::ONE)].into(), factor, offset: 0.0 };
+        UnitInfo { name, dim, factor, affine, delta, disp }
+    }
 }
 
 // ---- unit expression grammar: `kg*m/s^2`, `1/s`, `m^1/2`, `(m/s)^2` ----
@@ -317,15 +356,15 @@ pub struct Resolved {
     pub absolute: Option<Arc<DispUnit>>,
 }
 
-pub fn resolve(expr: &UnitExpr, lookup: &mut dyn FnMut(&str) -> Result<UnitInfo, String>) -> Result<Resolved, String> {
+pub fn resolve(expr: &UnitExpr, lookup: &mut dyn FnMut(&str) -> Result<Arc<UnitInfo>, String>) -> Result<Resolved, String> {
     if let [(name, e)] = expr.terms.as_slice() {
         if *e == Rational::ONE {
             let u = lookup(name)?;
             if let Some(off) = u.affine {
                 let delta = u.delta.clone().unwrap_or_else(DispUnit::none);
                 return Ok(Resolved {
-                    dim: u.dim,
-                    disp: DispUnit { terms: vec![(u.name.clone(), Rational::ONE)], factor: u.factor, offset: off },
+                    dim: u.dim.clone(),
+                    disp: DispUnit { terms: vec![(u.name.clone(), Rational::ONE)].into(), factor: u.factor, offset: off },
                     absolute: Some(Arc::new(delta)),
                 });
             }
@@ -339,7 +378,7 @@ pub fn resolve(expr: &UnitExpr, lookup: &mut dyn FnMut(&str) -> Result<UnitInfo,
             return Err(format!("{name} is an absolute (affine) unit and can't be combined; use Δ{name} for differences"));
         }
         dim = dim.mul(&u.dim.pow(*e));
-        disp = disp.mul(&DispUnit::named(name, u.factor).pow(*e));
+        disp = disp.mul(&u.disp.pow(*e));
     }
     Ok(Resolved { dim, disp, absolute: None })
 }
