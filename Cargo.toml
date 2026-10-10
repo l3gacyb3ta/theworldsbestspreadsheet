@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/app"]
+members = ["crates/core", "crates/app", "spikes/automerge"]
 
 [profile.dev]
 opt-level = 1

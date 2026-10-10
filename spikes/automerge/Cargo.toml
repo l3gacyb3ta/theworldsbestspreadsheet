@@ -1,0 +1,10 @@
+[package]
+name = "automerge-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license-file = "../../LICENSE"
+description = "SPIKE for docs/design/automerge.md: throwaway evidence for the design note, not product code."
+
+[dependencies]
+automerge = "0.12.0"
