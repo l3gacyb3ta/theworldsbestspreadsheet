@@ -632,27 +632,35 @@ impl Help {
                 ui.add_space(6.0);
             }
             Block::Table(rows) => {
-                egui::Grid::new(ui.next_auto_id()).num_columns(2).spacing([16.0, 4.0]).striped(true).show(ui, |ui| {
-                    for (i, (a, b)) in rows.iter().enumerate() {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing.x = 0.0;
-                            if i == 0 {
-                                ui.label(RichText::new(a).strong());
-                            } else {
-                                self.inlines(ui, a);
-                            }
-                        });
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing.x = 0.0;
-                            if i == 0 {
-                                ui.label(RichText::new(b).strong());
-                            } else {
-                                self.inlines(ui, b);
-                            }
-                        });
-                        ui.end_row();
+                // fixed column widths: the first column as wide as its widest cell (up to 40%),
+                // the second wraps in what's left. (An egui::Grid of wrapping cells sizes its
+                // columns from the last frame and squeezes the text into a sliver.)
+                let total = ui.available_width();
+                let w1 = rows.iter().map(|(a, _)| inline_width(ui, a) + 2.0).fold(0.0, f32::max).min(total * 0.4);
+                let gap = 16.0;
+                let w2 = (total - w1 - gap).max(80.0);
+                let line = ui.visuals().widgets.noninteractive.bg_stroke;
+                for (i, (a, b)) in rows.iter().enumerate() {
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        for (w, text) in [(w1, a), (w2, b)] {
+                            ui.allocate_ui_with_layout(egui::vec2(w, 0.0), egui::Layout::left_to_right(egui::Align::TOP).with_main_wrap(true), |ui| {
+                                ui.set_width(w);
+                                if i == 0 {
+                                    ui.label(RichText::new(text).strong());
+                                } else {
+                                    self.inlines(ui, text);
+                                }
+                            });
+                            ui.add_space(gap);
+                        }
+                    });
+                    if i == 0 {
+                        let y = ui.cursor().top() - 1.0;
+                        ui.painter().hline(ui.max_rect().left()..=ui.max_rect().left() + w1 + gap + w2, y, line);
                     }
-                });
+                    ui.add_space(3.0);
+                }
                 ui.add_space(6.0);
             }
             Block::Generated(g) if g == "errors" => {
@@ -851,4 +859,21 @@ pub fn word_hint(eng: &Engine, word: &str) -> Option<String> {
 
 pub fn doc_line(d: &WordDoc) -> String {
     format!("{}   {}  — {}", d.name, d.effect, d.summary)
+}
+
+/// How wide `text` (help mini-markdown) is on one line, as [`Help::inlines`] draws it.
+fn inline_width(ui: &Ui, text: &str) -> f32 {
+    let body = egui::TextStyle::Body.resolve(ui.style());
+    let color = ui.visuals().text_color();
+    help::inlines(text)
+        .into_iter()
+        .map(|i| {
+            let (t, font) = match i {
+                Inline::Text(t) | Inline::Bold(t) => (t, body.clone()),
+                Inline::Code(c) => (c, FontId::monospace(MONO)),
+                Inline::Link { label, .. } => (label, body.clone()),
+            };
+            ui.fonts_mut(|f| f.layout_no_wrap(t, font, color).size().x)
+        })
+        .sum()
 }

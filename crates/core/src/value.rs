@@ -213,6 +213,15 @@ impl Num {
     pub fn fmt_elem(&self, i: usize) -> String {
         fmt_quantity(self.data[i], &self.q)
     }
+    /// Element `i` at decreasing precision, for fitting it in a column: see [`fmt_num_shorter`].
+    pub fn fmt_elem_shorter(&self, i: usize) -> Vec<String> {
+        let shown = self.q.disp.to_display(self.data[i]);
+        if self.q.disp.is_date() && self.q.absolute.is_some() {
+            return vec![fmt_date(shown)];
+        }
+        let unit = if self.q.disp.is_none() { String::new() } else { format!(" {}", self.q.disp) };
+        fmt_num_shorter(shown).into_iter().map(|n| format!("{}{unit}", group_thousands(&n))).collect()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -402,6 +411,53 @@ pub fn fmt_num(x: f64) -> String {
     }
 }
 
+/// `x` the way [`fmt_num`] writes it, then shorter and shorter, as a spreadsheet does when a
+/// number doesn't fit its column: drop decimals, then scientific notation with fewer mantissa
+/// digits — but never below 3 significant digits, so a shortened number stays close to the real
+/// one (`1234.5678` can become `1235`, never `1e3`). The caller shows the first that fits, and
+/// `###` when none does.
+pub fn fmt_num_shorter(x: f64) -> Vec<String> {
+    let full = fmt_num(x);
+    let mut out = vec![full.clone()];
+    if !x.is_finite() || x == 0.0 {
+        return out;
+    }
+    // keep only forms shorter (as shown, with thousands separators) than the last one kept
+    let shown_len = |s: &str| group_thousands(s).chars().count();
+    let mut push = |s: String| {
+        if shown_len(&s) < out.last().map_or(usize::MAX, |l| shown_len(l)) {
+            out.push(s);
+        }
+    };
+    let ax = x.abs();
+    if !full.contains('e') {
+        // the most significant digit sits at 10^lead; keep it and the two after it
+        let lead = ax.log10().floor() as i32;
+        let decimals = full.split_once('.').map_or(0, |(_, f)| f.len()) as i32;
+        let min_dec = (2 - lead).max(0);
+        for d in (min_dec..decimals).rev() {
+            push(trim_zeros(format!("{:.*}", d as usize, x)));
+        }
+    }
+    // a mantissa with 2 decimals is 3 significant digits
+    for m in (2..9).rev() {
+        let s = format!("{:.*e}", m, x);
+        push(match s.split_once('e') {
+            Some((mant, e)) => format!("{}e{e}", if mant.contains('.') { mant.trim_end_matches('0').trim_end_matches('.') } else { mant }),
+            None => s,
+        });
+    }
+    out
+}
+
+fn trim_zeros(s: String) -> String {
+    if s.contains('.') {
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        s
+    }
+}
+
 /// `1234567.5` → `1,234,567.5` (plain decimal notation only).
 pub fn group_thousands(s: &str) -> String {
     if s.contains(['e', 'N', '∞']) {
@@ -478,6 +534,24 @@ mod tests {
         assert_eq!(fmt_num(1234.5678), "1234.5678");
         assert_eq!(fmt_num(1.5e20), "1.5e20");
         assert_eq!(fmt_num(2e-9), "2e-9");
+    }
+    #[test]
+    fn shorter() {
+        assert_eq!(fmt_num_shorter(5.0), vec!["5"]);
+        let v = fmt_num_shorter(1234.5678);
+        assert_eq!(&v[..5], ["1234.5678", "1234.568", "1234.57", "1234.6", "1235"]);
+        // never fewer than 3 significant digits: 1234.5678 stops at 1235, not 1e3
+        assert_eq!(v.last().unwrap(), "1235");
+        let v = fmt_num_shorter(0.000123456);
+        assert_eq!(v, ["0.000123456", "0.00012346", "0.0001235", "0.000123", "1.23e-4"]);
+        assert_eq!(fmt_num_shorter(1.2e-17), ["1.2e-17"]);
+        // each step is shorter than the last
+        for x in [1.0 / 3.0, -98765.4321, 6.02214076e23, 1.5e-7, 123456789.0] {
+            let v = fmt_num_shorter(x);
+            let len = |s: &str| group_thousands(s).chars().count();
+            assert!(v.windows(2).all(|w| len(&w[0]) > len(&w[1])), "{v:?}");
+        }
+        assert_eq!(fmt_num_shorter(123456789.0), vec!["123456789", "1.234568e8", "1.23457e8", "1.2346e8", "1.235e8", "1.23e8"]);
     }
     #[test]
     fn bcast() {

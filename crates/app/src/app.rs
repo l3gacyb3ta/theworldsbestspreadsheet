@@ -592,6 +592,12 @@ impl eframe::App for App {
         egui::CentralPanel::no_frame().show(ui, |ui| self.grid(ui, dark));
         let home = self.sid();
         let keys = if self.confirm.is_none() { self.owned_keys() } else { &[] };
+        if let (true, crate::help_view::Page::Topic(id)) = (self.help.open, self.help.page()) {
+            // key glyphs (⇧ ↑ ↓) aren't in egui's fonts either
+            if let Some(t) = wbs_core::help::topic(id) {
+                self.fonts.note(t.body);
+            }
+        }
         for a in self.help.ui(&ctx, &self.eng, home, keys) {
             match a {
                 HelpAction::Goto(k) => {
