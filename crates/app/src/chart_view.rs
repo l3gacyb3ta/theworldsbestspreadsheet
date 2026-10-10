@@ -127,6 +127,9 @@ pub fn draw(p: &Painter, rect: Rect, chart: &Chart, dark: bool) -> (YAxis, Vec<P
     for l in &chart.layers {
         for v in l.ys.data.iter() {
             let s = ydisp.to_display(*v);
+            if !s.is_finite() {
+                continue;
+            }
             ylo = ylo.min(s);
             yhi = yhi.max(s);
         }
@@ -136,6 +139,9 @@ pub fn draw(p: &Painter, rect: Rect, chart: &Chart, dark: bool) -> (YAxis, Vec<P
                 if let Some(d) = &xdisp {
                     for v in n.data.iter() {
                         let s = d.to_display(*v);
+                        if !s.is_finite() {
+                            continue;
+                        }
                         xlo = xlo.min(s);
                         xhi = xhi.max(s);
                     }
@@ -200,13 +206,15 @@ pub fn draw(p: &Painter, rect: Rect, chart: &Chart, dark: bool) -> (YAxis, Vec<P
     let clip = p.with_clip_rect(plot.expand(4.0));
     for (li, l) in chart.layers.iter().enumerate() {
         let color = SERIES[li % SERIES.len()];
-        let pts: Vec<Pos2> = (0..l.ys.len())
+        // Non-finite values (NaN/inf, e.g. from a divide by zero) have no position; egui panics on NaN geometry.
+        let pts: Vec<Option<Pos2>> = (0..l.ys.len())
             .map(|i| {
                 let x = match (&l.xs, categorical) {
                     (Xs::Num(n), false) => xs(xdisp.as_ref().unwrap().to_display(n.data[i])),
                     _ => cat_x(i),
                 };
-                Pos2::new(x, yaxis.to_screen(ydisp.to_display(l.ys.data[i])))
+                let y = yaxis.to_screen(ydisp.to_display(l.ys.data[i]));
+                (x.is_finite() && y.is_finite()).then(|| Pos2::new(x, y))
             })
             .collect();
         let prov = |i: usize| l.ys.prov.as_ref().and_then(|p| p.get(i).copied()).unwrap_or(Prov::None);
@@ -216,10 +224,16 @@ pub fn draw(p: &Painter, rect: Rect, chart: &Chart, dark: bool) -> (YAxis, Vec<P
         };
         match l.mark {
             Mark::Line | Mark::Scatter => {
-                if l.mark == Mark::Line && pts.len() > 1 {
-                    clip.line(pts.clone(), Stroke::new(2.0, color));
+                if l.mark == Mark::Line {
+                    for run in pts.split(|p| p.is_none()) {
+                        let run: Vec<Pos2> = run.iter().flatten().copied().collect();
+                        if run.len() > 1 {
+                            clip.line(run, Stroke::new(2.0, color));
+                        }
+                    }
                 }
                 for (i, pt) in pts.iter().enumerate() {
+                    let Some(pt) = pt else { continue };
                     let draggable = matches!(prov(i), Prov::Literal(_));
                     let r = if l.mark == Mark::Scatter { 4.0 } else { 2.5 };
                     if draggable {
@@ -236,6 +250,7 @@ pub fn draw(p: &Painter, rect: Rect, chart: &Chart, dark: bool) -> (YAxis, Vec<P
                 let bw = (slot * 0.7 / nbars as f32).max(1.0);
                 let base = yaxis.to_screen(0.0f64.clamp(y0, y1));
                 for (i, pt) in pts.iter().enumerate() {
+                    let Some(pt) = pt else { continue };
                     let x = pt.x - slot * 0.35 + bw * bar_i as f32;
                     let r = Rect::from_min_max(Pos2::new(x, pt.y.min(base)), Pos2::new(x + bw - 1.0, pt.y.max(base)));
                     clip.rect_filled(r, 2.0, color);
