@@ -1,0 +1,440 @@
+sheet model
+  A1 "'Revenue model — alt-drag a yellow input (or use the Inputs panel) and watch everything move" = Revenue model — alt-drag a yellow input (or use the Inputs panel) and watch everything move
+  A3 "start revenue" = start revenue
+  B3 "120000 [USD]" = 120,000 USD
+  F3 "=A10 B10 line A10 C10 line layer \"revenue vs cost\" title 7 16 size" = 
+  M3 "words" = words
+  N3 ": npv { rate cfs } cfs 1 rate + cfs len range ^ / sum ;" = : npv
+  A4 "monthly growth" = monthly growth
+  B4 "4.0 [%]" = 4 %
+  A5 "months" = months
+  B5 "24" = 24
+  A6 "cost ratio" = cost ratio
+  B6 "0.70" = 0.7
+  M6 "units" = units
+  N6 "dim widgets" = dim widgets
+  A7 "fixed cost" = fixed cost
+  B7 "40000 [USD]" = 40,000 USD
+  N7 "base [widget] widgets" = [widget] = 1 base widgets
+  A9 "month" = month
+  B9 "revenue" = revenue
+  C9 "cost" = cost
+  D9 "profit" = profit
+  A10 "=months range 1 +" = 1
+  B10 "=1 growth + A10 1 - ^ start *" = 120,000 USD
+  C10 "=B10 cost_ratio * fixed +" = 124,000 USD
+  D10 "=B10 C10 -" = -4,000 USD
+  F20 "total profit" = total profit
+  G20 "=D10 sum" = 446,973.75 USD
+  F21 "NPV at 1%/month" = NPV at 1%/month
+  G21 "=1 [%] D10 npv" = 376,518.25 USD
+  F22 "first profitable month" = first profitable month
+  G22 "=D10 0 [USD] > A10 1000 if /min" = 4
+  A36 "units" = units
+  A37 "trip" = trip
+  B37 "250 [km]" = 250 km
+  C37 "2.5 [h]" = 2.5 h
+  D37 "=B37 C37 /" = 100 km/h
+  E37 "=D37 to[mph]" = 62.137119 mph
+  A38 "kettle energy" = kettle energy
+  B38 "1.5 [kg]" = 1.5 kg
+  C38 "80 [Δ°C]" = 80 Δ°C
+  D38 "=B38 4186 [J/(kg*Δ°C)] * C38 * to[kWh]" = 0.13953333 kWh
+  E38 "=D38 2 [kW] / to[min]" = 4.186 min
+  A39 "temperature" = temperature
+  B39 "20 [°C]" = 20 °C
+  C39 "=B39 to[°F]" = 68 °F
+  D39 "=B39 15 [Δ°C] +" = 35 °C
+  A40 "deadline" = deadline
+  B40 "2026-12-24" = 2026-12-24
+  C40 "=B40 2026-10-08 -" = 77 day
+  A41 "price" = price
+  B41 "49 [EUR]" = 49 EUR
+  C41 "=B41 to[USD]" = 52.92 USD
+  A43 "quarterly targets — drag the bar tops" = quarterly targets — drag the bar tops
+  D43 "=A44:A47 B44:B47 bar \"targets\" title 6 12 size" = 
+  A44 "Q1" = Q1
+  B44 "120 [widget]" = 120 widget
+  A45 "Q2" = Q2
+  B45 "150 [widget]" = 150 widget
+  A46 "Q3" = Q3
+  B46 "135 [widget]" = 135 widget
+  A47 "Q4" = Q4
+  B47 "180 [widget]" = 180 widget
+  A48 "total" = total
+  B48 "=B44:B47 sum" = 585 widget
+  A49 "revenue at $12" = revenue at $12
+  B49 "=B48 12 [USD/widget] *" = 7,020 USD
+  spilled G3 = 
+  spilled H3 = 
+  spilled I3 = 
+  spilled J3 = 
+  spilled K3 = 
+  spilled L3 = 
+  spilled F4 = 
+  spilled G4 = 
+  spilled H4 = 
+  spilled I4 = 
+  spilled J4 = 
+  spilled K4 = 
+  spilled L4 = 
+  spilled F5 = 
+  spilled G5 = 
+  spilled H5 = 
+  spilled I5 = 
+  spilled J5 = 
+  spilled K5 = 
+  spilled L5 = 
+  spilled F6 = 
+  spilled G6 = 
+  spilled H6 = 
+  spilled I6 = 
+  spilled J6 = 
+  spilled K6 = 
+  spilled L6 = 
+  spilled F7 = 
+  spilled G7 = 
+  spilled H7 = 
+  spilled I7 = 
+  spilled J7 = 
+  spilled K7 = 
+  spilled L7 = 
+  spilled F8 = 
+  spilled G8 = 
+  spilled H8 = 
+  spilled I8 = 
+  spilled J8 = 
+  spilled K8 = 
+  spilled L8 = 
+  spilled F9 = 
+  spilled G9 = 
+  spilled H9 = 
+  spilled I9 = 
+  spilled J9 = 
+  spilled K9 = 
+  spilled L9 = 
+  spilled F10 = 
+  spilled G10 = 
+  spilled H10 = 
+  spilled I10 = 
+  spilled J10 = 
+  spilled K10 = 
+  spilled L10 = 
+  spilled A11 = 2
+  spilled B11 = 124,800 USD
+  spilled C11 = 127,360 USD
+  spilled D11 = -2,560 USD
+  spilled F11 = 
+  spilled G11 = 
+  spilled H11 = 
+  spilled I11 = 
+  spilled J11 = 
+  spilled K11 = 
+  spilled L11 = 
+  spilled A12 = 3
+  spilled B12 = 129,792 USD
+  spilled C12 = 130,854.4 USD
+  spilled D12 = -1,062.4 USD
+  spilled F12 = 
+  spilled G12 = 
+  spilled H12 = 
+  spilled I12 = 
+  spilled J12 = 
+  spilled K12 = 
+  spilled L12 = 
+  spilled A13 = 4
+  spilled B13 = 134,983.68 USD
+  spilled C13 = 134,488.58 USD
+  spilled D13 = 495.104 USD
+  spilled F13 = 
+  spilled G13 = 
+  spilled H13 = 
+  spilled I13 = 
+  spilled J13 = 
+  spilled K13 = 
+  spilled L13 = 
+  spilled A14 = 5
+  spilled B14 = 140,383.03 USD
+  spilled C14 = 138,268.12 USD
+  spilled D14 = 2,114.9082 USD
+  spilled F14 = 
+  spilled G14 = 
+  spilled H14 = 
+  spilled I14 = 
+  spilled J14 = 
+  spilled K14 = 
+  spilled L14 = 
+  spilled A15 = 6
+  spilled B15 = 145,998.35 USD
+  spilled C15 = 142,198.84 USD
+  spilled D15 = 3,799.5045 USD
+  spilled F15 = 
+  spilled G15 = 
+  spilled H15 = 
+  spilled I15 = 
+  spilled J15 = 
+  spilled K15 = 
+  spilled L15 = 
+  spilled A16 = 7
+  spilled B16 = 151,838.28 USD
+  spilled C16 = 146,286.8 USD
+  spilled D16 = 5,551.4847 USD
+  spilled F16 = 
+  spilled G16 = 
+  spilled H16 = 
+  spilled I16 = 
+  spilled J16 = 
+  spilled K16 = 
+  spilled L16 = 
+  spilled A17 = 8
+  spilled B17 = 157,911.81 USD
+  spilled C17 = 150,538.27 USD
+  spilled D17 = 7,373.5441 USD
+  spilled F17 = 
+  spilled G17 = 
+  spilled H17 = 
+  spilled I17 = 
+  spilled J17 = 
+  spilled K17 = 
+  spilled L17 = 
+  spilled A18 = 9
+  spilled B18 = 164,228.29 USD
+  spilled C18 = 154,959.8 USD
+  spilled D18 = 9,268.4858 USD
+  spilled F18 = 
+  spilled G18 = 
+  spilled H18 = 
+  spilled I18 = 
+  spilled J18 = 
+  spilled K18 = 
+  spilled L18 = 
+  spilled A19 = 10
+  spilled B19 = 170,797.42 USD
+  spilled C19 = 159,558.19 USD
+  spilled D19 = 11,239.225 USD
+  spilled A20 = 11
+  spilled B20 = 177,629.31 USD
+  spilled C20 = 164,340.52 USD
+  spilled D20 = 13,288.794 USD
+  spilled A21 = 12
+  spilled B21 = 184,734.49 USD
+  spilled C21 = 169,314.14 USD
+  spilled D21 = 15,420.346 USD
+  spilled A22 = 13
+  spilled B22 = 192,123.87 USD
+  spilled C22 = 174,486.71 USD
+  spilled D22 = 17,637.16 USD
+  spilled A23 = 14
+  spilled B23 = 199,808.82 USD
+  spilled C23 = 179,866.17 USD
+  spilled D23 = 19,942.646 USD
+  spilled A24 = 15
+  spilled B24 = 207,801.17 USD
+  spilled C24 = 185,460.82 USD
+  spilled D24 = 22,340.352 USD
+  spilled A25 = 16
+  spilled B25 = 216,113.22 USD
+  spilled C25 = 191,279.25 USD
+  spilled D25 = 24,833.966 USD
+  spilled A26 = 17
+  spilled B26 = 224,757.75 USD
+  spilled C26 = 197,330.42 USD
+  spilled D26 = 27,427.325 USD
+  spilled A27 = 18
+  spilled B27 = 233,748.06 USD
+  spilled C27 = 203,623.64 USD
+  spilled D27 = 30,124.418 USD
+  spilled A28 = 19
+  spilled B28 = 243,097.98 USD
+  spilled C28 = 210,168.59 USD
+  spilled D28 = 32,929.395 USD
+  spilled A29 = 20
+  spilled B29 = 252,821.9 USD
+  spilled C29 = 216,975.33 USD
+  spilled D29 = 35,846.57 USD
+  spilled A30 = 21
+  spilled B30 = 262,934.78 USD
+  spilled C30 = 224,054.34 USD
+  spilled D30 = 38,880.433 USD
+  spilled A31 = 22
+  spilled B31 = 273,452.17 USD
+  spilled C31 = 231,416.52 USD
+  spilled D31 = 42,035.65 USD
+  spilled A32 = 23
+  spilled B32 = 284,390.25 USD
+  spilled C32 = 239,073.18 USD
+  spilled D32 = 45,317.076 USD
+  spilled A33 = 24
+  spilled B33 = 295,765.87 USD
+  spilled C33 = 247,036.11 USD
+  spilled D33 = 48,729.76 USD
+  spilled E43 = 
+  spilled F43 = 
+  spilled G43 = 
+  spilled H43 = 
+  spilled I43 = 
+  spilled D44 = 
+  spilled E44 = 
+  spilled F44 = 
+  spilled G44 = 
+  spilled H44 = 
+  spilled I44 = 
+  spilled D45 = 
+  spilled E45 = 
+  spilled F45 = 
+  spilled G45 = 
+  spilled H45 = 
+  spilled I45 = 
+  spilled D46 = 
+  spilled E46 = 
+  spilled F46 = 
+  spilled G46 = 
+  spilled H46 = 
+  spilled I46 = 
+  spilled D47 = 
+  spilled E47 = 
+  spilled F47 = 
+  spilled G47 = 
+  spilled H47 = 
+  spilled I47 = 
+  spilled D48 = 
+  spilled E48 = 
+  spilled F48 = 
+  spilled G48 = 
+  spilled H48 = 
+  spilled I48 = 
+  spilled D49 = 
+  spilled E49 = 
+  spilled F49 = 
+  spilled G49 = 
+  spilled H49 = 
+  spilled I49 = 
+  spilled D50 = 
+  spilled E50 = 
+  spilled F50 = 
+  spilled G50 = 
+  spilled H50 = 
+  spilled I50 = 
+  spilled D51 = 
+  spilled E51 = 
+  spilled F51 = 
+  spilled G51 = 
+  spilled H51 = 
+  spilled I51 = 
+  spilled D52 = 
+  spilled E52 = 
+  spilled F52 = 
+  spilled G52 = 
+  spilled H52 = 
+  spilled I52 = 
+  spilled D53 = 
+  spilled E53 = 
+  spilled F53 = 
+  spilled G53 = 
+  spilled H53 = 
+  spilled I53 = 
+  spilled D54 = 
+  spilled E54 = 
+  spilled F54 = 
+  spilled G54 = 
+  spilled H54 = 
+  spilled I54 = 
+  col A width 150
+  col B width 140
+  col C width 140
+  col D width 140
+  col E width 120
+  col F width 150
+  col G width 130
+  col N width 380
+sheet units
+  A1 "dim length" = dim length
+  B1 "SI base dimensions" = SI base dimensions
+  A2 "dim mass" = dim mass
+  A3 "dim time" = dim time
+  A4 "dim current" = dim current
+  A5 "dim temperature" = dim temperature
+  A6 "dim amount" = dim amount
+  A7 "dim luminosity" = dim luminosity
+  A8 "base [m] length" = [m] = 1 base length
+  B8 "SI base units" = SI base units
+  A9 "base [kg] mass" = [kg] = 1 base mass
+  A10 "base [s] time" = [s] = 1 base time
+  A11 "base [A] current" = [A] = 1 base current
+  A12 "base [K] temperature" = [K] = 1 base temperature
+  A13 "base [mol] amount" = [mol] = 1 base amount
+  A14 "base [cd] luminosity" = [cd] = 1 base luminosity
+  A15 "[km] = 1000 [m]" = [km] = 1000 base length
+  B15 "length" = length
+  A16 "[cm] = 0.01 [m]" = [cm] = 0.01 base length
+  A17 "[mm] = 0.001 [m]" = [mm] = 0.001 base length
+  A18 "[µm] = 0.000001 [m]" = [µm] = 0.000001 base length
+  A19 "[in] = 0.0254 [m]" = [in] = 0.0254 base length
+  A20 "[ft] = 12 [in]" = [ft] = 0.3048 base length
+  A21 "[yd] = 3 [ft]" = [yd] = 0.9144 base length
+  A22 "[mi] = 1609.344 [m]" = [mi] = 1609.344 base length
+  A23 "[nmi] = 1852 [m]" = [nmi] = 1852 base length
+  A24 "[g] = 0.001 [kg]" = [g] = 0.001 base mass
+  B24 "mass" = mass
+  A25 "[mg] = 0.001 [g]" = [mg] = 0.000001 base mass
+  A26 "[t] = 1000 [kg]" = [t] = 1000 base mass
+  A27 "[lb] = 0.45359237 [kg]" = [lb] = 0.45359237 base mass
+  A28 "[oz] = 1 16 / [lb]" = [oz] = 0.028349523 base mass
+  A29 "[ms] = 0.001 [s]" = [ms] = 0.001 base time
+  B29 "time" = time
+  A30 "[min] = 60 [s]" = [min] = 60 base time
+  A31 "[h] = 60 [min]" = [h] = 3600 base time
+  A32 "[day] = 24 [h]" = [day] = 86400 base time
+  A33 "[week] = 7 [day]" = [week] = 604800 base time
+  A34 "[yr] = 365.25 [day]" = [yr] = 31557600 base time
+  A35 "[month] = 1 12 / [yr]" = [month] = 2629800 base time
+  A36 "[date] = 1 [day] offset 0" = [date] affine 86400 day + 0
+  B36 "absolute: days since 1970-01-01" = absolute: days since 1970-01-01
+  A37 "[Δ°C] = 1 [K]" = [Δ°C] = 1 base temperature
+  B37 "temperature differences" = temperature differences
+  A38 "[Δ°F] = 5 9 / [K]" = [Δ°F] = 0.55555556 base temperature
+  A39 "[°C] = 1 [Δ°C] offset 273.15" = [°C] affine 1 Δ°C + 273.15
+  B39 "absolute temperatures (input/display only)" = absolute temperatures (input/display only)
+  A40 "[°F] = 1 [Δ°F] offset 255.37222222222223" = [°F] affine 0.55555556 Δ°F + 255.37222
+  A41 "[ha] = 10000 [m^2]" = [ha] = 10000 base length^2
+  B41 "area / volume" = area / volume
+  A42 "[acre] = 4046.8564224 [m^2]" = [acre] = 4046.8564 base length^2
+  A43 "[L] = 0.001 [m^3]" = [L] = 0.001 base length^3
+  A44 "[mL] = 0.001 [L]" = [mL] = 0.000001 base length^3
+  A45 "[gal] = 3.785411784 [L]" = [gal] = 0.0037854118 base length^3
+  A46 "[Hz] = 1 [1/s]" = [Hz] = 1 base 1/time
+  B46 "derived" = derived
+  A47 "[N] = 1 [kg*m/s^2]" = [N] = 1 base length*mass/time^2
+  A48 "[J] = 1 [N*m]" = [J] = 1 base length^2*mass/time^2
+  A49 "[kJ] = 1000 [J]" = [kJ] = 1000 base length^2*mass/time^2
+  A50 "[W] = 1 [J/s]" = [W] = 1 base length^2*mass/time^3
+  A51 "[kW] = 1000 [W]" = [kW] = 1000 base length^2*mass/time^3
+  A52 "[MW] = 1000 [kW]" = [MW] = 1000000 base length^2*mass/time^3
+  A53 "[Wh] = 1 [W*h]" = [Wh] = 3600 base length^2*mass/time^2
+  A54 "[kWh] = 1000 [Wh]" = [kWh] = 3600000 base length^2*mass/time^2
+  A55 "[Pa] = 1 [N/m^2]" = [Pa] = 1 base mass/(length*time^2)
+  A56 "[kPa] = 1000 [Pa]" = [kPa] = 1000 base mass/(length*time^2)
+  A57 "[bar] = 100000 [Pa]" = [bar] = 100000 base mass/(length*time^2)
+  A58 "[psi] = 6894.757293168 [Pa]" = [psi] = 6894.7573 base mass/(length*time^2)
+  A59 "[V] = 1 [W/A]" = [V] = 1 base length^2*mass/(current*time^3)
+  A60 "[Ω] = 1 [V/A]" = [Ω] = 1 base length^2*mass/(current^2*time^3)
+  A61 "[C] = 1 [A*s]" = [C] = 1 base current*time
+  A62 "[kph] = 1 [km/h]" = [kph] = 0.27777778 base length/time
+  A63 "[mph] = 1 [mi/h]" = [mph] = 0.44704 base length/time
+  A64 "[cal] = 4.184 [J]" = [cal] = 4.184 base length^2*mass/time^2
+  A65 "[kcal] = 1000 [cal]" = [kcal] = 4184 base length^2*mass/time^2
+  A66 "[%] = 0.01" = [%] = 0.01 base dimensionless
+  B66 "dimensionless" = dimensionless
+  A67 "dim currency" = dim currency
+  B67 "money: rates are ordinary inputs, scrub them" = money: rates are ordinary inputs, scrub them
+  A68 "base [USD] currency" = [USD] = 1 base currency
+  A69 "[EUR] = 1.08 [USD]" = [EUR] = 1.08 base currency
+  A70 "[GBP] = 1.27 [USD]" = [GBP] = 1.27 base currency
+  A71 "[JPY] = 0.0067 [USD]" = [JPY] = 0.0067 base currency
+  col A width 230
+  col B width 300
+name cost_ratio -> model!B6 true
+name fixed -> model!B7 true
+name growth -> model!B4 true
+name months -> model!B5 true
+name start -> model!B3 true

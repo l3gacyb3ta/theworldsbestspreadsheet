@@ -1,0 +1,120 @@
+sheet data
+  A1 "7" = 7
+  B1 "=Sheet1!A250 Sheet1!C6 +" = 43
+  A2 "=A1 1 +" = 8
+sheet Sheet1
+  H1 "=A250 Z300 +" = ERR Sheet1!Z300 is empty
+  J1 "=3 range" = 0
+  C5 "1" = 1
+  D5 "=C5 10 *" = 10
+  C6 "2" = 2
+  D6 "=C6 10 *" = 20
+  AD6 "far right" = far right
+  C7 "3" = 3
+  D7 "=C7 10 *" = 30
+  A8 "inserted" = inserted
+  C9 "4" = 4
+  D9 "=C9 10 *" = 40
+  C10 "5" = 5
+  D10 "=C10 10 *" = 50
+  C11 "6" = 6
+  D11 "=C11 10 *" = 60
+  C12 "8" = 8
+  D12 "=C12 10 *" = 80
+  E14 "=C5:C12 sum" = ERR Sheet1!C8 is empty
+  F14 "=data!A2 2 *" = 16
+  G14 "=C7:D12 sum" = ERR Sheet1!C8 is empty
+  A250 "41" = 41
+  C251 "=A250 1 +" = 42
+  spilled J2 = 1
+  spilled J3 = 2
+  col D width 150
+  row 261 height 18
+  row 6 height 40
+sheet units
+  A1 "dim length" = dim length
+  B1 "SI base dimensions" = SI base dimensions
+  A2 "dim mass" = dim mass
+  A3 "dim time" = dim time
+  A4 "dim current" = dim current
+  A5 "dim temperature" = dim temperature
+  A6 "dim amount" = dim amount
+  A7 "dim luminosity" = dim luminosity
+  A8 "base [m] length" = [m] = 1 base length
+  B8 "SI base units" = SI base units
+  A9 "base [kg] mass" = [kg] = 1 base mass
+  A10 "base [s] time" = [s] = 1 base time
+  A11 "base [A] current" = [A] = 1 base current
+  A12 "base [K] temperature" = [K] = 1 base temperature
+  A13 "base [mol] amount" = [mol] = 1 base amount
+  A14 "base [cd] luminosity" = [cd] = 1 base luminosity
+  A15 "[km] = 1000 [m]" = [km] = 1000 base length
+  B15 "length" = length
+  A16 "[cm] = 0.01 [m]" = [cm] = 0.01 base length
+  A17 "[mm] = 0.001 [m]" = [mm] = 0.001 base length
+  A18 "[µm] = 0.000001 [m]" = [µm] = 0.000001 base length
+  A19 "[in] = 0.0254 [m]" = [in] = 0.0254 base length
+  A20 "[ft] = 12 [in]" = [ft] = 0.3048 base length
+  A21 "[yd] = 3 [ft]" = [yd] = 0.9144 base length
+  A22 "[mi] = 1609.344 [m]" = [mi] = 1609.344 base length
+  A23 "[nmi] = 1852 [m]" = [nmi] = 1852 base length
+  A24 "[g] = 0.001 [kg]" = [g] = 0.001 base mass
+  B24 "mass" = mass
+  A25 "[mg] = 0.001 [g]" = [mg] = 0.000001 base mass
+  A26 "[t] = 1000 [kg]" = [t] = 1000 base mass
+  A27 "[lb] = 0.45359237 [kg]" = [lb] = 0.45359237 base mass
+  A28 "[oz] = 1 16 / [lb]" = [oz] = 0.028349523 base mass
+  A29 "[ms] = 0.001 [s]" = [ms] = 0.001 base time
+  B29 "time" = time
+  A30 "[min] = 60 [s]" = [min] = 60 base time
+  A31 "[h] = 60 [min]" = [h] = 3600 base time
+  A32 "[day] = 24 [h]" = [day] = 86400 base time
+  A33 "[week] = 7 [day]" = [week] = 604800 base time
+  A34 "[yr] = 365.25 [day]" = [yr] = 31557600 base time
+  A35 "[month] = 1 12 / [yr]" = [month] = 2629800 base time
+  A36 "[date] = 1 [day] offset 0" = [date] affine 86400 day + 0
+  B36 "absolute: days since 1970-01-01" = absolute: days since 1970-01-01
+  A37 "[Δ°C] = 1 [K]" = [Δ°C] = 1 base temperature
+  B37 "temperature differences" = temperature differences
+  A38 "[Δ°F] = 5 9 / [K]" = [Δ°F] = 0.55555556 base temperature
+  A39 "[°C] = 1 [Δ°C] offset 273.15" = [°C] affine 1 Δ°C + 273.15
+  B39 "absolute temperatures (input/display only)" = absolute temperatures (input/display only)
+  A40 "[°F] = 1 [Δ°F] offset 255.37222222222223" = [°F] affine 0.55555556 Δ°F + 255.37222
+  A41 "[ha] = 10000 [m^2]" = [ha] = 10000 base length^2
+  B41 "area / volume" = area / volume
+  A42 "[acre] = 4046.8564224 [m^2]" = [acre] = 4046.8564 base length^2
+  A43 "[L] = 0.001 [m^3]" = [L] = 0.001 base length^3
+  A44 "[mL] = 0.001 [L]" = [mL] = 0.000001 base length^3
+  A45 "[gal] = 3.785411784 [L]" = [gal] = 0.0037854118 base length^3
+  A46 "[Hz] = 1 [1/s]" = [Hz] = 1 base 1/time
+  B46 "derived" = derived
+  A47 "[N] = 1 [kg*m/s^2]" = [N] = 1 base length*mass/time^2
+  A48 "[J] = 1 [N*m]" = [J] = 1 base length^2*mass/time^2
+  A49 "[kJ] = 1000 [J]" = [kJ] = 1000 base length^2*mass/time^2
+  A50 "[W] = 1 [J/s]" = [W] = 1 base length^2*mass/time^3
+  A51 "[kW] = 1000 [W]" = [kW] = 1000 base length^2*mass/time^3
+  A52 "[MW] = 1000 [kW]" = [MW] = 1000000 base length^2*mass/time^3
+  A53 "[Wh] = 1 [W*h]" = [Wh] = 3600 base length^2*mass/time^2
+  A54 "[kWh] = 1000 [Wh]" = [kWh] = 3600000 base length^2*mass/time^2
+  A55 "[Pa] = 1 [N/m^2]" = [Pa] = 1 base mass/(length*time^2)
+  A56 "[kPa] = 1000 [Pa]" = [kPa] = 1000 base mass/(length*time^2)
+  A57 "[bar] = 100000 [Pa]" = [bar] = 100000 base mass/(length*time^2)
+  A58 "[psi] = 6894.757293168 [Pa]" = [psi] = 6894.7573 base mass/(length*time^2)
+  A59 "[V] = 1 [W/A]" = [V] = 1 base length^2*mass/(current*time^3)
+  A60 "[Ω] = 1 [V/A]" = [Ω] = 1 base length^2*mass/(current^2*time^3)
+  A61 "[C] = 1 [A*s]" = [C] = 1 base current*time
+  A62 "[kph] = 1 [km/h]" = [kph] = 0.27777778 base length/time
+  A63 "[mph] = 1 [mi/h]" = [mph] = 0.44704 base length/time
+  A64 "[cal] = 4.184 [J]" = [cal] = 4.184 base length^2*mass/time^2
+  A65 "[kcal] = 1000 [cal]" = [kcal] = 4184 base length^2*mass/time^2
+  A66 "[%] = 0.01" = [%] = 0.01 base dimensionless
+  B66 "dimensionless" = dimensionless
+  A67 "dim currency" = dim currency
+  B67 "money: rates are ordinary inputs, scrub them" = money: rates are ordinary inputs, scrub them
+  A68 "base [USD] currency" = [USD] = 1 base currency
+  A69 "[EUR] = 1.08 [USD]" = [EUR] = 1.08 base currency
+  A70 "[GBP] = 1.27 [USD]" = [GBP] = 1.27 base currency
+  A71 "[JPY] = 0.0067 [USD]" = [JPY] = 0.0067 base currency
+  col A width 230
+  col B width 300
+name five -> Sheet1!C6 true
