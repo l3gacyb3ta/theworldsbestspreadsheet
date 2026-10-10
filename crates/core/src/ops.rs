@@ -101,7 +101,21 @@ pub fn replace_span(text: &str, span: &Range<usize>, with: &str) -> String {
 pub fn scrub(lit: &Lit, steps: f64) -> String {
     let unit = if lit.is_date { 1.0 } else { 10f64.powi(-(lit.decimals as i32)) };
     let v = lit.value + steps * unit;
+    let v = if lit.is_date { v } else { keep_sign(lit.value, v) };
     format_lit(v, lit.decimals, lit.is_date)
+}
+
+/// Zero is a stop for a drag: a scrub that starts at `from` ends at 0 rather than changing sign
+/// (a damping, rate or count that goes negative is almost never what the drag meant). Starting a
+/// new drag at 0 goes either way.
+pub fn keep_sign(from: f64, v: f64) -> f64 {
+    if from > 0.0 {
+        v.max(0.0)
+    } else if from < 0.0 {
+        v.min(0.0)
+    } else {
+        v
+    }
 }
 
 fn cell_of(e: &Engine, k: CellKey) -> Option<Cell> {
@@ -616,7 +630,12 @@ mod tests {
     #[test]
     fn scrubbing_and_extension() {
         assert_eq!(scrub(&cell_literal("0.05").unwrap(), 3.0), "0.08");
-        assert_eq!(scrub(&cell_literal(" 10 [m]").unwrap(), -12.0), "-2");
+        assert_eq!(scrub(&cell_literal(" 10 [m]").unwrap(), -8.0), "2");
+        // zero is a stop: one drag doesn't change a number's sign; the next one, from 0, can
+        assert_eq!(scrub(&cell_literal(" 10 [m]").unwrap(), -12.0), "0");
+        assert_eq!(scrub(&cell_literal("-0.5").unwrap(), 9.0), "0.0");
+        assert_eq!(scrub(&cell_literal("0").unwrap(), -3.0), "-3");
+        assert_eq!(scrub(&cell_literal("0.0").unwrap(), 3.0), "0.3");
         let lits = program_literals("=A1 1.5 * 2 +");
         assert_eq!(lits.len(), 2);
         assert_eq!(lits[0].span, 4..7);

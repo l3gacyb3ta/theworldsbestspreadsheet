@@ -1538,8 +1538,11 @@ fn dragging_the_selection_border_moves_and_alt_copies() {
     assert_eq!(source(&h, "F24"), "=G27 2 *");
     // Alt-drag inside the cell still scrubs
     let c = center(&h, "H27");
+    drag(&mut h, c, c - Vec2::new(16.0, 0.0), Modifiers::ALT);
+    assert_eq!(source(&h, "H27"), "1");
+    // and stops at 0 rather than going negative
     drag(&mut h, c, c - Vec2::new(40.0, 0.0), Modifiers::ALT);
-    assert_eq!(source(&h, "H27"), "-5");
+    assert_eq!(source(&h, "H27"), "0");
     // a click just outside the selection's border selects the cell there
     let edge = h.state().geo.as_ref().unwrap().cell(26, 7).left_center() - Vec2::new(2.0, 0.0);
     click(&mut h, edge, Modifiers::NONE);

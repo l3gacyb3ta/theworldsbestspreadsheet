@@ -1120,10 +1120,18 @@ impl App {
                                 .suffix(if suffix.is_empty() { String::new() } else { format!(" {suffix}") }),
                         );
                         if r.changed() {
-                            let new = ops::replace_span(&text, &lit.span, &ops::format_lit(v, lit.decimals, false));
                             if self.input_scrub.is_none() {
                                 self.input_scrub = Some((ik, self.eng.wb.cell(ik).cloned()));
                             }
+                            // like scrubbing in the grid, a drag stops at 0 rather than changing sign
+                            if let Some((_, Some(orig))) = &self.input_scrub {
+                                // a number cell is all text pieces
+                                let t: String = orig.pieces.iter().filter_map(|p| if let wbs_core::model::Piece::Text(t) = p { Some(t.as_str()) } else { None }).collect();
+                                if let Some(o) = ops::cell_literal(&t) {
+                                    v = ops::keep_sign(o.value, v);
+                                }
+                            }
+                            let new = ops::replace_span(&text, &lit.span, &ops::format_lit(v, lit.decimals, false));
                             let t = std::time::Instant::now();
                             self.eng.set_text(ik, &new);
                             self.last_recalc_ms = t.elapsed().as_secs_f64() * 1000.0;
