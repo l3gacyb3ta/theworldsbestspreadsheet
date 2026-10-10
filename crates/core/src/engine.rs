@@ -491,8 +491,6 @@ impl Engine {
         }
     }
 
-
-
     /// Every unit with its defining cell and current definition, sorted by name.
     pub fn units_list(&self) -> Vec<(String, CellKey, Option<Arc<UnitInfo>>)> {
         let mut v: Vec<_> = self

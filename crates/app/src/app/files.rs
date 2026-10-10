@@ -152,13 +152,19 @@ impl BackgroundSave {
     /// a save lands in the frame after it starts, however the threads are scheduled.)
     pub(super) fn result(&mut self) -> Option<Result<u64, String>> {
         if cfg!(test) {
-            return Some(self.rx.recv().unwrap_or_else(|_| Err("the save thread stopped".into())));
+            return Some(self.wait());
         }
         match self.rx.try_recv() {
             Ok(r) => Some(r),
             Err(std::sync::mpsc::TryRecvError::Empty) => None,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Err("the save thread stopped".into())),
         }
+    }
+}
+
+impl BackgroundSave {
+    pub(super) fn wait(&mut self) -> Result<u64, String> {
+        self.rx.recv().unwrap_or_else(|_| Err("the save thread stopped".into()))
     }
 }
 
@@ -291,6 +297,7 @@ impl App {
     /// New / Open / Quit: ask first if there are unsaved changes.
     pub(super) fn guarded(&mut self, ctx: &egui::Context, what: Pending) {
         self.commit();
+        self.settle_autosave(ctx);
         if self.is_dirty() {
             self.confirm = Some(what);
         } else {
@@ -314,6 +321,7 @@ impl App {
     pub(super) fn document_ui(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.viewport().close_requested()) && !self.close_ok {
             self.commit();
+            self.settle_autosave(ctx);
             if self.is_dirty() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.confirm = Some(Pending::Quit);

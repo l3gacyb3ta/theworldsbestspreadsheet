@@ -107,26 +107,7 @@ impl App {
         let now = ctx.input(|i| i.time);
         if let Some(done) = self.autosave.pending.as_mut().and_then(|p| p.result()) {
             let p = self.autosave.pending.take().unwrap();
-            match done {
-                Ok(fp) => {
-                    self.saved_fp = fp;
-                    // no edit since the snapshot: clean; otherwise compare with what was written
-                    if self.eng.revision() == p.revision {
-                        self.dirty = false;
-                        self.dirty_rev = p.revision;
-                    } else {
-                        self.dirty_stale = true;
-                    }
-                    self.autosave = Autosave { since: None, saved: true, failed: None, pending: None };
-                    self.status = Some(format!("autosaved {}", self.display_name()));
-                }
-                Err(e) => {
-                    self.status = Some(format!("save failed: {e}"));
-                    self.autosave.failed = self.status.clone();
-                    self.autosave.since = Some(now);
-                }
-            }
-            ctx.request_repaint();
+            self.autosave_done(ctx, p.revision, done);
         }
         if self.autosave.pending.is_some() {
             return;
@@ -157,6 +138,38 @@ impl App {
         let path = self.path.clone().unwrap();
         self.autosave.pending = Some(files::BackgroundSave::start(ctx, self.eng.wb.clone(), path, self.eng.revision()));
         // the status bar was drawn earlier in this frame, still counting down: show "autosaving" now
+        ctx.request_repaint();
+    }
+
+    /// Waits for an autosave still being written and takes in its result: before asking
+    /// about unsaved changes, which it may have just saved.
+    pub(super) fn settle_autosave(&mut self, ctx: &egui::Context) {
+        if let Some(mut p) = self.autosave.pending.take() {
+            let done = p.wait();
+            self.autosave_done(ctx, p.revision, done);
+        }
+    }
+
+    fn autosave_done(&mut self, ctx: &egui::Context, revision: u64, done: Result<u64, String>) {
+        match done {
+            Ok(fp) => {
+                self.saved_fp = fp;
+                // no edit since the snapshot: clean; otherwise compare with what was written
+                if self.eng.revision() == revision {
+                    self.dirty = false;
+                    self.dirty_rev = revision;
+                } else {
+                    self.dirty_stale = true;
+                }
+                self.autosave = Autosave { since: None, saved: true, failed: None, pending: None };
+                self.status = Some(format!("autosaved {}", self.display_name()));
+            }
+            Err(e) => {
+                self.status = Some(format!("save failed: {e}"));
+                self.autosave.failed = self.status.clone();
+                self.autosave.since = Some(ctx.input(|i| i.time));
+            }
+        }
         ctx.request_repaint();
     }
 

@@ -3,8 +3,6 @@ use wbs_core::engine::Engine;
 use wbs_core::model::Workbook;
 fn ms(t: Instant) -> f64 { t.elapsed().as_secs_f64() * 1000.0 }
 fn main() {
-    println!("size_of Shape {} Data {} DispUnit {} Dim {}", std::mem::size_of::<wbs_core::value::Shape>(), std::mem::size_of::<wbs_core::value::Data>(), std::mem::size_of::<wbs_core::units::DispUnit>(), std::mem::size_of::<wbs_core::units::Dim>());
-    println!("size_of Value {} Num {} Quant {} Provs {} CellResult {} Op {}", std::mem::size_of::<wbs_core::value::Value>(), std::mem::size_of::<wbs_core::value::Num>(), std::mem::size_of::<wbs_core::units::Quant>(), std::mem::size_of::<wbs_core::value::Provs>(), std::mem::size_of::<Result<wbs_core::value::Value, wbs_core::engine::CellError>>(), std::mem::size_of::<wbs_core::parse::Op>());
     let p = std::env::args().nth(1).unwrap();
     let t = Instant::now();
     let s = std::fs::read_to_string(&p).unwrap();
