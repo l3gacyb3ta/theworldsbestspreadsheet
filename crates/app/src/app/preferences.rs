@@ -114,10 +114,14 @@ impl App {
         }
         self.autosave.saved = false;
         let since = *self.autosave.since.get_or_insert(now);
-        let busy = self.confirm.is_some() || self.edit.is_some() || !matches!(self.drag, Drag::None) || self.bar_scrub.is_some() || self.input_scrub.is_some();
-        if now < since + interval || busy {
-            // wake up for the save, and each second for the countdown in the status bar
-            ctx.request_repaint_after(Duration::from_secs_f64((since + interval - now).clamp(0.01, 1.0)));
+        if now < since + interval {
+            // wake up at the deadline, and each second for the countdown in the status bar
+            ctx.request_repaint_after(Duration::from_secs_f64((since + interval - now).min(1.0)));
+            return;
+        }
+        if self.autosave_guard().is_some() {
+            // ending an edit, a drag or the prompt is input, which runs a frame; this only refreshes the status bar
+            ctx.request_repaint_after(Duration::from_secs(1));
             return;
         }
         let name = self.display_name();
@@ -127,7 +131,21 @@ impl App {
         } else {
             self.autosave.failed = self.status.clone();
             self.autosave.since = Some(now);
-            ctx.request_repaint_after(Duration::from_secs(1));
+        }
+        // the status bar was drawn earlier in this frame, still counting down: show the result now
+        ctx.request_repaint();
+    }
+
+    /// What an overdue autosave is waiting for, if anything.
+    fn autosave_guard(&self) -> Option<&'static str> {
+        if self.confirm.is_some() {
+            Some("autosave waits for the save prompt")
+        } else if self.edit.is_some() {
+            Some("autosave waits while you edit")
+        } else if !matches!(self.drag, Drag::None) || self.bar_scrub.is_some() || self.input_scrub.is_some() {
+            Some("autosave waits while you drag")
+        } else {
+            None
         }
     }
 
@@ -142,7 +160,11 @@ impl App {
         } else if let Some(f) = &self.autosave.failed {
             format!("autosave: {f}")
         } else if let (true, Some(t)) = (self.dirty, self.autosave.since) {
-            format!("autosave in {} s", (t + interval - now).ceil().max(0.0))
+            match (self.autosave_guard(), (t + interval - now).ceil()) {
+                (Some(g), left) if left <= 0.0 => g.to_string(),
+                (None, left) if left <= 0.0 => "autosaving".to_string(),
+                (_, left) => format!("autosave in {left} s"),
+            }
         } else if self.autosave.saved {
             "autosaved".to_string()
         } else {

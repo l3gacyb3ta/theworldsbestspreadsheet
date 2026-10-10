@@ -975,6 +975,179 @@ fn edit_commands_reach_the_grid_and_the_editor() {
     assert_eq!(source(&h, "H25"), "42", "grid undo didn't run");
 }
 
+// ---- IME ----------------------------------------------------------------------
+
+fn preedit(h: &mut Harness<'static, App>, s: &str) {
+    h.event(Event::Ime(egui::ImeEvent::Preedit { text: s.into(), active_range_chars: Some(0..s.chars().count()) }));
+    // two: fallback fonts loaded by this text are used from the next frame
+    h.run_steps(2);
+}
+
+/// What winit sends on macOS when Enter (or a candidate click) ends a composition.
+fn ime_commit(h: &mut Harness<'static, App>, s: &str) {
+    h.event(Event::Ime(egui::ImeEvent::Preedit { text: String::new(), active_range_chars: None }));
+    h.event(Event::Ime(egui::ImeEvent::Commit(s.into())));
+    h.run_steps(2);
+}
+
+/// Types 日本 the way the macOS Japanese IME delivers it, with a stray Enter in the middle of the composition.
+fn compose_nihon(h: &mut Harness<'static, App>) {
+    #[expect(deprecated)]
+    h.event(Event::Ime(egui::ImeEvent::Enabled));
+    preedit(h, "n");
+    preedit(h, "に");
+    preedit(h, "にほ");
+    h.key_press(Key::Enter);
+    h.run_steps(1);
+    preedit(h, "日本");
+    ime_commit(h, "日本");
+    #[expect(deprecated)]
+    h.event(Event::Ime(egui::ImeEvent::Disabled));
+    h.run_steps(1);
+}
+
+#[test]
+fn ime_composes_into_a_selected_cell() {
+    let mut h = harness();
+    {
+        let p = center(&h, "H25");
+        click(&mut h, p, Modifiers::NONE);
+    }
+    preedit(&mut h, "n");
+    assert_eq!(edit_text(&h).as_deref(), Some("n"), "the first keystroke starts the edit");
+    preedit(&mut h, "にほ");
+    shot(&mut h, "ime_01_composing_in_grid");
+    assert_eq!(edit_text(&h).as_deref(), Some("にほ"));
+    // the composition isn't interrupted by focusing the editor
+    assert_eq!(h.ctx.memory(|m| m.focused()), None);
+    compose_nihon(&mut h);
+    assert_eq!(edit_text(&h).as_deref(), Some("日本"), "Enter while composing doesn't commit the cell");
+    assert_eq!(h.state().cursor, (24, 7));
+    assert_eq!(h.ctx.memory(|m| m.focused()), Some(Id::new("cell_editor")), "after the commit the editor has the keyboard");
+    typ(&mut h, "語");
+    shot(&mut h, "ime_02_committed");
+    key(&mut h, Key::Enter);
+    assert_eq!(source(&h, "H25"), "日本語");
+    assert_eq!(h.state().cursor, (25, 7));
+}
+
+#[test]
+fn ime_composes_into_the_editors() {
+    let mut h = harness();
+    // in-cell, inside a program's string
+    {
+        let p = center(&h, "H25");
+        click(&mut h, p, Modifiers::NONE);
+    }
+    typ(&mut h, "=\"");
+    compose_nihon(&mut h);
+    assert_eq!(edit_text(&h).as_deref(), Some("=\"日本"));
+    typ(&mut h, "\"");
+    key(&mut h, Key::Enter);
+    assert_eq!(source(&h, "H25"), "=\"日本\"");
+    assert_eq!(shown(&h, "H25"), "日本");
+    // the formula bar (click right of the address label)
+    {
+        let p = center(&h, "H27");
+        click(&mut h, p, Modifiers::NONE);
+    }
+    let addr = h.get_all_by_label("H27").map(|n| n.rect()).min_by(|a, b| a.top().total_cmp(&b.top())).unwrap().right_center();
+    click(&mut h, addr + Vec2::new(400.0, 0.0), Modifiers::NONE);
+    assert!(h.state().edit.as_ref().unwrap().in_bar);
+    compose_nihon(&mut h);
+    assert_eq!(edit_text(&h).as_deref(), Some("日本"));
+    assert!(h.state().edit.as_ref().unwrap().in_bar);
+    shot(&mut h, "ime_04_formula_bar");
+    key(&mut h, Key::Enter);
+    assert_eq!(source(&h, "H27"), "日本");
+}
+
+#[test]
+fn emoji_and_ime_commits_land() {
+    let mut h = harness();
+    // the emoji picker commits without composing
+    {
+        let p = center(&h, "H25");
+        click(&mut h, p, Modifiers::NONE);
+    }
+    h.event(Event::Ime(egui::ImeEvent::Commit("😀".into())));
+    h.run_steps(2);
+    assert_eq!(edit_text(&h).as_deref(), Some("😀"));
+    h.event(Event::Ime(egui::ImeEvent::Commit("🎉".into())));
+    h.run_steps(2);
+    typ(&mut h, " ok");
+    key(&mut h, Key::Enter);
+    assert_eq!(source(&h, "H25"), "😀🎉 ok");
+    // a composition abandoned with Escape leaves the cell alone
+    type_into(&mut h, "H27", "keep");
+    {
+        let p = center(&h, "H27");
+        click(&mut h, p, Modifiers::NONE);
+    }
+    preedit(&mut h, "k");
+    h.event(Event::Ime(egui::ImeEvent::Preedit { text: String::new(), active_range_chars: None }));
+    h.run_steps(2);
+    assert!(h.state().edit.is_none());
+    assert_eq!(source(&h, "H27"), "keep");
+    // other scripts arrive as text; how they render depends on the fonts found (see fonts.rs)
+    let rows = ["😀😂😊😍😘😎😭😅😉😢😡", "👍👎👏🙏💪👀🎉🔥❤️💔💯", "✅❌⭐🌟☀️🌈⚡☕🍕🎂🚀", "🤣🥰🤔🙂🙃🤝🫠🥲🧠🦀", "日本語 ひらがな カタカナ 中文", "한국어 مرحبا שלום हिन्दी"];
+    for (i, r) in rows.iter().enumerate() {
+        type_into(&mut h, &format!("E{}", 24 + i), r);
+        assert_eq!(source(&h, &format!("E{}", 24 + i)), *r);
+    }
+    shot(&mut h, "ime_03_scripts");
+    assert!(h.state().fonts.loaded());
+}
+
+/// Swaps in fallback fonts that count how often they're read (and come from this machine, if it has them).
+fn counted_fonts(h: &mut Harness<'static, App>) -> std::rc::Rc<std::cell::Cell<usize>> {
+    let n = std::rc::Rc::new(std::cell::Cell::new(0));
+    let m = n.clone();
+    h.state_mut().fonts = crate::fonts::Fallbacks::from_source(move || {
+        m.set(m.get() + 1);
+        crate::fonts::system()
+    });
+    n
+}
+
+#[test]
+fn fallback_fonts_load_once_text_needs_them() {
+    let mut h = harness();
+    let n = counted_fonts(&mut h);
+    // the demo and Latin, accented, symbols and emoji are covered by egui's own fonts
+    type_into(&mut h, "H25", "café naïve ✓ ★ 😀 Привет");
+    {
+        let p = center(&h, "H25");
+        click(&mut h, p, Modifiers::NONE);
+    }
+    h.run_steps(2);
+    assert_eq!(n.get(), 0);
+    assert!(!h.state().fonts.loaded());
+    // a cell that appears with Japanese in it (as from a file or a paste)
+    let k = cell_key(&h, "H27");
+    h.state_mut().eng.set_text(k, "日本");
+    h.run_steps(2);
+    assert_eq!(n.get(), 1);
+    assert!(h.state().fonts.loaded());
+    type_into(&mut h, "H28", "한국어 مرحبا");
+    assert_eq!(n.get(), 1, "read once");
+    shot(&mut h, "ime_05_fonts_loaded");
+}
+
+#[test]
+fn an_ime_commit_loads_fallback_fonts() {
+    let mut h = harness();
+    let n = counted_fonts(&mut h);
+    {
+        let p = center(&h, "H25");
+        click(&mut h, p, Modifiers::NONE);
+    }
+    h.event(Event::Ime(egui::ImeEvent::Commit("日本".into())));
+    h.run_steps(1);
+    assert_eq!(n.get(), 1);
+    assert_eq!(edit_text(&h).as_deref(), Some("日本"));
+}
+
 // ---- sheet tabs ----------------------------------------------------------------
 
 /// Short steps so two clicks count as a double-click.
@@ -1233,6 +1406,64 @@ fn wide_numbers_never_look_like_other_numbers() {
     h.hover_at(center(&h, "H41"));
     h.run_steps(2);
     shot(&mut h, "23_wide_number_hover");
+}
+
+// ---- copying values ------------------------------------------------------------
+
+/// The text the last frame put on the clipboard.
+fn copied(h: &Harness<'static, App>) -> Option<String> {
+    h.output().platform_output.commands.iter().find_map(|c| match c {
+        egui::OutputCommand::CopyText(t) => Some(t.clone()),
+        _ => None,
+    })
+}
+
+#[test]
+fn copy_values_copies_what_cells_show_as_literals() {
+    let mut h = harness();
+    type_into(&mut h, "E24", "5.3 [km]");
+    type_into(&mut h, "F24", "=E24 to[m]");
+    type_into(&mut h, "E25", "2026-01-31");
+    type_into(&mut h, "F25", "'=x");
+    type_into(&mut h, "E26", "1");
+    type_into(&mut h, "F26", "2");
+    type_into(&mut h, "G24", "=E26:F26 10 *");
+    assert_eq!((shown(&h, "F24"), shown(&h, "G25")), ("5,300 m".into(), "20".into()));
+    { let p = center(&h, "E24"); click(&mut h, p, Modifiers::NONE); }
+    { let p = center(&h, "G25"); click(&mut h, p, Modifiers::SHIFT); }
+    let want = "5.3 [km]\t5300 [m]\t10\n2026-01-31\t'=x\t20";
+    // ⇧⌘C reaches the app as a Copy event with Shift held (⌘C copies the sources)
+    let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
+    h.event(Event::ModifiersChanged(cmd_shift));
+    h.event(Event::Copy);
+    h.step();
+    assert_eq!(copied(&h).as_deref(), Some(want));
+    assert_eq!(h.state().status.as_deref(), Some("copied the values of 2×3"));
+    h.event(Event::ModifiersChanged(Modifiers::COMMAND));
+    h.event(Event::Copy);
+    h.step();
+    assert_eq!(copied(&h).as_deref(), Some("5.3 [km]\t=E24 to[m]\t=E26:F26 10 *\n2026-01-31\t'=x\t"));
+    h.event(Event::ModifiersChanged(Modifiers::NONE));
+    // the Edit menu item and the command do the same
+    h.state_mut().queue(Command::CopyValues);
+    h.step();
+    assert_eq!(copied(&h).as_deref(), Some(want));
+    h.run_steps(2);
+    h.get_by_label("Edit").click();
+    h.run_steps(2);
+    shot(&mut h, "44_copy_values_menu");
+    h.get_by_label_contains("Copy Values").click();
+    h.step();
+    assert_eq!(copied(&h).as_deref(), Some(want));
+    // pasting them back gives the same values, as literals: the computed cells are now numbers
+    h.run_steps(2);
+    { let p = center(&h, "E30"); click(&mut h, p, Modifiers::NONE); }
+    h.event(Event::Paste(want.into()));
+    h.run_steps(2);
+    for (a, b) in [("E24", "E30"), ("F24", "F30"), ("G24", "G30"), ("E25", "E31"), ("F25", "F31"), ("G25", "G31")] {
+        assert_eq!(shown(&h, a), shown(&h, b), "{a} vs {b}");
+    }
+    assert_eq!((source(&h, "F30"), source(&h, "G31")), ("5300 [m]".into(), "20".into()));
 }
 
 // ---- moving cells --------------------------------------------------------------
@@ -1537,6 +1768,9 @@ fn autosave_waits_for_edits_and_the_save_prompt() {
     typ(&mut h, "43");
     wait(&mut h, 8.0);
     assert!(!p.exists(), "never saves while a cell is being edited");
+    // and says so, rather than sitting at "0 s"
+    assert_eq!(h.state().autosave_note(h.ctx.input(|i| i.time)).as_deref(), Some("autosave waits while you edit"));
+    h.get_by_label("autosave waits while you edit");
     key(&mut h, Key::Enter);
     h.run_steps(2);
     assert!(p.exists() && !h.state().dirty, "overdue, so saved once the edit is done");
@@ -1547,9 +1781,33 @@ fn autosave_waits_for_edits_and_the_save_prompt() {
     assert_eq!(h.state().confirm, Some(files::Pending::New));
     wait(&mut h, 8.0);
     assert!(!p.exists() && h.state().confirm.is_some());
+    assert_eq!(h.state().autosave_note(h.ctx.input(|i| i.time)).as_deref(), Some("autosave waits for the save prompt"));
     modal_button(&mut h, "Cancel");
     h.run_steps(3);
     assert!(p.exists(), "after Cancel the overdue autosave runs");
+}
+
+/// #49: the status bar sat at "autosave in 0 s" because the frame that saved had already drawn it, and asked for no other.
+#[test]
+fn autosave_saves_at_the_deadline_and_wakes_for_it() {
+    let (mut h, p) = autosave_harness("autosave_deadline");
+    let now = |h: &Harness<'static, App>| h.ctx.input(|i| i.time);
+    let delay = |h: &Harness<'static, App>| h.output().viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+    type_into(&mut h, "H25", "42");
+    let deadline = h.state().autosave.since.unwrap() + 5.0;
+    while !p.exists() {
+        assert!(now(&h) < deadline, "not saved at the deadline ({} s)", now(&h));
+        // with no input, a frame only runs when asked for: every frame asks for one no later than the deadline
+        assert!(delay(&h).as_secs_f64() <= deadline - now(&h), "repaint in {:?} at {} s, deadline {deadline} s", delay(&h), now(&h));
+        h.run_steps(1);
+    }
+    assert!(now(&h) < deadline + 0.25, "saved within a frame of the deadline");
+    assert!(!h.state().dirty);
+    // the status bar was drawn before the save in that frame: the app asks for another to show the result
+    assert_eq!(delay(&h), std::time::Duration::ZERO);
+    h.run_steps(1);
+    h.get_by_label("autosaved");
+    assert!(h.query_by_label_contains("autosave in").is_none());
 }
 
 #[test]

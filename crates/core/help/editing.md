@@ -13,6 +13,8 @@ While you edit a program:
 - **Tab** or **Enter** inserts the highlighted completion and keeps editing. With nothing highlighted they confirm the cell as usual.
 - **Escape** closes the completion list (until you type again); a second Escape cancels the edit.
 
+Input methods work in cells and the formula bar: start composing Japanese, Chinese or Korean on a selected cell and the edit begins with what you compose. While the input method is composing, Enter, Tab and Escape belong to it (Enter picks the conversion); press Enter again to confirm the cell. Text in other scripts shows with fonts found on your system; right-to-left text such as Arabic and Hebrew isn't laid out or edited properly yet.
+
 ## Fill
 
 Drag the small square at the bottom-right of the selection.
@@ -31,6 +33,15 @@ Type a program next to a filled column and the sheet offers to extend it down to
 ## Copy and paste
 
 ⌘C / ⌘V copies. Programs pasted inside the sheet move their relative references. Text pasted from elsewhere is split on tabs and newlines and typed into the cells.
+
+⇧⌘C (Edit ▸ Copy Values) copies what the cells show instead of their programs, as text you could type back in: pasting it, here or in another sheet, gives the same values, now as plain numbers and text.
+
+- Numbers keep their display unit, to 15 significant digits: a cell showing `5,300 m` copies as `5300 [m]`, `50 %` as `50 [%]`, `20 °C` as `20 [°C]`. A number typed with 15 digits or fewer pastes back exactly; a computed one may lose float noise past the 15th digit (`0.1 0.2 +` copies as `0.3`).
+- Dates copy as ISO dates: `2026-01-31`.
+- Text copies as it is, with a `'` in front only where it would otherwise be read as a number, a date, a program or a definition (`'5`, `'=x`). Tabs and line breaks in it become spaces.
+- A spilled array copies one value per cell.
+- An error copies its short code (`#err`, `#cycle`…), which pastes back as text.
+- Charts, unit, dimension and word definitions, and empty cells copy as nothing.
 
 ## Moving cells
 
