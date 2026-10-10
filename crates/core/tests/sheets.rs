@@ -16,7 +16,7 @@ fn sid(e: &Engine, name: &str) -> SheetId {
 
 fn key(e: &mut Engine, sheet: SheetId, r: &str) -> CellKey {
     let a = a1::parse_ref(r).unwrap();
-    e.wb.sheet_mut(sheet).unwrap().key_grow(a.row, a.col)
+    e.wb.sheet(sheet).unwrap().key(a.row, a.col).unwrap()
 }
 
 fn set(e: &mut Engine, sheet: SheetId, r: &str, text: &str) {

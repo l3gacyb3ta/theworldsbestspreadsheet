@@ -813,7 +813,7 @@ pub const SAMPLE_NAMES: &[(&str, &str)] = &[("growth", "E1"), ("price", "E2")];
 /// A workbook holding the sample data, plus the id of its sample sheet.
 pub fn sample_engine() -> (Engine, SheetId) {
     let mut wb = crate::stdlib::default_workbook();
-    wb.sheets[0] = Sheet::new("sample", 50, 10);
+    wb.sheets[0] = Sheet::new("sample");
     let sid = wb.sheets[0].id;
     let mut e = Engine::new(wb);
     for (at, text) in SAMPLE {

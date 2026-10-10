@@ -1156,15 +1156,16 @@ impl App {
 
         if self.trace {
             ui.separator();
-            let pre = self.eng.precedents(k);
-            let dep = self.eng.dependents(k);
+            let t = self.trace_sets(k);
+            let pre: Vec<CellKey> = t.pre.iter().take(40).map(|x| x.0).collect();
+            let dep: Vec<CellKey> = t.dep.iter().take(40).map(|x| x.0).collect();
             let mut goto = None;
             ui.strong("Precedents");
             ui.horizontal_wrapped(|ui| {
                 if pre.is_empty() {
                     ui.label(egui::RichText::new("none").weak());
                 }
-                for p in pre.iter().take(40) {
+                for p in &pre {
                     if ui.small_button(self.label(*p)).clicked() {
                         goto = Some(*p);
                     }
@@ -1175,7 +1176,7 @@ impl App {
                 if dep.is_empty() {
                     ui.label(egui::RichText::new("none").weak());
                 }
-                for p in dep.iter().take(40) {
+                for p in &dep {
                     if ui.small_button(self.label(*p)).clicked() {
                         goto = Some(*p);
                     }

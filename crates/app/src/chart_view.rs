@@ -18,7 +18,19 @@ pub const SERIES: [Color32; 6] = [
 pub struct PointHit {
     pub pos: Pos2,
     pub prov: Prov,
-    pub label: String,
+    /// Which point: its label is built only when it's shown (`point_label`).
+    pub layer: usize,
+    pub index: usize,
+}
+
+/// `x → y` for a point, as its tooltip shows it.
+pub fn point_label(chart: &Chart, layer: usize, i: usize) -> String {
+    let Some(l) = chart.layers.get(layer) else { return String::new() };
+    let x = match &l.xs {
+        Xs::Num(n) => n.fmt_elem(i),
+        Xs::Text(t) => t.data[i].to_string(),
+    };
+    format!("{x} → {}", l.ys.fmt_elem(i))
 }
 
 /// Maps between screen y and y values in the chart's display unit.
@@ -221,11 +233,10 @@ pub fn draw(p: &Painter, rect: Rect, chart: &Chart, dark: bool, fixed: Option<(f
                 (x.is_finite() && y.is_finite()).then(|| Pos2::new(x, y))
             })
             .collect();
-        let prov = |i: usize| l.ys.prov.as_ref().and_then(|p| p.get(i).copied()).unwrap_or(Prov::None);
-        let xlabel = |i: usize| match &l.xs {
-            Xs::Num(n) => n.fmt_elem(i),
-            Xs::Text(t) => t.data[i].to_string(),
-        };
+        let prov = |i: usize| l.ys.prov.get(i);
+        // a line with points closer than a few pixels apart is drawn without its markers
+        // (they'd hide it and cost a mesh each); the points still answer the pointer
+        let markers = l.mark == Mark::Scatter || (pts.len() as f32) * 4.0 < plot.width();
         match l.mark {
             Mark::Line | Mark::Scatter => {
                 if l.mark == Mark::Line {
@@ -238,15 +249,17 @@ pub fn draw(p: &Painter, rect: Rect, chart: &Chart, dark: bool, fixed: Option<(f
                 }
                 for (i, pt) in pts.iter().enumerate() {
                     let Some(pt) = pt else { continue };
-                    let draggable = matches!(prov(i), Prov::Literal(_));
-                    let r = if l.mark == Mark::Scatter { 4.0 } else { 2.5 };
-                    if draggable {
-                        clip.circle_filled(*pt, r + 1.5, bg);
-                        clip.circle_stroke(*pt, r + 1.5, Stroke::new(2.0, color));
-                    } else {
-                        clip.circle_filled(*pt, r, color);
+                    if markers {
+                        let draggable = matches!(prov(i), Prov::Literal(_));
+                        let r = if l.mark == Mark::Scatter { 4.0 } else { 2.5 };
+                        if draggable {
+                            clip.circle_filled(*pt, r + 1.5, bg);
+                            clip.circle_stroke(*pt, r + 1.5, Stroke::new(2.0, color));
+                        } else {
+                            clip.circle_filled(*pt, r, color);
+                        }
                     }
-                    hits.push(PointHit { pos: *pt, prov: prov(i), label: format!("{} → {}", xlabel(i), l.ys.fmt_elem(i)) });
+                    hits.push(PointHit { pos: *pt, prov: prov(i), layer: li, index: i });
                 }
             }
             Mark::Bar => {
@@ -262,7 +275,7 @@ pub fn draw(p: &Painter, rect: Rect, chart: &Chart, dark: bool, fixed: Option<(f
                     if matches!(prov(i), Prov::Literal(_)) {
                         clip.line_segment([top - Vec2::new(bw / 2.0 - 2.0, 0.0), top + Vec2::new(bw / 2.0 - 3.0, 0.0)], Stroke::new(3.0, fg));
                     }
-                    hits.push(PointHit { pos: top, prov: prov(i), label: format!("{} → {}", xlabel(i), l.ys.fmt_elem(i)) });
+                    hits.push(PointHit { pos: top, prov: prov(i), layer: li, index: i });
                 }
                 bar_i += 1;
             }

@@ -14,7 +14,7 @@ fn eng() -> Engine {
 
 fn key(e: &mut Engine, r: &str) -> CellKey {
     let a = a1::parse_ref(r).unwrap();
-    e.wb.sheets[0].key_grow(a.row, a.col)
+    e.wb.sheets[0].key(a.row, a.col).unwrap()
 }
 
 fn set(e: &mut Engine, r: &str, text: &str) {

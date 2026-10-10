@@ -174,6 +174,8 @@ fn scrub_input_resizes_spill() {
     let from = center(&h, "B5");
     drag(&mut h, from, from - Vec2::new(40.0, 0.0), Modifiers::ALT);
     assert_eq!(source(&h, "B5"), "14");
+    // the dirty check waits for the scrub to end, then catches up
+    assert!(h.state().dirty);
     assert_eq!(shown(&h, "A23"), "14");
     assert_eq!(shown(&h, "A24"), "");
     shot(&mut h, "05_scrubbed");
@@ -196,7 +198,7 @@ fn drag_bar_writes_literal() {
         .state()
         .chart_hits
         .iter()
-        .find(|(p, _)| matches!(p.prov, Prov::Literal(_)) && p.label.starts_with("Q4"))
+        .find(|(p, a)| matches!(p.prov, Prov::Literal(_)) && h.state().hit_label(p, a).starts_with("Q4"))
         .map(|(p, _)| p.pos)
         .expect("Q4 bar is draggable");
     drag(&mut h, hit, hit - Vec2::new(0.0, 40.0), Modifiers::NONE);
@@ -210,7 +212,7 @@ fn drag_bar_writes_literal() {
     let k = h.state().eng.wb.sheets[0].key(45, 1).unwrap();
     h.state_mut().eng.set_text(k, "135.00 [widget]");
     h.run_steps(2);
-    let hit = h.state().chart_hits.iter().find(|(p, _)| p.label.starts_with("Q3")).map(|(p, _)| p.pos).unwrap();
+    let hit = h.state().chart_hits.iter().find(|(p, a)| h.state().hit_label(p, a).starts_with("Q3")).map(|(p, _)| p.pos).unwrap();
     drag(&mut h, hit, hit - Vec2::new(0.0, 23.0), Modifiers::NONE);
     let src = source(&h, "B46");
     assert!(src != "135.00 [widget]" && src.ends_with("[widget]"), "{src}");
@@ -765,7 +767,7 @@ fn dirty_marker_follows_edits_and_undo() {
     key_cmd(&mut h, Key::Z);
     assert_eq!(source(&h, "H25"), "");
     assert!(!h.state().dirty, "undo back to the saved state");
-    // moving around grows the sheet but isn't an edit
+    // moving around isn't an edit
     for _ in 0..40 {
         h.key_press(Key::ArrowDown);
     }
@@ -773,7 +775,7 @@ fn dirty_marker_follows_edits_and_undo() {
     assert!(!h.state().is_dirty());
     // non-undoable changes count too: a column resize, a sheet rename
     let ix = h.state().sheet_ix;
-    let cid = h.state().eng.wb.sheets[ix].cols.ids()[20];
+    let cid = h.state().eng.wb.sheets[ix].cols.get(20).unwrap();
     h.state_mut().eng.wb.sheets[ix].col_widths.insert(cid, 180.0);
     assert!(h.state().is_dirty());
     h.state_mut().eng.wb.sheets[ix].col_widths.remove(&cid);
@@ -782,12 +784,57 @@ fn dirty_marker_follows_edits_and_undo() {
     assert!(h.state().is_dirty());
 }
 
+/// Rows past the stored ones are virtual: scrolling and selecting far away lays them out without
+/// writing anything (same fingerprint, same saved document), and typing far down writes just
+/// that cell, which undo takes back to exactly the document before.
+#[test]
+fn scrolling_and_selecting_far_write_nothing() {
+    let mut h = harness();
+    let saved = |h: &Harness<'static, App>| serde_json::to_string(&h.state().eng.wb).unwrap();
+    let (fp, doc) = (files::fingerprint(&h.state().eng.wb), saved(&h));
+    let p = center(&h, "C5");
+    h.hover_at(p);
+    h.run_steps(1);
+    for _ in 0..30 {
+        h.event(Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(-200.0, -3000.0), modifiers: Modifiers::NONE, phase: egui::TouchPhase::Move });
+        h.run_steps(1);
+    }
+    h.run_steps(5);
+    let g = h.state().geo.clone().unwrap();
+    let (rows, cols) = g.visible();
+    assert!(rows.start > 2000 && cols.start > 10, "scrolled to {rows:?} {cols:?}");
+    // the cells there are laid out and can be selected and typed into
+    let (r, c) = (rows.start + 3, cols.start + 1);
+    click(&mut h, g.cell(r, c).center(), Modifiers::NONE);
+    assert_eq!(h.state().cursor, (r, c));
+    for _ in 0..60 {
+        h.key_press(Key::ArrowDown);
+    }
+    h.run_steps(2);
+    assert_eq!(h.state().cursor, (r + 60, c));
+    let at = a1::cell_name(r + 60, c);
+    shot(&mut h, "30_far_away");
+    assert_eq!(files::fingerprint(&h.state().eng.wb), fp);
+    assert_eq!(saved(&h), doc, "moving around writes nothing");
+    assert!(!h.state().is_dirty());
+    typ(&mut h, "=A1 1 +");
+    key(&mut h, Key::Enter);
+    assert_eq!(source(&h, &at), "=A1 1 +");
+    assert!(h.state().is_dirty());
+    let s = &h.state().eng.wb.sheets[h.state().sheet_ix];
+    assert_eq!(s.rows.filled(), 0, "a cell far down needs no stored rows");
+    key_cmd(&mut h, Key::Z);
+    assert_eq!(source(&h, &at), "");
+    assert_eq!(saved(&h), doc);
+    assert!(!h.state().is_dirty());
+}
+
 /// Dragging a header border resizes live; the whole drag is one undo step, back to the default size.
 #[test]
 fn header_border_drag_is_one_undo_step() {
     let mut h = harness();
     let (ix, undo0) = (h.state().sheet_ix, h.state().undo.len());
-    let (cid, rid) = (h.state().eng.wb.sheets[ix].cols.ids()[7], h.state().eng.wb.sheets[ix].rows.ids()[2]);
+    let (cid, rid) = (h.state().eng.wb.sheets[ix].cols.get(7).unwrap(), h.state().eng.wb.sheets[ix].rows.get(2).unwrap());
     let width = |h: &Harness<'static, App>| h.state().eng.wb.sheets[ix].col_widths.get(&cid).copied();
     let height = |h: &Harness<'static, App>| h.state().eng.wb.sheets[ix].row_heights.get(&rid).copied();
     assert_eq!(width(&h), None);
@@ -835,7 +882,7 @@ fn save_as_then_save() {
     assert!(!h.state().dirty);
     assert!(q.borrow().is_empty());
     let saved: wbs_core::model::Workbook = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-    assert!(saved.sheets[0].cells.values().any(|c| c.pieces == vec![wbs_core::model::Piece::Text("43".into())]));
+    assert!(saved.sheets[0].cells.values().any(|c| c.pieces[..] == [wbs_core::model::Piece::Text("43".into())]));
 }
 
 #[test]
@@ -1787,14 +1834,15 @@ fn autosave_saves_at_the_deadline_and_wakes_for_it() {
     let delay = |h: &Harness<'static, App>| h.output().viewport_output[&egui::ViewportId::ROOT].repaint_delay;
     type_into(&mut h, "H25", "42");
     let deadline = h.state().autosave.since.unwrap() + 5.0;
-    while !p.exists() {
-        assert!(now(&h) < deadline, "not saved at the deadline ({} s)", now(&h));
+    // the save starts at the deadline and lands in the next frame (it's written by another thread)
+    while h.state().dirty {
+        assert!(now(&h) < deadline + 0.25, "not saved at the deadline ({} s)", now(&h));
         // with no input, a frame only runs when asked for: every frame asks for one no later than the deadline
         assert!(delay(&h).as_secs_f64() <= deadline - now(&h), "repaint in {:?} at {} s, deadline {deadline} s", delay(&h), now(&h));
         h.run_steps(1);
     }
-    assert!(now(&h) < deadline + 0.25, "saved within a frame of the deadline");
-    assert!(!h.state().dirty);
+    assert!(now(&h) < deadline + 0.5, "saved within a frame of the deadline");
+    assert!(p.exists());
     // the status bar was drawn before the save in that frame: the app asks for another to show the result
     assert_eq!(delay(&h), std::time::Duration::ZERO);
     h.run_steps(1);

@@ -8,9 +8,10 @@ use crate::dims::{self, Halt, SVal, StaticEnv, StaticTrace};
 use crate::eval::{run_program, run_traced, Env, EvalErr, TraceStep};
 use crate::ids::*;
 use crate::model::{classify, Cell, Kind, NameDef, Piece, Sheet, StoredRef, Workbook};
+use crate::poskey;
 use crate::parse::{declares, CompileError, Compiled, Compiler, Declares, Dep, OpKind, Symbols};
 use crate::units::{Dim, Quant, UnitInfo};
-use crate::value::{Num, Prov, Text, Value};
+use crate::value::{Num, Prov, Provs, Text, Value};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -54,17 +55,23 @@ pub struct Scratch {
     pub result: CellResult,
 }
 
+/// Everything about a cell with content: what it compiled to, what it reads, and the last
+/// static pass and evaluation. Kept together (and boxed, so the map's table stays small)
+/// because a recalc visits all of it for every cell.
 struct Node {
     kind: Kind,
-    compiled: Result<Arc<Compiled>, CompileError>,
+    compiled: Result<Arc<Compiled>, Box<CompileError>>,
     deps: Vec<Dep>,
+    stat: Option<Static>,
+    result: Option<CellResult>,
 }
 
 /// A node's result from the static dimension pass (`dims`).
 struct Static {
     /// What the cell holds (for a unit declaration: its defining quantity).
     val: SVal,
-    err: Option<EvalErr>,
+    /// (Boxed: rare, and a recalc walks every node.)
+    err: Option<Box<EvalErr>>,
 }
 
 impl Static {
@@ -101,12 +108,15 @@ pub enum Shown<'a> {
 
 /// A reversible change to the document. Every edit and its inverse name rows, columns and sheets
 /// by id, never by position, so an undo still hits the right rows after other edits moved them.
-/// A row or column place is "in front of this row" (`None`: at the end), a sheet's place is "after
-/// this sheet" (`None`: first), so new sheets appended at the end never shift it.
+/// A row or column place is "in front of this row" (`None`: after the stored rows), a new sheet's
+/// place is "after this sheet" (`None`: first); undo puts things back at their old position keys.
+/// An edit that needs a virtual row's place written down (insert in front of it, delete it, sort
+/// it) materialises it first (`model::Axis`); its inverse ends with `Materialise`, so undo leaves
+/// nothing stored that wasn't. Writing a cell never materialises anything.
 #[derive(Clone, Debug)]
 pub enum Edit {
     Cells(Vec<(CellKey, Option<Cell>)>),
-    /// New rows, in front of row `before` (alive or deleted). Inverse: `DeleteRows`.
+    /// New rows, in front of row `before` (alive, deleted or virtual). Inverse: `DeleteRows`.
     InsertRows { sheet: SheetId, before: Option<RowId>, ids: Vec<RowId> },
     /// Hides rows where they are; their cells stay, hidden. Inverse: `RestoreRows`.
     DeleteRows { sheet: SheetId, ids: Vec<RowId> },
@@ -115,8 +125,14 @@ pub enum Edit {
     DeleteCols { sheet: SheetId, ids: Vec<ColId> },
     RestoreCols { sheet: SheetId, ids: Vec<ColId> },
     /// A sort: each `(row, place)` puts `row` where row `place` was; the rows are a permutation
-    /// of the places. Inverse: the same pairs swapped (plus the range corners it rewrote).
+    /// of the places. The rows from the first place to the last get fresh position keys.
+    /// Inverse: `RowKeys` with their old keys (plus the range corners it rewrote).
     PermuteRows { sheet: SheetId, moves: Vec<(RowId, RowId)> },
+    /// Puts rows at these position keys. Inverse: their old keys.
+    RowKeys { sheet: SheetId, keys: Vec<(RowId, String)> },
+    /// Sets how many of a sheet's virtual rows and columns are materialised (stored). Nothing
+    /// visible changes. Lowering keeps any row that changed since or that a stored row comes after.
+    Materialise { sheet: SheetId, rows: usize, cols: usize },
     /// Sets (`Some`) or removes one name. Inverse: the name's old definition.
     Name { name: String, def: Option<NameDef> },
     /// `None` is the default size.
@@ -124,10 +140,14 @@ pub enum Edit {
     ColWidth { sheet: SheetId, col: ColId, width: Option<f32> },
     /// Puts a whole new sheet, with its own ids, after sheet `after`. Inverse: `DeleteSheet`.
     InsertSheet { after: Option<SheetId>, sheet: Box<Sheet> },
-    /// Hides a sheet with everything in it (`Workbook::deleted_sheets`). Inverse: `RestoreSheet`.
+    /// Hides a sheet with everything in it (`Workbook::deleted_sheets`); it keeps its tab key.
+    /// Inverse: `RestoreSheet`, which shows it again at that key.
     DeleteSheet { sheet: SheetId },
-    RestoreSheet { sheet: SheetId, after: Option<SheetId> },
+    RestoreSheet { sheet: SheetId },
+    /// Moves a sheet right after sheet `after`. Inverse: `SheetPos` with its old key.
     MoveSheet { sheet: SheetId, after: Option<SheetId> },
+    /// Puts a sheet at this tab key. Inverse: its old key.
+    SheetPos { sheet: SheetId, pos: String },
     RenameSheet { sheet: SheetId, name: String },
     Batch(Vec<Edit>),
 }
@@ -143,9 +163,7 @@ impl Edit {
 
 pub struct Engine {
     pub wb: Workbook,
-    nodes: HashMap<CellKey, Node>,
-    results: HashMap<CellKey, CellResult>,
-    statics: HashMap<CellKey, Static>,
+    nodes: HashMap<CellKey, Box<Node>>,
     /// Anchor → region it actually spills into.
     spills: HashMap<CellKey, Region>,
     /// Anchor → region it wants (even when blocked).
@@ -163,6 +181,8 @@ pub struct Engine {
     /// The last recalc's dirty set and evaluation order, reused while the same
     /// cells change and the graph doesn't (scrubbing, goal-seek).
     plan: Option<Plan>,
+    /// Bumped by every applied edit: a cheap "might the document have changed?".
+    revision: u64,
 }
 
 /// A recalc plan: valid for `seeds` while `graph_gen` hasn't moved.
@@ -184,7 +204,7 @@ impl<'a> Env for View<'a> {
     }
     fn unit_info(&self, name: &str) -> Result<Arc<UnitInfo>, String> {
         let Some(k) = self.0.syms.units.get(name) else { return Err(format!("unknown unit {name}")) };
-        match self.0.results.get(k) {
+        match self.0.res(k) {
             Some(Ok(Value::Unit(u))) => Ok(u.clone()),
             Some(Err(_)) => Err(format!("unit {name} has an error (at {})", self.0.wb.cell_label(*k, None))),
             _ => Err(format!("unit {name} isn't ready")),
@@ -229,7 +249,7 @@ impl<'a> StaticEnv for View<'a> {
         let k = e.syms.units.get(name)?;
         match &**e.nodes.get(k)?.compiled.as_ref().ok()? {
             Compiled::Base { dim, .. } => Some((Some(Dim::base(dim)), false)),
-            Compiled::UnitDef { offset, .. } => Some((e.statics.get(k).and_then(|s| s.val.dim().cloned()), offset.is_some())),
+            Compiled::UnitDef { offset, .. } => Some((e.stat(k).and_then(|s| s.val.dim().cloned()), offset.is_some())),
             _ => None,
         }
     }
@@ -243,8 +263,6 @@ impl Engine {
         let mut e = Engine {
             wb,
             nodes: HashMap::default(),
-            results: HashMap::default(),
-            statics: HashMap::default(),
             spills: HashMap::default(),
             desired: HashMap::default(),
             cover: HashMap::default(),
@@ -255,6 +273,7 @@ impl Engine {
             last_eval_count: 0,
             graph_gen: 0,
             plan: None,
+            revision: 0,
         };
         e.wb.after_load();
         e.rebuild();
@@ -264,7 +283,15 @@ impl Engine {
     // ---- queries ---------------------------------------------------------
 
     pub fn result(&self, k: CellKey) -> Option<&CellResult> {
-        self.results.get(&k)
+        self.res(&k)
+    }
+
+    fn res(&self, k: &CellKey) -> Option<&CellResult> {
+        self.nodes.get(k)?.result.as_ref()
+    }
+
+    fn stat(&self, k: &CellKey) -> Option<&Static> {
+        self.nodes.get(k)?.stat.as_ref()
     }
 
     pub fn kind(&self, k: CellKey) -> Kind {
@@ -272,7 +299,7 @@ impl Engine {
     }
 
     pub fn compile_error(&self, k: CellKey) -> Option<&CompileError> {
-        self.nodes.get(&k)?.compiled.as_ref().err()
+        self.nodes.get(&k)?.compiled.as_ref().err().map(|e| &**e)
     }
 
     pub fn spill_anchor(&self, k: CellKey) -> Option<CellKey> {
@@ -285,14 +312,14 @@ impl Engine {
     }
 
     pub fn shown(&self, k: CellKey) -> Shown<'_> {
-        if let Some(r) = self.results.get(&k) {
+        if let Some(r) = self.res(&k) {
             return match r {
                 Ok(v) => Shown::Value { value: v, dr: 0, dc: 0, anchor: k },
                 Err(e) => Shown::Error(e),
             };
         }
         if let Some(a) = self.cover.get(&k) {
-            if let (Some(Ok(v)), Some(reg), Some((r, c))) = (self.results.get(a), self.spills.get(a), self.wb.pos(k)) {
+            if let (Some(Ok(v)), Some(reg), Some((r, c))) = (self.res(a), self.spills.get(a), self.wb.pos(k)) {
                 return Shown::Value { value: v, dr: r - reg.r0, dc: c - reg.c0, anchor: *a };
             }
         }
@@ -425,7 +452,7 @@ impl Engine {
     /// quantity that defines it.
     pub fn static_value(&self, k: CellKey) -> Option<&SVal> {
         let k = if self.nodes.contains_key(&k) { k } else { *self.cover.get(&k)? };
-        self.statics.get(&k).map(|s| &s.val)
+        self.stat(&k).map(|s| &s.val)
     }
 
     /// The dimension a cell's value statically has, if known.
@@ -435,7 +462,7 @@ impl Engine {
 
     /// The unit error the static pass found in a cell, if any.
     pub fn static_error(&self, k: CellKey) -> Option<&EvalErr> {
-        self.statics.get(&k)?.err.as_ref()
+        self.stat(&k)?.err.as_deref()
     }
 
     /// What a reference to node `k` pushes.
@@ -444,7 +471,7 @@ impl Engine {
             Some(Ok(Compiled::UnitDef { .. } | Compiled::Base { .. })) => SVal::Other("unit"),
             Some(Ok(Compiled::Dim(_))) => SVal::Other("dimension"),
             Some(Ok(Compiled::WordDef { .. })) => SVal::Other("word"),
-            Some(Ok(_)) => self.statics.get(&k).map_or(SVal::Any, |s| s.val.forget()),
+            Some(Ok(_)) => self.stat(&k).map_or(SVal::Any, |s| s.val.forget()),
             _ => SVal::Any,
         }
     }
@@ -462,7 +489,7 @@ impl Engine {
         let env = View(self);
         let from = |r: Result<SVal, EvalErr>| match r {
             Ok(val) => Static { val, err: None },
-            Err(e) => Static { val: SVal::Any, err: Some(e) },
+            Err(e) => Static { val: SVal::Any, err: Some(Box::new(e)) },
         };
         match &**c {
             Compiled::Program(ops) => from(dims::analyze(&env, ops)),
@@ -478,24 +505,6 @@ impl Engine {
         }
     }
 
-    /// Whether an edit leaves a cell's static result as it was: a number
-    /// literal whose value changed but not its unit (scrubbing).
-    fn same_statics(&self, k: CellKey, old: &Node, new: &Node) -> bool {
-        if old.kind != Kind::Number || new.kind != Kind::Number || old.deps != new.deps {
-            return false;
-        }
-        if self.statics.get(&k).is_none_or(|s| s.err.is_some()) {
-            return false;
-        }
-        match (old.compiled.as_deref(), new.compiled.as_deref()) {
-            (Ok(Compiled::Program(a)), Ok(Compiled::Program(b))) => {
-                a.len() == b.len()
-                    && a.iter().zip(b).all(|(x, y)| matches!((&x.kind, &y.kind), (OpKind::Num(_), OpKind::Num(_))) || x.kind == y.kind)
-            }
-            _ => false,
-        }
-    }
-
     /// Every unit with its defining cell and current definition, sorted by name.
     pub fn units_list(&self) -> Vec<(String, CellKey, Option<Arc<UnitInfo>>)> {
         let mut v: Vec<_> = self
@@ -503,7 +512,7 @@ impl Engine {
             .units
             .iter()
             .map(|(n, k)| {
-                let info = match self.results.get(k) {
+                let info = match self.res(k) {
                     Some(Ok(Value::Unit(u))) => Some(u.clone()),
                     _ => None,
                 };
@@ -532,15 +541,16 @@ impl Engine {
     // ---- value access used by the interpreter ----------------------------
 
     fn ref_value(&self, k: CellKey) -> Result<Value, String> {
-        if self.wb.sheet(k.sheet).is_none() {
-            return Err("reference to a deleted sheet".into());
-        }
-        if let Some(r) = self.results.get(&k) {
+        // (a cell with a value is on a live sheet: a deleted sheet's cells have no nodes)
+        if let Some(r) = self.res(&k) {
             return match r {
                 // provenance was stamped when the result was stored (see recalc)
                 Ok(v) => Ok(v.clone()),
                 Err(_) => Err(format!("{} has an error", self.wb.cell_label(k, None))),
             };
+        }
+        if self.wb.sheet(k.sheet).is_none() {
+            return Err("reference to a deleted sheet".into());
         }
         if self.cover.contains_key(&k) {
             return self.scalar_at(k);
@@ -554,15 +564,18 @@ impl Engine {
     /// The single element shown at a position (for ranges and spilled cells).
     fn scalar_at(&self, k: CellKey) -> Result<Value, String> {
         let label = || self.wb.cell_label(k, None);
-        let (v, dr, dc, anchor) = match self.shown(k) {
-            Shown::Empty => {
-                if self.nodes.contains_key(&k) {
-                    return Err(format!("{} isn't computed (cycle?)", label()));
-                }
-                return Err(format!("{} is empty", label()));
-            }
-            Shown::Error(_) => return Err(format!("{} has an error", label())),
-            Shown::Value { value, dr, dc, anchor } => (value, dr, dc, anchor),
+        // one lookup for a cell with content (a range reads thousands of these)
+        let (v, dr, dc, anchor, literal) = match self.nodes.get(&k) {
+            Some(n) => match &n.result {
+                Some(Ok(v)) => (v, 0, 0, k, n.kind == Kind::Number),
+                Some(Err(_)) => return Err(format!("{} has an error", label())),
+                None => return Err(format!("{} isn't computed (cycle?)", label())),
+            },
+            None => match self.shown(k) {
+                Shown::Empty => return Err(format!("{} is empty", label())),
+                Shown::Error(_) => return Err(format!("{} has an error", label())),
+                Shown::Value { value, dr, dc, anchor } => (value, dr, dc, anchor, false),
+            },
         };
         match v {
             Value::Num(n) => {
@@ -573,9 +586,9 @@ impl Engine {
                     _ => return Err(format!("{} holds a rank {} array", label(), n.rank())),
                 };
                 let x = *n.data.get(i).ok_or_else(|| format!("{} is an empty array", label()))?;
-                let prov = if anchor == k && self.kind(k) == Kind::Number { Prov::Literal(k) } else { Prov::Derived(anchor, i) };
+                let prov = if literal { Prov::Literal(k) } else { Prov::Derived(anchor, i) };
                 let mut s = Num::scalar(x, n.q.clone());
-                s.prov = Some(Arc::new(vec![prov]));
+                s.prov = Provs::one(prov);
                 Ok(Value::Num(s))
             }
             Value::Text(t) => {
@@ -629,7 +642,7 @@ impl Engine {
                             }
                         }
                         nums.push(n.data[0]);
-                        prov.push(n.prov.as_ref().map(|p| p[0]).unwrap_or(Prov::None));
+                        prov.push(n.prov.get(0));
                     }
                     Value::Text(t) => {
                         if !nums.is_empty() {
@@ -652,7 +665,7 @@ impl Engine {
             return Ok(Value::Text(Text { shape, data: Arc::new(texts) }));
         }
         let mut n = Num::with_shape(shape, nums, q.map(|x| x.0).unwrap_or_else(Quant::none));
-        n.prov = Some(Arc::new(prov));
+        n.prov = Provs::List(prov.into());
         Ok(Value::Num(n))
     }
 
@@ -663,13 +676,25 @@ impl Engine {
         let cell = if text.trim().is_empty() {
             None
         } else {
-            Some(Cell { pieces: self.wb.parse_text(text, k.sheet) })
+            Some(Cell::new(self.wb.parse_text(text, k.sheet)))
         };
         self.apply(Edit::Cells(vec![(k, cell)]))
     }
 
+    /// Changes whenever the dependency graph, spill coverage or the sheets' row and column
+    /// order may have: precedents, dependents and their positions are the same while it doesn't.
+    pub fn graph_generation(&self) -> u64 {
+        self.graph_gen
+    }
+
+    /// Counts applied edits. Changes to `wb` made without an edit don't count.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// Applies an edit, recalculates, and returns its inverse.
     pub fn apply(&mut self, e: Edit) -> Edit {
+        self.revision += 1;
         let mut touched = Vec::new();
         let mut structural = false;
         let inv = self.apply_raw(e, &mut touched, &mut structural);
@@ -702,19 +727,23 @@ impl Engine {
             Edit::InsertRows { sheet, before, ids } => {
                 let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
                 *structural = true;
+                let filled = s.filled();
                 s.rows.insert_before(before, &ids);
-                Edit::DeleteRows { sheet, ids }
+                unfill(s, filled, Edit::DeleteRows { sheet, ids })
             }
             Edit::InsertCols { sheet, before, ids } => {
                 let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
                 *structural = true;
+                let filled = s.filled();
                 s.cols.insert_before(before, &ids);
-                Edit::DeleteCols { sheet, ids }
+                unfill(s, filled, Edit::DeleteCols { sheet, ids })
             }
             Edit::DeleteRows { sheet, ids } => {
                 let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
                 *structural = true;
-                Edit::RestoreRows { sheet, ids: s.rows.set_dead(&ids, true) }
+                let filled = s.filled();
+                let inv = Edit::RestoreRows { sheet, ids: s.rows.set_dead(&ids, true) };
+                unfill(s, filled, inv)
             }
             Edit::RestoreRows { sheet, ids } => {
                 let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
@@ -724,7 +753,9 @@ impl Engine {
             Edit::DeleteCols { sheet, ids } => {
                 let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
                 *structural = true;
-                Edit::RestoreCols { sheet, ids: s.cols.set_dead(&ids, true) }
+                let filled = s.filled();
+                let inv = Edit::RestoreCols { sheet, ids: s.cols.set_dead(&ids, true) };
+                unfill(s, filled, inv)
             }
             Edit::RestoreCols { sheet, ids } => {
                 let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
@@ -736,14 +767,13 @@ impl Engine {
                 // cells within a range, it doesn't move the range.
                 let before = self.range_bounds_on(sheet);
                 let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
-                if !s.rows.permute(&moves) {
-                    return Edit::Batch(vec![]);
-                }
+                let filled = s.filled();
+                let Some(old_keys) = s.rows.permute(&moves) else { return Edit::Batch(vec![]) };
                 *structural = true;
                 let mut restore = Vec::new();
                 for (k, cell, bounds) in before {
                     let s = self.wb.sheet(sheet).unwrap();
-                    let mut pieces = cell.pieces.clone();
+                    let mut pieces = cell.pieces.to_vec();
                     for (i, b) in bounds {
                         if let (Piece::Range(a, z), Some((r0, c0, r1, c1))) = (&mut pieces[i], b) {
                             let (ka, kz) = (s.key(r0, c0).unwrap(), s.key(r1, c1).unwrap());
@@ -753,14 +783,26 @@ impl Engine {
                             z.col = kz.col;
                         }
                     }
-                    if pieces != cell.pieces {
+                    if pieces[..] != cell.pieces[..] {
                         let ks = self.wb.sheet_mut(k.sheet).unwrap();
-                        ks.cells.insert((k.row, k.col), Cell { pieces });
+                        ks.cells.insert((k.row, k.col), Cell::new(pieces));
                         restore.push((k, Some(cell)));
                     }
                 }
-                let back = moves.into_iter().map(|(row, place)| (place, row)).collect();
-                Edit::Batch(vec![Edit::PermuteRows { sheet, moves: back }, Edit::Cells(restore)])
+                let inv = Edit::Batch(vec![Edit::RowKeys { sheet, keys: old_keys }, Edit::Cells(restore)]);
+                unfill(self.wb.sheet(sheet).unwrap(), filled, inv)
+            }
+            Edit::RowKeys { sheet, keys } => {
+                let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
+                *structural = true;
+                let filled = s.filled();
+                let inv = Edit::RowKeys { sheet, keys: s.rows.set_keys(&keys) };
+                unfill(s, filled, inv)
+            }
+            // nothing visible changes: no recalc
+            Edit::Materialise { sheet, rows, cols } => {
+                let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
+                Edit::Materialise { sheet, rows: s.rows.fill(rows), cols: s.cols.fill(cols) }
             }
             Edit::Name { name, def } => {
                 *structural = true;
@@ -796,34 +838,44 @@ impl Engine {
                 let mut sheet = *sheet;
                 sheet.reindex();
                 self.wb.deleted_sheets.retain(|s| s.id != id);
-                self.place_sheet(sheet, after);
+                sheet.pos = self.key_after(after);
+                self.show_sheet(sheet);
                 Edit::DeleteSheet { sheet: id }
             }
             Edit::DeleteSheet { sheet } => {
                 // the last sheet stays: the app always shows one
                 let Some(at) = self.wb.sheet_index(sheet).filter(|_| self.wb.sheets.len() > 1) else { return Edit::Batch(vec![]) };
                 *structural = true;
-                let after = self.sheet_before(at);
                 let s = self.wb.sheets.remove(at);
                 self.wb.deleted_sheets.push(s);
-                Edit::RestoreSheet { sheet, after }
+                Edit::RestoreSheet { sheet }
             }
-            Edit::RestoreSheet { sheet, after } => {
+            Edit::RestoreSheet { sheet } => {
                 let Some(at) = self.wb.deleted_sheets.iter().position(|s| s.id == sheet) else { return Edit::Batch(vec![]) };
                 *structural = true;
                 let mut s = self.wb.deleted_sheets.remove(at);
                 s.reindex();
-                self.place_sheet(s, after);
+                self.show_sheet(s);
                 Edit::DeleteSheet { sheet }
             }
             Edit::MoveSheet { sheet, after } => {
                 let Some(from) = self.wb.sheet_index(sheet) else { return Edit::Batch(vec![]) };
+                if after == Some(sheet) {
+                    return Edit::Batch(vec![]);
+                }
                 *structural = true;
-                let old = self.sheet_before(from);
-                let after = if after == Some(sheet) { old } else { after };
-                let s = self.wb.sheets.remove(from);
-                self.place_sheet(s, after);
-                Edit::MoveSheet { sheet, after: old }
+                let mut s = self.wb.sheets.remove(from);
+                let old = std::mem::replace(&mut s.pos, self.key_after(after));
+                self.show_sheet(s);
+                Edit::SheetPos { sheet, pos: old }
+            }
+            Edit::SheetPos { sheet, pos } => {
+                let Some(from) = self.wb.sheet_index(sheet) else { return Edit::Batch(vec![]) };
+                *structural = true;
+                let mut s = self.wb.sheets.remove(from);
+                let old = std::mem::replace(&mut s.pos, pos);
+                self.show_sheet(s);
+                Edit::SheetPos { sheet, pos: old }
             }
             Edit::RenameSheet { sheet, name } => {
                 let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
@@ -838,12 +890,19 @@ impl Engine {
         }
     }
 
-    /// Puts a sheet right after `after` in the tab order: first if `None`, last if that sheet isn't showing.
-    fn place_sheet(&mut self, s: Sheet, after: Option<SheetId>) {
+    /// A tab key right after sheet `after` (first if `None`, last if that sheet isn't showing).
+    fn key_after(&self, after: Option<SheetId>) -> String {
         let at = match after {
             None => 0,
             Some(a) => self.wb.sheet_index(a).map_or(self.wb.sheets.len(), |i| i + 1),
         };
+        let lo = at.checked_sub(1).map_or("", |i| self.wb.sheets[i].pos.as_str());
+        poskey::between(lo, self.wb.sheets.get(at).map(|s| s.pos.as_str()))
+    }
+
+    /// Shows a sheet at its place in the tab order (by its key).
+    fn show_sheet(&mut self, s: Sheet) {
+        let at = self.wb.sheets.partition_point(|x| (&x.pos, x.id) < (&s.pos, s.id));
         self.wb.sheets.insert(at, s);
     }
 
@@ -903,14 +962,15 @@ impl Engine {
 
     // ---- rows and columns: these turn the positions the user sees into an edit by id ----
 
-    /// `n` new rows so that the first is at visible row `at` (`at` = the row count appends).
+    /// `n` new rows so that the first is at visible row `at`: in front of the row there, which
+    /// may be virtual (the insert materialises it).
     pub fn insert_rows_edit(&self, sheet: SheetId, at: usize, n: usize) -> Edit {
         let before = self.wb.sheet(sheet).and_then(|s| s.rows.get(at));
         Edit::InsertRows { sheet, before, ids: (0..n).map(|_| RowId(fresh_id())).collect() }
     }
 
     pub fn delete_rows_edit(&self, sheet: SheetId, at: usize, n: usize) -> Edit {
-        let ids = self.wb.sheet(sheet).map(|s| s.rows.ids().iter().skip(at).take(n).copied().collect()).unwrap_or_default();
+        let ids = self.wb.sheet(sheet).map(|s| (at..at + n).filter_map(|i| s.rows.get(i)).collect()).unwrap_or_default();
         Edit::DeleteRows { sheet, ids }
     }
 
@@ -920,7 +980,7 @@ impl Engine {
     }
 
     pub fn delete_cols_edit(&self, sheet: SheetId, at: usize, n: usize) -> Edit {
-        let ids = self.wb.sheet(sheet).map(|s| s.cols.ids().iter().skip(at).take(n).copied().collect()).unwrap_or_default();
+        let ids = self.wb.sheet(sheet).map(|s| (at..at + n).filter_map(|i| s.cols.get(i)).collect()).unwrap_or_default();
         Edit::DeleteCols { sheet, ids }
     }
 
@@ -933,11 +993,12 @@ impl Engine {
             n += 1;
         }
         let after = self.sheet_before(at.min(self.wb.sheets.len()));
-        Edit::InsertSheet { after, sheet: Box::new(Sheet::new(&format!("Sheet{n}"), 200, 26)) }
+        Edit::InsertSheet { after, sheet: Box::new(Sheet::new(&format!("Sheet{n}"))) }
     }
 
-    /// A copy right after the original. It keeps the row and column ids (cells are keyed by
-    /// sheet too, so nothing collides), which makes its own-sheet references point at the copy.
+    /// A copy right after the original. It keeps the row and column ids, and the seed of the virtual
+    /// ones (cells are keyed by sheet too, so nothing collides), which makes its own-sheet
+    /// references point at the copy.
     pub fn duplicate_sheet_edit(&self, sheet: SheetId) -> Result<Edit, String> {
         let at = self.wb.sheet_index(sheet).ok_or("no such sheet")?;
         let mut copy = self.wb.sheets[at].clone();
@@ -1014,17 +1075,23 @@ impl Engine {
 
     fn compile_node(&self, k: CellKey, text: &str) -> Node {
         if let Some(e) = self.dead_sheet_ref(k) {
-            return Node { kind: classify(text), compiled: Err(e), deps: vec![] };
+            return Node { kind: classify(text), compiled: Err(Box::new(e)), deps: vec![], stat: None, result: None };
         }
         let mut c = Compiler::new(&self.wb, &self.syms, k.sheet);
-        let compiled = c.compile(text).map(Arc::new);
-        Node { kind: classify(text), compiled, deps: c.deps }
+        let compiled = c.compile(text).map(Arc::new).map_err(Box::new);
+        Node { kind: classify(text), compiled, deps: c.deps, stat: None, result: None }
     }
 
     /// A reference into a deleted sheet renders as `#ref!`; say which kind of deletion it was.
     fn dead_sheet_ref(&self, k: CellKey) -> Option<CompileError> {
+        let pieces = &self.wb.cell(k)?.pieces;
+        let dead = |p: &Piece| matches!(p, Piece::Ref(r) | Piece::Range(r, _) if r.sheet.is_some_and(|s| self.wb.sheet(s).is_none()));
+        // the common case, without rendering anything
+        if !pieces.iter().any(dead) {
+            return None;
+        }
         let mut at = 0;
-        for p in &self.wb.cell(k)?.pieces {
+        for p in pieces.iter() {
             let len = self.wb.render(std::slice::from_ref(p), k.sheet).len();
             let sheet = match p {
                 Piece::Ref(r) | Piece::Range(r, _) => r.sheet,
@@ -1068,14 +1135,12 @@ impl Engine {
         self.nodes.clear();
         self.rdeps.clear();
         self.range_deps.clear();
-        self.results.clear();
-        self.statics.clear();
         self.spills.clear();
         self.desired.clear();
         self.cover.clear();
         for (k, text) in &content {
             let n = self.compile_node(*k, text);
-            self.nodes.insert(*k, n);
+            self.nodes.insert(*k, Box::new(n));
             self.index_deps(*k);
         }
         self.graph_gen += 1;
@@ -1099,21 +1164,25 @@ impl Engine {
         for k in keys {
             let k = *k;
             self.unindex_deps(k);
-            let old = self.nodes.remove(&k);
+            let mut old = self.nodes.remove(&k);
             let text = self.wb.cell_text(k);
             // a cell in a deleted row or column is kept but hidden: not part of the graph (as in `rebuild`)
             if !text.trim().is_empty() && self.wb.pos(k).is_some() {
-                let n = self.compile_node(k, &text);
-                self.nodes.insert(k, n);
+                let mut n = self.compile_node(k, &text);
+                // scrubbing a number never changes a dimension: the static pass's result still holds,
+                // and nothing downstream needs it again
+                match old.as_mut() {
+                    Some(o) if same_statics(o, &n) => n.stat = o.stat.take(),
+                    _ => static_seeds.push(k),
+                }
+                self.nodes.insert(k, Box::new(n));
                 self.index_deps(k);
+            } else {
+                static_seeds.push(k);
             }
             // same dependencies (e.g. a scrubbed number): the graph, and so the plan, still hold
             if !matches!((&old, self.nodes.get(&k)), (Some(o), Some(n)) if o.deps == n.deps) {
                 self.graph_gen += 1;
-            }
-            // scrubbing a number never changes a dimension: nothing downstream needs the static pass again
-            if !matches!((&old, self.nodes.get(&k)), (Some(o), Some(n)) if self.same_statics(k, o, n)) {
-                static_seeds.push(k);
             }
             seeds.push(k);
             // A cell typed into (or cleared from) a spill region affects the spiller.
@@ -1240,8 +1309,6 @@ impl Engine {
             let gone: Vec<CellKey> = dirty.iter().filter(|k| !self.nodes.contains_key(k)).copied().collect();
             let mut changed_positions: Vec<CellKey> = Vec::new();
             for k in &gone {
-                self.results.remove(k);
-                self.statics.remove(k);
                 changed_positions.extend(self.set_desired(*k, None));
                 if let Some(reg) = self.spills.remove(k) {
                     changed_positions.extend(self.uncover(&reg));
@@ -1256,43 +1323,36 @@ impl Engine {
             }
             for (k, cycle) in order {
                 if let Some(path) = cycle {
-                    self.results.insert(
-                        k,
-                        Err(CellError {
+                    let n = self.nodes.get_mut(&k).unwrap();
+                    n.stat = Some(Static::any());
+                    n.result = Some(Err(CellError {
                             msg: format!(
                                 "cycle: {}",
                                 path.iter().chain(path.first()).map(|c| self.wb.cell_label(*c, Some(k.sheet))).collect::<Vec<_>>().join(" → ")
                             ),
                             span: None,
                             kind: ErrKind::Cycle(path),
-                        }),
-                    );
-                    self.statics.insert(k, Static::any());
+                        }));
                     changed_positions.extend(self.set_desired(k, None));
                     if let Some(reg) = self.spills.remove(&k) {
                         changed_positions.extend(self.uncover(&reg));
                     }
                     continue;
                 }
-                if static_dirty.as_ref().is_none_or(|s| s.contains(&k)) || !self.statics.contains_key(&k) {
+                if static_dirty.as_ref().is_none_or(|s| s.contains(&k)) || self.stat(&k).is_none() {
                     let s = self.compute_static(k);
-                    self.statics.insert(k, s);
+                    self.nodes.get_mut(&k).unwrap().stat = Some(s);
                 }
                 self.last_eval_count += 1;
-                let res = self.evaluate(k);
+                let (res, kind) = self.evaluate(k);
                 let (mut res, changed) = self.place_spill(k, res);
                 changed_positions.extend(changed);
                 // Stamp the provenance a reference to this cell carries once, here, so
                 // every reference is an Arc clone instead of a fresh allocation.
                 if let Ok(Value::Num(n)) = &mut res {
-                    let p: Vec<Prov> = if self.kind(k) == Kind::Number {
-                        vec![Prov::Literal(k); n.len()]
-                    } else {
-                        (0..n.len()).map(|i| Prov::Derived(k, i)).collect()
-                    };
-                    n.prov = Some(Arc::new(p));
+                    n.prov = Provs::Cell(k, kind == Kind::Number);
                 }
-                self.results.insert(k, res);
+                self.nodes.get_mut(&k).unwrap().result = Some(res);
             }
             if changed_positions.is_empty() {
                 return reusable.map(|o| (dirty, o));
@@ -1393,15 +1453,19 @@ impl Engine {
     /// whose wanted region overlaps it — then both are blocked, no matter
     /// which was computed first.
     fn place_spill(&mut self, k: CellKey, res: CellResult) -> (CellResult, Vec<CellKey>) {
+        // most cells neither spill nor did: nothing to update (spills only holds anchors that are in desired)
+        let size = match &res {
+            Ok(v) => v.spill_size(),
+            Err(_) => (1, 1),
+        };
+        if size == (1, 1) && !self.desired.contains_key(&k) {
+            return (res, Vec::new());
+        }
         let old = self.spills.remove(&k);
         let mut changed = Vec::new();
         if let Some(reg) = old {
             changed.extend(self.uncover(&reg));
         }
-        let size = match &res {
-            Ok(v) => v.spill_size(),
-            Err(_) => (1, 1),
-        };
         let pos = if size == (1, 1) { None } else { self.wb.pos(k) };
         let Some((r0, c0)) = pos else {
             changed.extend(self.set_desired(k, None));
@@ -1409,9 +1473,6 @@ impl Engine {
         };
         let reg = Region { sheet: k.sheet, r0, c0, rows: size.0, cols: size.1 };
         changed.extend(self.set_desired(k, Some(reg)));
-        if let Some(s) = self.wb.sheet_mut(k.sheet) {
-            s.ensure_size(r0 + size.0, c0 + size.1);
-        }
         // blocked?
         let keys = self.region_keys(&reg);
         if let Some(b) = keys.iter().copied().find(|p| *p != k && self.nodes.contains_key(p)) {
@@ -1440,26 +1501,41 @@ impl Engine {
         (res, changed)
     }
 
-    fn evaluate(&self, k: CellKey) -> CellResult {
-        let Some(n) = self.nodes.get(&k) else { return Err(local("no content".into(), None)) };
+    /// The cell's value, and its kind (read here so the caller needn't look the node up again).
+    fn evaluate(&self, k: CellKey) -> (CellResult, Kind) {
+        let Some(n) = self.nodes.get(&k) else { return (Err(local("no content".into(), None)), Kind::Empty) };
+        (self.evaluate_node(n, k), n.kind)
+    }
+
+    fn evaluate_node(&self, n: &Node, k: CellKey) -> CellResult {
         let compiled = match &n.compiled {
-            Ok(c) => c.clone(),
+            Ok(c) => c,
             Err(e) => return Err(CellError { msg: e.msg.clone(), span: e.span.clone(), kind: ErrKind::Local }),
         };
         // A unit error found statically is this cell's, whatever its inputs hold.
-        if let Some(e) = self.static_error(k) {
+        if let Some(e) = n.stat.as_ref().and_then(|s| s.err.as_deref()) {
             return Err(local(e.msg.clone(), e.span.clone()));
         }
         // An error in a referenced cell is reported as upstream, not here.
-        if let Some(up) = self.first_upstream_error(k) {
-            let label = self.wb.cell_label(up, Some(k.sheet));
-            return Err(CellError { msg: format!("{label} has an error"), span: None, kind: ErrKind::Upstream(up) });
-        }
+        let upstream = || {
+            self.first_upstream_error(n, k).map(|up| {
+                let label = self.wb.cell_label(up, Some(k.sheet));
+                CellError { msg: format!("{label} has an error"), span: None, kind: ErrKind::Upstream(up) }
+            })
+        };
         let env = View(self);
-        match &*compiled {
+        if let Compiled::Program(ops) = &**compiled {
+            // A program reads every cell it references, and reading one with an error fails:
+            // one that ran had none upstream, so only a failure needs the check.
+            return run_program(&env, ops).map_err(|e| upstream().unwrap_or_else(|| local(e.msg, e.span)));
+        }
+        if let Some(e) = upstream() {
+            return Err(e);
+        }
+        match &**compiled {
             Compiled::Empty => Err(local("empty".into(), None)),
             Compiled::Text(t) => Ok(Value::text(t)),
-            Compiled::Program(ops) => run_program(&env, ops).map_err(|e| local(e.msg, e.span)),
+            Compiled::Program(_) => unreachable!(),
             Compiled::WordDef { name, .. } => {
                 self.dup_check(&self.syms.words, name, k, "word")?;
                 Ok(Value::Word(name.clone()))
@@ -1498,20 +1574,46 @@ impl Engine {
         }
     }
 
-    fn first_upstream_error(&self, k: CellKey) -> Option<CellKey> {
+    fn first_upstream_error(&self, n: &Node, k: CellKey) -> Option<CellKey> {
         // Only direct cell references; ranges report through range_value.
-        let n = self.nodes.get(&k)?;
         for d in &n.deps {
             if let Dep::Cell(p) = d {
                 let src = if self.nodes.contains_key(p) { Some(*p) } else { self.cover.get(p).copied() };
                 if let Some(src) = src {
-                    if src != k && matches!(self.results.get(&src), Some(Err(_))) {
+                    if src != k && matches!(self.res(&src), Some(Err(_))) {
                         return Some(src);
                     }
                 }
             }
         }
         None
+    }
+}
+
+/// An edit's inverse `inv`, then back to the materialised rows and columns `filled` the sheet had
+/// before the edit (if it materialised any).
+fn unfill(s: &Sheet, filled: (usize, usize), inv: Edit) -> Edit {
+    if s.filled() == filled {
+        inv
+    } else {
+        Edit::Batch(vec![inv, Edit::Materialise { sheet: s.id, rows: filled.0, cols: filled.1 }])
+    }
+}
+
+/// Whether an edit leaves a cell's static result as it was: a number
+/// literal whose value changed but not its unit (scrubbing).
+fn same_statics(old: &Node, new: &Node) -> bool {
+    if old.kind != Kind::Number || new.kind != Kind::Number || old.deps != new.deps {
+        return false;
+    }
+    if old.stat.as_ref().is_none_or(|s| s.err.is_some()) {
+        return false;
+    }
+    match (old.compiled.as_deref(), new.compiled.as_deref()) {
+        (Ok(Compiled::Program(a)), Ok(Compiled::Program(b))) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| matches!((&x.kind, &y.kind), (OpKind::Num(_), OpKind::Num(_))) || x.kind == y.kind)
+        }
+        _ => false,
     }
 }
 

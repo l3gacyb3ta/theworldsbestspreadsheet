@@ -7,35 +7,26 @@ use std::collections::HashSet;
 use wbs_core::solve::Goal;
 
 impl App {
-    fn geometry(&mut self, area: Rect) -> Geo {
-        let ix = self.sheet_ix;
+    fn geometry(&self, area: Rect) -> Geo {
         let cells = Rect::from_min_max(area.min + Vec2::new(HDR_W, HDR_H), area.max);
-        // grow the sheet so there is always room to scroll into
-        loop {
-            let s = &self.eng.wb.sheets[ix];
-            let h: f32 = s.rows.ids().iter().map(|r| s.row_heights.get(r).copied().unwrap_or(DEF_H)).sum();
-            let w: f32 = s.cols.ids().iter().map(|c| s.col_widths.get(c).copied().unwrap_or(DEF_W)).sum();
-            let need_r = h < self.scroll.y + cells.height() + 400.0;
-            let need_c = w < self.scroll.x + cells.width() + 300.0;
-            if !need_r && !need_c {
-                break;
-            }
-            let (nr, nc) = (s.rows.len() + if need_r { 100 } else { 0 }, s.cols.len() + if need_c { 10 } else { 0 });
-            self.eng.wb.sheets[ix].ensure_size(nr, nc);
-        }
-        let s = &self.eng.wb.sheets[ix];
-        let mut col_x = Vec::with_capacity(s.cols.len() + 1);
+        let s = self.sheet();
+        let (nr, nc) = self.extent();
+        // the extent, and always room to scroll into: rows past the stored ones are virtual, so
+        // this lays out as many as it likes without touching the document
+        let mut col_x = Vec::with_capacity(nc + 1);
         let mut acc = 0.0;
         col_x.push(0.0);
-        for c in s.cols.ids() {
-            acc += s.col_widths.get(c).copied().unwrap_or(DEF_W);
+        while col_x.len() <= nc || acc < self.scroll.x + cells.width() + 300.0 {
+            let Some(c) = s.cols.get(col_x.len() - 1) else { break };
+            acc += s.col_widths.get(&c).copied().unwrap_or(DEF_W);
             col_x.push(acc);
         }
-        let mut row_y = Vec::with_capacity(s.rows.len() + 1);
+        let mut row_y = Vec::with_capacity(nr + 1);
         acc = 0.0;
         row_y.push(0.0);
-        for r in s.rows.ids() {
-            acc += s.row_heights.get(r).copied().unwrap_or(DEF_H);
+        while row_y.len() <= nr || acc < self.scroll.y + cells.height() + 400.0 {
+            let Some(r) = s.rows.get(row_y.len() - 1) else { break };
+            acc += s.row_heights.get(&r).copied().unwrap_or(DEF_H);
             row_y.push(acc);
         }
         Geo { cells, col_x, row_y, scroll: self.scroll }
@@ -139,17 +130,18 @@ impl App {
             } else if in_row_hdr && self.row_border(g, pos).is_some() {
                 ctx.set_cursor_icon(CursorIcon::ResizeRow);
             } else if in_cells {
-                if let Some((hit, _)) = self.chart_hit(pos) {
-                    self.fonts.note(&hit.label);
+                if let Some((hit, axis)) = self.chart_hit(pos) {
+                    let label = self.hit_label(hit, axis);
+                    self.fonts.note(&label);
                     match hit.prov {
                         Prov::Literal(k) => {
                             ctx.set_cursor_icon(CursorIcon::ResizeVertical);
-                            chart_view::tooltip_lines(ctx, pos, &[Tip::Value(hit.label.clone()), Tip::Action(format!("drag to edit {}", self.label(k)))]);
+                            chart_view::tooltip_lines(ctx, pos, &[Tip::Value(label.clone()), Tip::Action(format!("drag to edit {}", self.label(k)))]);
                         }
                         Prov::Derived(k, i) => {
                             let elem = self.eng.element_cell(k, i);
                             let from = if elem == k { format!("computed in {}", self.label(k)) } else { format!("{}, spilled from {}", self.label(elem), self.label(k)) };
-                            let mut tip = vec![Tip::Value(hit.label.clone())];
+                            let mut tip = vec![Tip::Value(label.clone())];
                             match self.goal_choice(k) {
                                 None => tip.push(Tip::Note("not draggable: no number cells upstream to goal-seek".to_string())),
                                 Some((pick, cands)) => {
@@ -165,7 +157,7 @@ impl App {
                             tip.push(Tip::Note(from));
                             chart_view::tooltip_lines(ctx, pos, &tip);
                         }
-                        Prov::None => chart_view::tooltip_lines(ctx, pos, &[Tip::Value(hit.label.clone()), Tip::Note("computed by the chart's own program: not draggable".to_string())]),
+                        Prov::None => chart_view::tooltip_lines(ctx, pos, &[Tip::Value(label), Tip::Note("computed by the chart's own program: not draggable".to_string())]),
                     }
                 } else if self.fill_handle(g).contains(pos) && self.edit.is_none() {
                     ctx.set_cursor_icon(CursorIcon::Crosshair);
@@ -238,6 +230,14 @@ impl App {
         let r = g.rect(s.r0, s.c0, s.r1, s.c1);
         r.expand(3.0).contains(pos) && !r.shrink(3.0).contains(pos)
     }
+    /// A chart point's `x → y`.
+    pub(super) fn hit_label(&self, hit: &PointHit, axis: &YAxis) -> String {
+        match axis.anchor.and_then(|a| self.eng.result(a)) {
+            Some(Ok(Value::Chart(c))) => chart_view::point_label(c, hit.layer, hit.index),
+            _ => String::new(),
+        }
+    }
+
     fn chart_hit(&self, pos: Pos2) -> Option<(&PointHit, &YAxis)> {
         self.chart_hits
             .iter()
@@ -437,7 +437,8 @@ impl App {
                 return;
             }
             self.commit();
-            let last = self.sheet().rows.len() - 1;
+            // a whole column: down to the last row laid out
+            let last = g.row_y.len() - 2;
             if mods.shift {
                 self.anchor.0 = 0;
                 self.cursor = (last, c);
@@ -456,7 +457,7 @@ impl App {
             }
             self.commit();
             let r = g.row_at(pos.y);
-            let last = self.sheet().cols.len() - 1;
+            let last = g.col_x.len() - 2;
             if mods.shift {
                 self.anchor.1 = 0;
                 self.cursor = (r, last);
@@ -469,7 +470,7 @@ impl App {
         if !in_cells {
             if pos.x < g.cells.left() && pos.y < g.cells.top() && area.contains(pos) {
                 self.commit();
-                let end = (self.sheet().rows.len() - 1, self.sheet().cols.len() - 1);
+                let end = (g.row_y.len() - 2, g.col_x.len() - 2);
                 self.anchor = (0, 0);
                 self.cursor = end;
             }
@@ -699,6 +700,7 @@ impl App {
             }
             // the drag resized live; the whole drag is one undo step
             Drag::Col { col, w0, .. } => {
+                self.dirty_stale = true;
                 let s = self.sheet();
                 let (sheet, cid) = (s.id, s.cols.get(col).unwrap());
                 if s.col_widths.get(&cid).copied() != w0 {
@@ -707,6 +709,7 @@ impl App {
                 }
             }
             Drag::Row { row, h0, .. } => {
+                self.dirty_stale = true;
                 let s = self.sheet();
                 let (sheet, rid) = (s.id, s.rows.get(row).unwrap());
                 if s.row_heights.get(&rid).copied() != h0 {
@@ -745,6 +748,8 @@ impl App {
 
     #[allow(clippy::too_many_arguments)]
     fn paint(&mut self, ui: &mut Ui, ctx: &egui::Context, pal: &Pal, g: &Geo, area: Rect, dark: bool, sid: SheetId) {
+        let cur = self.sheet().key(self.cursor.0, self.cursor.1);
+        let trace = cur.filter(|_| self.trace && self.edit.is_none()).map(|k| self.trace_sets(k));
         let painter = ui.painter_at(area);
         painter.rect_filled(g.cells, 0.0, pal.bg);
         let cp = painter.with_clip_rect(g.cells);
@@ -890,27 +895,18 @@ impl App {
                 }
             }
         }
-        // trace
-        let cur = s.key(self.cursor.0, self.cursor.1);
-        if self.trace && self.edit.is_none() {
-            if let Some(k) = cur {
-                let pre_c = Color32::from_rgb(0x3b, 0x82, 0xf6);
-                let dep_c = Color32::from_rgb(0xf9, 0x73, 0x16);
-                for p in self.eng.precedents(k) {
-                    if p.sheet == sid {
-                        if let Some((r, c)) = self.eng.wb.pos(p) {
-                            cp.rect_filled(g.cell(r, c), 0.0, pre_c.gamma_multiply(0.10));
-                            cp.rect_stroke(g.cell(r, c).shrink(1.0), 0.0, Stroke::new(1.0, pre_c.gamma_multiply(0.7)), StrokeKind::Inside);
-                        }
+        // trace (only what's on screen: a cell can have thousands of dependents)
+        if let Some(t) = &trace {
+            let pre_c = Color32::from_rgb(0x3b, 0x82, 0xf6);
+            let dep_c = Color32::from_rgb(0xf9, 0x73, 0x16);
+            for (cells, color, edge) in [(&t.pre, pre_c, 0.7), (&t.dep, dep_c, 0.8)] {
+                for (k, at) in cells {
+                    let Some((r, c)) = *at else { continue };
+                    if k.sheet != sid || !rows.contains(&r) || !cols.contains(&c) {
+                        continue;
                     }
-                }
-                for d in self.eng.dependents(k) {
-                    if d.sheet == sid {
-                        if let Some((r, c)) = self.eng.wb.pos(d) {
-                            cp.rect_filled(g.cell(r, c), 0.0, dep_c.gamma_multiply(0.10));
-                            cp.rect_stroke(g.cell(r, c).shrink(1.0), 0.0, Stroke::new(1.0, dep_c.gamma_multiply(0.8)), StrokeKind::Inside);
-                        }
-                    }
+                    cp.rect_filled(g.cell(r, c), 0.0, color.gamma_multiply(0.10));
+                    cp.rect_stroke(g.cell(r, c).shrink(1.0), 0.0, Stroke::new(1.0, color.gamma_multiply(edge)), StrokeKind::Inside);
                 }
             }
         }

@@ -6,6 +6,8 @@ mod preferences;
 
 pub use commands::Command;
 #[cfg(test)]
+mod perf;
+#[cfg(test)]
 mod tests;
 
 use crate::chart_view::{PointHit, YAxis};
@@ -23,7 +25,7 @@ use std::path::PathBuf;
 use wbs_core::a1;
 use wbs_core::engine::{Edit, Engine, ErrKind, Shown};
 use wbs_core::ids::{CellKey, SheetId};
-use wbs_core::model::{classify, Cell, Kind, Sheet};
+use wbs_core::model::{classify, Cell, Kind, Sheet, MAX_INDEX};
 use wbs_core::ops::{self, Clip, Lit, Rect as CRect};
 use wbs_core::parse::BUILTINS;
 use wbs_core::value::{Prov, Value};
@@ -145,6 +147,15 @@ struct GoalDrag {
     solve_ms: f64,
 }
 
+/// The selected cell's precedents and dependents with their positions, for the trace
+/// overlay and the inspector. A cell can have thousands: kept while the graph holds.
+struct TraceSets {
+    key: CellKey,
+    gen: u64,
+    pre: Vec<(CellKey, Option<(usize, usize)>)>,
+    dep: Vec<(CellKey, Option<(usize, usize)>)>,
+}
+
 /// Per-frame grid geometry.
 #[derive(Clone)]
 struct Geo {
@@ -212,9 +223,11 @@ pub struct App {
     dialogs: Box<dyn files::Dialogs>,
     /// `files::fingerprint` of the workbook as last opened/saved.
     saved_fp: u64,
-    /// Cached `is_dirty()` for the title; refreshed on input.
+    /// Cached `is_dirty()` for the title; refreshed after an edit, or when `dirty_stale` says the workbook was changed some other way.
     dirty: bool,
     dirty_stale: bool,
+    /// `eng.revision()` when `dirty` was last refreshed.
+    dirty_rev: u64,
     title: String,
     /// The save-changes prompt is up, for this action.
     confirm: Option<files::Pending>,
@@ -237,6 +250,7 @@ pub struct App {
     goal_live_ms: f64,
     editor_rect: Option<Rect>,
     trace: bool,
+    trace_sets: Option<std::rc::Rc<TraceSets>>,
     tabs: panels::Tabs,
     last_recalc_ms: f64,
     scroll_into_view: bool,
@@ -290,6 +304,7 @@ impl App {
             saved_fp: 0,
             dirty: false,
             dirty_stale: false,
+            dirty_rev: 0,
             title: String::new(),
             confirm: None,
             close_ok: false,
@@ -305,6 +320,7 @@ impl App {
             goal_live_ms: 50.0,
             editor_rect: None,
             trace: true,
+            trace_sets: None,
             tabs: Default::default(),
             last_recalc_ms: 0.0,
             scroll_into_view: false,
@@ -344,9 +360,29 @@ impl App {
     fn sid(&self) -> SheetId {
         self.sheet().id
     }
-    fn key(&mut self, r: usize, c: usize) -> CellKey {
-        let ix = self.sheet_ix;
-        self.eng.wb.sheets[ix].key_grow(r, c)
+    /// Any cell, stored or not: rows past the stored ones are virtual, with ids of their own.
+    fn key(&self, r: usize, c: usize) -> CellKey {
+        self.sheet().key(r, c).expect("selection within MAX_INDEX")
+    }
+    /// Rows and columns the grid lays out at least: the default size, the stored rows and the
+    /// content, and the selection with a margin (the grid adds room to scroll into). None of it is
+    /// in the document, so moving around and scrolling never change it.
+    fn extent(&self) -> (usize, usize) {
+        let s = self.sheet();
+        let (ur, uc) = s.used_extent();
+        let r = [200, s.rows.len(), ur, self.cursor.0.max(self.anchor.0) + 30].into_iter().max().unwrap();
+        let c = [26, s.cols.len(), uc, self.cursor.1.max(self.anchor.1) + 6].into_iter().max().unwrap();
+        (r.min(MAX_INDEX), c.min(MAX_INDEX))
+    }
+    fn trace_sets(&mut self, k: CellKey) -> std::rc::Rc<TraceSets> {
+        let gen = self.eng.graph_generation();
+        if let Some(t) = self.trace_sets.as_ref().filter(|t| t.key == k && t.gen == gen) {
+            return t.clone();
+        }
+        let at = |v: Vec<CellKey>| v.into_iter().map(|c| (c, self.eng.wb.pos(c))).collect();
+        let t = std::rc::Rc::new(TraceSets { key: k, gen, pre: at(self.eng.precedents(k)), dep: at(self.eng.dependents(k)) });
+        self.trace_sets = Some(t.clone());
+        t
     }
     fn sel(&self) -> CRect {
         CRect::span(self.sid(), self.anchor, self.cursor)
@@ -386,7 +422,7 @@ impl App {
         let prev = self.sid();
         let follow = match &e {
             Edit::InsertSheet { sheet, .. } => sheet.id,
-            Edit::RestoreSheet { sheet, .. } | Edit::MoveSheet { sheet, .. } | Edit::RenameSheet { sheet, .. } => *sheet,
+            Edit::RestoreSheet { sheet, .. } | Edit::MoveSheet { sheet, .. } | Edit::SheetPos { sheet, .. } | Edit::RenameSheet { sheet, .. } => *sheet,
             _ => prev,
         };
         let inv = self.eng.apply(e);
@@ -410,12 +446,11 @@ impl App {
     }
 
     fn select(&mut self, r: usize, c: usize, extend: bool) {
+        let (r, c) = (r.min(MAX_INDEX - 1), c.min(MAX_INDEX - 1));
         self.cursor = (r, c);
         if !extend {
             self.anchor = (r, c);
         }
-        let ix = self.sheet_ix;
-        self.eng.wb.sheets[ix].ensure_size(r + 30, c + 6);
     }
 
     fn move_sel(&mut self, dr: i64, dc: i64, extend: bool) {

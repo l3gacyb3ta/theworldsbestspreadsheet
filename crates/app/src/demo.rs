@@ -80,7 +80,7 @@ pub fn workbook() -> Engine {
     let sid = eng.wb.sheets[0].id;
     for (at, text) in CELLS {
         let r = a1::parse_ref(at).unwrap();
-        let k = eng.wb.sheet_mut(sid).unwrap().key_grow(r.row, r.col);
+        let k = eng.wb.sheet(sid).unwrap().key(r.row, r.col).unwrap();
         eng.set_text(k, text);
     }
     for (name, at, input) in [

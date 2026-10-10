@@ -34,6 +34,21 @@ cargo test            # core unit + engine tests, and headless UI tests
 The UI tests drive the real app with synthetic input through `egui_kittest` and
 write rendered snapshots to `target/ui-shots/`.
 
+The app uses mimalloc as its allocator (a C library built with `cc`; recalcs and
+rebuilds of big sheets are ~1.6-1.8x faster than with glibc's malloc).
+`cargo build -p wbs --no-default-features` builds without it.
+
+Benchmarks, for profiling with a real workbook:
+
+```bash
+cargo run --release -p wbs-core --example bench                 # 3,000-cell scrub
+cargo run --release -p wbs-core --example bench_file  -- f.wbs.json [name] [steps]  # load, save, scrub each named input
+cargo run --release -p wbs-core --example bench_edits -- f.wbs.json sheet A1   # retype, insert/delete a row
+cargo run --release -p wbs-core --example bench_open  -- f.wbs.json
+WBS_PERF_FILE=f.wbs.json WBS_PERF_SHEET=sheet WBS_PERF_SCRUB=name \
+  cargo test --release -p wbs perf_frames -- --ignored --nocapture   # UI frame times
+```
+
 ## Cells, in one sentence each
 
 - `=` starts a program. It runs on an empty stack; the cell's value is the one value left.
@@ -64,11 +79,16 @@ is an ordinary, editable `units` sheet; exchange rates are inputs you can scrub.
   filling (the positional delta is re-resolved to ids at the destination). This
   is the only way inserts, deletes, moves and sorts can never rewrite or break
   a reference.
-- **Rows/columns are tombstoned lists** (like a list CRDT): deleting the end row of
-  a range shrinks the range instead of breaking it, and undo revives the ids.
-  A deleted row, column or sheet keeps its cells, hidden, so undo brings them back
-  with any edit made to them since. Every edit and its undo name rows, columns and
-  sheets by id, never by position (groundwork for collaboration, #18).
+- **Row/column order is a position key per id** (fractional indexing, with
+  tombstones): deleting the end row of a range shrinks the range instead of
+  breaking it, and undo revives the ids. A deleted row, column or sheet keeps its
+  cells, hidden, so undo brings them back with any edit made to them since. Every
+  edit and its undo name rows, columns and sheets by id, never by position
+  (groundwork for collaboration, #18; `docs/design/automerge.md` §2.2).
+- **Rows past the stored ones are virtual**, with ids derived from the sheet's seed:
+  a new sheet stores no rows, and scrolling, selecting, references, spills and
+  goal-seek never write to the document. A row is stored only when an edit needs
+  its place written down (an insert in front of it, a delete, a sort).
 - **Sorting** moves rows by id, so single references follow their cells; ranges
   over the sorted block keep covering the same block.
 - **Dimensions are propagated statically** (SPEC §4, `crates/core/src/dims.rs`): an

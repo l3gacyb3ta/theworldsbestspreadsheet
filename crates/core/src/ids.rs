@@ -1,6 +1,7 @@
 //! Stable identifiers. Rows, columns and sheets get random 64-bit ids so that
 //! independent writers (a future Automerge doc) never collide; positions are
-//! only ever derived from the ordered id lists in a `Sheet`.
+//! only ever derived from the position keys in a `Sheet`'s axes. Rows past the
+//! stored ones have deterministic ids (`mix`), so every peer agrees on them.
 
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
@@ -38,12 +39,75 @@ fn seed() -> u64 {
 pub fn fresh_id() -> u64 {
     RNG.with(|r| {
         // splitmix64
-        let mut z = r.get().wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let z = r.get().wrapping_add(0x9E37_79B9_7F4A_7C15);
         r.set(z);
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
+        mix(z)
     })
+}
+
+const M1: u64 = 0xBF58_476D_1CE4_E5B9;
+const M2: u64 = 0x94D0_49BB_1331_11EB;
+
+/// splitmix64's finaliser. It is a bijection, so `unmix` gives the input back: a virtual row's id
+/// (`mix(base + k)`) tells which row `k` it is without anything stored.
+pub fn mix(mut z: u64) -> u64 {
+    z = (z ^ (z >> 30)).wrapping_mul(M1);
+    z = (z ^ (z >> 27)).wrapping_mul(M2);
+    z ^ (z >> 31)
+}
+
+pub fn unmix(mut z: u64) -> u64 {
+    z = unshift(z, 31).wrapping_mul(inverse(M2));
+    z = unshift(z, 27).wrapping_mul(inverse(M1));
+    unshift(z, 30)
+}
+
+/// Undoes `x ^ (x >> s)`.
+fn unshift(y: u64, s: u32) -> u64 {
+    let (mut x, mut t) = (y, y >> s);
+    while t != 0 {
+        x ^= t;
+        t >>= s;
+    }
+    x
+}
+
+/// The inverse of an odd number mod 2^64 (Newton's iteration doubles the correct bits each step).
+const fn inverse(a: u64) -> u64 {
+    let mut x = a;
+    let mut i = 0;
+    while i < 6 {
+        x = x.wrapping_mul(2u64.wrapping_sub(a.wrapping_mul(x)));
+        i += 1;
+    }
+    x
+}
+
+/// Row and column ids, for `model::Axis`. `TAG` keeps a sheet's virtual rows and columns apart.
+pub trait AxisId: Copy + Eq + std::hash::Hash + Ord + std::fmt::Debug {
+    const TAG: u64;
+    fn raw(self) -> u64;
+    fn from_raw(x: u64) -> Self;
+}
+
+impl AxisId for RowId {
+    const TAG: u64 = 0x0072_6f77; // "row"
+    fn raw(self) -> u64 {
+        self.0
+    }
+    fn from_raw(x: u64) -> Self {
+        RowId(x)
+    }
+}
+
+impl AxisId for ColId {
+    const TAG: u64 = 0x0063_6f6c; // "col"
+    fn raw(self) -> u64 {
+        self.0
+    }
+    fn from_raw(x: u64) -> Self {
+        ColId(x)
+    }
 }
 
 #[cfg(test)]
@@ -62,7 +126,7 @@ mod tests {
                 std::thread::spawn(move || {
                     go.wait();
                     let wb = crate::stdlib::default_workbook();
-                    (wb.sheets[0].id, wb.sheets[0].rows.ids()[0], wb.sheets[0].cols.ids()[0])
+                    (wb.sheets[0].id, wb.sheets[0].rows.get(0).unwrap(), wb.sheets[0].cols.get(0).unwrap())
                 })
             })
             .collect();
@@ -75,5 +139,13 @@ mod tests {
             }
         }
         assert_ne!(seed(), seed());
+    }
+
+    #[test]
+    fn unmix_inverts_mix() {
+        for x in [0, 1, 2, 0xdead_beef, u64::MAX, fresh_id(), fresh_id()] {
+            assert_eq!(unmix(mix(x)), x);
+            assert_eq!(mix(unmix(x)), x);
+        }
     }
 }
