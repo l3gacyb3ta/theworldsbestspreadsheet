@@ -164,7 +164,24 @@ fn bool_q() -> Quant {
     Quant::none()
 }
 
-/// Split along the leading axis.
+/// Elements `from..from + n` of `p`'s provenance.
+fn slice_prov(p: &Provs, from: usize, n: usize) -> Provs {
+    match (p, n) {
+        (Provs::None, _) => Provs::None,
+        (_, 1) => Provs::one(p.get(from)),
+        _ => Provs::List((from..from + n).map(|i| p.get(i)).collect()),
+    }
+}
+
+/// `v` without provenance: reduce and scan compute (even a one-row reduce, or a scan's first row).
+fn untraced(mut v: Value) -> Value {
+    if let Value::Num(n) = &mut v {
+        n.prov = Provs::None;
+    }
+    v
+}
+
+/// Split along the leading axis. Each row keeps its elements' provenance.
 fn rows_of(v: &Value) -> R<Vec<Value>> {
     match v {
         Value::Num(n) => {
@@ -175,7 +192,9 @@ fn rows_of(v: &Value) -> R<Vec<Value>> {
             let inner: usize = n.shape[1..].iter().product();
             Ok((0..k)
                 .map(|i| {
-                    Value::Num(Num::with_shape(n.shape[1..].to_vec(), n.data[i * inner..(i + 1) * inner].to_vec(), n.q.clone()))
+                    let mut r = Num::with_shape(n.shape[1..].to_vec(), n.data[i * inner..(i + 1) * inner].to_vec(), n.q.clone());
+                    r.prov = slice_prov(&n.prov, i * inner, inner);
+                    Value::Num(r)
                 })
                 .collect())
         }
@@ -193,12 +212,14 @@ fn rows_of(v: &Value) -> R<Vec<Value>> {
     }
 }
 
-/// Stack values (all the same shape and units) along a new leading axis.
+/// Stack values (all the same shape and units) along a new leading axis, with their elements' provenance.
 fn from_rows(rows: Vec<Value>, what: &str) -> R<Value> {
     let Some(first) = rows.first() else { return Ok(Value::Num(Num::vector(vec![], Quant::none()))) };
     match first {
         Value::Num(f) => {
             let mut data = Vec::with_capacity(rows.len() * f.len());
+            let traced = rows.iter().any(|r| matches!(r, Value::Num(n) if !n.prov.is_none()));
+            let mut prov = Vec::with_capacity(if traced { rows.len() * f.len() } else { 0 });
             for r in &rows {
                 let Value::Num(n) = r else { return Err(format!("{what}: mixed numbers and {}", r.type_name())) };
                 if n.shape != f.shape {
@@ -208,6 +229,9 @@ fn from_rows(rows: Vec<Value>, what: &str) -> R<Value> {
                     return Err(format!("{what}: rows have different units {} and {}", f.q.dim, n.q.dim));
                 }
                 data.extend_from_slice(&n.data);
+                if traced {
+                    prov.extend((0..n.len()).map(|i| n.prov.get(i)));
+                }
             }
             let mut shape = vec![rows.len()];
             shape.extend_from_slice(&f.shape);
@@ -215,7 +239,11 @@ fn from_rows(rows: Vec<Value>, what: &str) -> R<Value> {
                 Value::Num(n) => n.q.clone(),
                 _ => unreachable!(),
             };
-            Ok(Value::Num(Num::with_shape(shape, data, q)))
+            let mut n = Num::with_shape(shape, data, q);
+            if traced {
+                n.prov = Provs::List(prov.into());
+            }
+            Ok(Value::Num(n))
         }
         Value::Text(f) => {
             let mut data = Vec::new();
@@ -298,6 +326,7 @@ impl<'e> Interp<'e> {
     }
 
     fn reduce(&mut self, c: &Callee, v: Value, span: &Range<usize>) -> Result<Value, Step> {
+        let v = untraced(v);
         let rows = rows_of(&v)?;
         if rows.is_empty() {
             if let (Callee::Builtin(Builtin::Add), Value::Num(n)) = (c, &v) {
@@ -331,6 +360,7 @@ impl<'e> Interp<'e> {
     }
 
     fn scan(&mut self, c: &Callee, v: Value, span: &Range<usize>) -> Result<Value, Step> {
+        let v = untraced(v);
         let rows = rows_of(&v)?;
         let mut out = Vec::with_capacity(rows.len());
         let mut it = rows.into_iter();
@@ -390,8 +420,8 @@ impl<'e> Interp<'e> {
             (Some(delta), Some(_)) => n.q.absolute = Some(delta.clone()),
             _ => {}
         }
+        // only the display unit changes, so each element still comes from where it did
         n.q.disp = r.disp;
-        n.prov = Provs::None;
         Ok(n)
     }
 
@@ -765,11 +795,15 @@ fn transpose(v: Value) -> R<Value> {
                     d.push(n.data[i * c + j]);
                 }
             }
-            Ok(Value::Num(Num::with_shape(vec![c, r], d, n.q.clone())))
+            let mut t = Num::with_shape(vec![c, r], d, n.q.clone());
+            if !n.prov.is_none() {
+                t.prov = Provs::List((0..r * c).map(|e| n.prov.get((e % r) * c + e / r)).collect());
+            }
+            Ok(Value::Num(t))
         }
         Value::Num(n) if n.rank() == 1 => {
             let k = n.len();
-            Ok(Value::Num(Num { shape: vec![1, k].into(), data: n.data.clone(), q: n.q.clone(), prov: Provs::None }))
+            Ok(Value::Num(Num { shape: vec![1, k].into(), data: n.data.clone(), q: n.q.clone(), prov: n.prov.clone() }))
         }
         Value::Text(t) if t.shape.len() == 2 => {
             let (r, c) = (t.shape[0], t.shape[1]);
