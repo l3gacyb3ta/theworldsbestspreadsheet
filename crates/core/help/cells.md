@@ -15,7 +15,7 @@ A cell's first characters decide what it is. There's no guessing beyond this tab
 
 A number cell is a literal: `120000 [USD]`, `4.0 [%]`, `24`. These are the cells you scrub with Alt-drag, list as inputs, and edit by dragging chart points. Keep the decimals you want to step by: scrubbing `4.0` moves in steps of 0.1, `4.00` in steps of 0.01.
 
-A number wider than its column runs into empty cells on its left. If there's no room it's rounded to fit: fewer decimals first, then scientific notation (`1.2e-17`). Only if even that doesn't fit does it show `###`, never a cut-off number. Hover it, or select it and look in the inspector, to see the whole value, and double-click the column's header border to widen it.
+A number wider than its column runs into empty cells on its left. If there's no room it's rounded to fit: fewer decimals first, then scientific notation (`1.23e8`), but never to fewer than 3 significant digits, so a shortened number stays close to the real one. If even that doesn't fit it shows `###`, never a cut-off number. Hover it, or select it and look in the inspector, to see the whole value, and double-click the column's header border to widen it.
 
 ## Programs
 

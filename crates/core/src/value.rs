@@ -412,9 +412,10 @@ pub fn fmt_num(x: f64) -> String {
 }
 
 /// `x` the way [`fmt_num`] writes it, then shorter and shorter, as a spreadsheet does when a
-/// number doesn't fit its column: drop decimals while a significant digit is left, then
-/// scientific notation with fewer and fewer mantissa digits. The caller shows the first that
-/// fits, and `###` only when even the last (`1e-17`) doesn't.
+/// number doesn't fit its column: drop decimals, then scientific notation with fewer mantissa
+/// digits — but never below 3 significant digits, so a shortened number stays close to the real
+/// one (`1234.5678` can become `1235`, never `1e3`). The caller shows the first that fits, and
+/// `###` when none does.
 pub fn fmt_num_shorter(x: f64) -> Vec<String> {
     let full = fmt_num(x);
     let mut out = vec![full.clone()];
@@ -430,15 +431,16 @@ pub fn fmt_num_shorter(x: f64) -> Vec<String> {
     };
     let ax = x.abs();
     if !full.contains('e') {
-        // the most significant digit sits at 10^lead; keep it
+        // the most significant digit sits at 10^lead; keep it and the two after it
         let lead = ax.log10().floor() as i32;
         let decimals = full.split_once('.').map_or(0, |(_, f)| f.len()) as i32;
-        let min_dec = (-lead).max(0);
+        let min_dec = (2 - lead).max(0);
         for d in (min_dec..decimals).rev() {
             push(trim_zeros(format!("{:.*}", d as usize, x)));
         }
     }
-    for m in (0..9).rev() {
+    // a mantissa with 2 decimals is 3 significant digits
+    for m in (2..9).rev() {
         let s = format!("{:.*e}", m, x);
         push(match s.split_once('e') {
             Some((mant, e)) => format!("{}e{e}", if mant.contains('.') { mant.trim_end_matches('0').trim_end_matches('.') } else { mant }),
@@ -538,19 +540,18 @@ mod tests {
         assert_eq!(fmt_num_shorter(5.0), vec!["5"]);
         let v = fmt_num_shorter(1234.5678);
         assert_eq!(&v[..5], ["1234.5678", "1234.568", "1234.57", "1234.6", "1235"]);
-        assert_eq!(v.last().unwrap(), "1e3");
-        // never rounds to a number with no significant digits left: goes scientific instead
+        // never fewer than 3 significant digits: 1234.5678 stops at 1235, not 1e3
+        assert_eq!(v.last().unwrap(), "1235");
         let v = fmt_num_shorter(0.000123456);
-        assert!(v.contains(&"0.0001".to_string()) && !v.contains(&"0".to_string()), "{v:?}");
-        assert_eq!(v.last().unwrap(), "1e-4");
-        assert_eq!(fmt_num_shorter(1.2e-17).last().unwrap(), "1e-17");
+        assert_eq!(v, ["0.000123456", "0.00012346", "0.0001235", "0.000123", "1.23e-4"]);
+        assert_eq!(fmt_num_shorter(1.2e-17), ["1.2e-17"]);
         // each step is shorter than the last
         for x in [1.0 / 3.0, -98765.4321, 6.02214076e23, 1.5e-7, 123456789.0] {
             let v = fmt_num_shorter(x);
             let len = |s: &str| group_thousands(s).chars().count();
             assert!(v.windows(2).all(|w| len(&w[0]) > len(&w[1])), "{v:?}");
         }
-        assert_eq!(fmt_num_shorter(123456789.0), vec!["123456789", "1.234568e8", "1.23457e8", "1.2346e8", "1.235e8", "1.23e8", "1.2e8", "1e8"]);
+        assert_eq!(fmt_num_shorter(123456789.0), vec!["123456789", "1.234568e8", "1.23457e8", "1.2346e8", "1.235e8", "1.23e8"]);
     }
     #[test]
     fn bcast() {
