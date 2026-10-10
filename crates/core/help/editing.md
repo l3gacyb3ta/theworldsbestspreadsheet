@@ -24,11 +24,19 @@ Drag the small square at the bottom-right of the selection.
 - Anything else repeats the pattern.
 - Programs are copied with relative references moved, like copy and paste.
 
-⌘D fills the selection down from its top row.
+⌘D fills the selection down from its top row. Double-click the square to fill down as far as the column beside the selection goes.
 
 ## Extending a formula
 
-Type a program next to a filled column and the sheet offers to extend it down to the end of that column. Click the offer or press ⌘E.
+Type a program next to a filled column and the sheet offers to extend it down to the end of that column. Click the offer or press ⌘E. A spill counts as filled, so a recurrence (each row computed from the one above) doesn't need dragging out by hand: spill the steps beside it, then double-click the fill square.
+
+| cell | text |
+|---|---|
+| A1 | `=1000 range 0.01 [s] *`, the time steps, spilling 1000 rows |
+| B1 | `1 [m]`, the starting value |
+| B2 | `=B1 0.99 *`, the next value from the one above |
+
+Select B2 and double-click its fill square: B3 to B1000 follow A.
 
 ## Copy and paste
 

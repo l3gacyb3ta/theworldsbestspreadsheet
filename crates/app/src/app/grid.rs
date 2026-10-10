@@ -2,7 +2,7 @@
 //! fill-drag, resize, scrub, chart point drags) and painting.
 
 use super::*;
-use crate::chart_view;
+use crate::chart_view::{self, Tip};
 use std::collections::HashSet;
 use wbs_core::solve::Goal;
 
@@ -32,10 +32,12 @@ impl App {
         Geo { cells, col_x, row_y, scroll: self.scroll }
     }
 
-    fn cell_display(&self, k: CellKey, pal: &Pal) -> Option<(String, Color32, bool)> {
+    /// What a cell shows, its colour, whether it's right-aligned, and (numbers only) shorter
+    /// ways to write it for when it doesn't fit its column, longest first.
+    fn cell_display(&self, k: CellKey, pal: &Pal) -> Option<(String, Color32, bool, Vec<String>)> {
         match self.eng.shown(k) {
             Shown::Empty => None,
-            Shown::Error(e) => Some((e.short().to_string(), pal.err, false)),
+            Shown::Error(e) => Some((e.short().to_string(), pal.err, false, vec![])),
             Shown::Value { value, dr, dc, anchor } => {
                 let spilled = anchor != k;
                 let (color, right) = match value {
@@ -48,8 +50,15 @@ impl App {
                     Value::Unit(_) | Value::Dim(_) | Value::Word(_) => self.eng.wb.cell_text(k),
                     _ => value.display_at(dr, dc),
                 };
+                let shorter = match value {
+                    Value::Num(n) if n.rank() <= 2 && !n.data.is_empty() => {
+                        let i = if n.rank() == 2 { dr * n.shape[1] + dc } else { dr };
+                        n.fmt_elem_shorter(i).into_iter().skip(1).collect()
+                    }
+                    _ => vec![],
+                };
                 self.fonts.note(&text);
-                Some((text, color, right))
+                Some((text, color, right, shorter))
             }
         }
     }
@@ -123,6 +132,7 @@ impl App {
             } else if in_cells {
                 if let Some((hit, axis)) = self.chart_hit(pos) {
                     let label = self.hit_label(hit, axis);
+                    self.fonts.note(&label);
                     // scatter and path points move along each axis whose value comes straight from a number cell
                     let xk = match hit.xprov {
                         Prov::Literal(k) if hit.prov != Prov::Literal(k) => Some(k),
@@ -135,38 +145,64 @@ impl App {
                     match (hit.prov, xk) {
                         (Prov::Literal(k), Some(xk)) => {
                             ctx.set_cursor_icon(CursorIcon::Move);
-                            chart_view::tooltip(ctx, pos, &format!("{label}\ndrag to edit {} (x) and {} (y)", self.label(xk), self.label(k)));
+                            chart_view::tooltip_lines(
+                                ctx,
+                                pos,
+                                &[Tip::Value(label.clone()), Tip::Action(format!("drag to edit {} (x) and {} (y)", self.label(xk), self.label(k)))],
+                            );
                         }
                         (p, Some(xk)) => {
                             ctx.set_cursor_icon(CursorIcon::ResizeHorizontal);
-                            chart_view::tooltip(ctx, pos, &format!("{label}\ndrag sideways to edit {} — y is {}, so only x moves", self.label(xk), why(p)));
+                            chart_view::tooltip_lines(
+                                ctx,
+                                pos,
+                                &[
+                                    Tip::Value(label.clone()),
+                                    Tip::Action(format!("drag sideways to edit {}", self.label(xk))),
+                                    Tip::Note(format!("y is {}, so only x moves", why(p))),
+                                ],
+                            );
                         }
                         (Prov::Literal(k), None) if hit.two_d && hit.xprov != Prov::Literal(k) => {
                             ctx.set_cursor_icon(CursorIcon::ResizeVertical);
-                            chart_view::tooltip(ctx, pos, &format!("{label}\ndrag up and down to edit {} — x is {}, so only y moves", self.label(k), why(hit.xprov)));
+                            chart_view::tooltip_lines(
+                                ctx,
+                                pos,
+                                &[
+                                    Tip::Value(label.clone()),
+                                    Tip::Action(format!("drag up and down to edit {}", self.label(k))),
+                                    Tip::Note(format!("x is {}, so only y moves", why(hit.xprov))),
+                                ],
+                            );
                         }
                         (Prov::Literal(k), None) => {
                             ctx.set_cursor_icon(CursorIcon::ResizeVertical);
-                            chart_view::tooltip(ctx, pos, &format!("{label}\ndrag to edit {}", self.label(k)));
+                            chart_view::tooltip_lines(ctx, pos, &[Tip::Value(label.clone()), Tip::Action(format!("drag to edit {}", self.label(k)))]);
                         }
                         (Prov::Derived(k, i), None) => {
                             let elem = self.eng.element_cell(k, i);
                             let from = if elem == k { format!("computed in {}", self.label(k)) } else { format!("{}, spilled from {}", self.label(elem), self.label(k)) };
-                            let how = match self.goal_choice(k) {
-                                None => "no number cells upstream — nothing to goal-seek".to_string(),
+                            let mut tip = vec![Tip::Value(label.clone())];
+                            match self.goal_choice(k) {
+                                None => tip.push(Tip::Note("not draggable: no number cells upstream to goal-seek".to_string())),
                                 Some((pick, cands)) => {
                                     ctx.set_cursor_icon(CursorIcon::ResizeVertical);
+                                    tip.push(Tip::Action(format!("drag to goal-seek {}", self.input_name(pick))));
                                     let at = cands.iter().position(|c| *c == pick).unwrap_or(0);
                                     let others: Vec<String> = (1..cands.len()).take(4).map(|j| self.input_name(cands[(at + j) % cands.len()])).collect();
-                                    let switch = if others.is_empty() { String::new() } else { format!("\nclick to switch to {}", others.join(", then ")) };
                                     // a goal-seek solves for one input, so it never moves x too
-                                    let only = if hit.two_d { format!(" — x is {} too, so only y moves", why(hit.xprov)) } else { String::new() };
-                                    format!("drag to goal-seek {}{only}{switch}", self.input_name(pick))
+                                    if hit.two_d {
+                                        tip.push(Tip::Note(format!("x is {} too, so only y moves", why(hit.xprov))));
+                                    }
+                                    if !others.is_empty() {
+                                        tip.push(Tip::Note(format!("click to switch to {}", others.join(", "))));
+                                    }
                                 }
-                            };
-                            chart_view::tooltip(ctx, pos, &format!("{label}\n{from}\n{how}"));
+                            }
+                            tip.push(Tip::Note(from));
+                            chart_view::tooltip_lines(ctx, pos, &tip);
                         }
-                        (Prov::None, None) => chart_view::tooltip(ctx, pos, &format!("{label}\ncomputed by the chart's own program — not draggable")),
+                        (Prov::None, None) => chart_view::tooltip_lines(ctx, pos, &[Tip::Value(label), Tip::Note("computed by the chart's own program: not draggable".to_string())]),
                     }
                 } else if self.fill_handle(g).contains(pos) && self.edit.is_none() {
                     ctx.set_cursor_icon(CursorIcon::Crosshair);
@@ -394,13 +430,20 @@ impl App {
         let unit = if g.axis.disp.is_none() { String::new() } else { format!(" {}", g.axis.disp) };
         let input = self.input_name(g.input);
         let head = format!("goal: {} = {shown}{unit}", self.label(self.eng.element_cell(g.target, g.index)));
-        let body = match &g.outcome {
-            _ if !g.live => format!("release to goal-seek {input}\n(a solve takes {:.0} ms here — too slow to follow the pointer)", g.solve_ms),
-            Some(Ok(text)) => format!("solved: {input} = {text}"),
-            Some(Err(e)) => format!("no answer, {input} stays as it was:\n{e}"),
-            None => format!("solving {input}"),
-        };
-        chart_view::tooltip(ctx, g.pointer, &format!("{head}\n{body}"));
+        let mut tip = vec![Tip::Value(head)];
+        match &g.outcome {
+            _ if !g.live => {
+                tip.push(Tip::Action(format!("release to goal-seek {input}")));
+                tip.push(Tip::Note(format!("a solve takes {:.0} ms, too slow to follow the pointer", g.solve_ms)));
+            }
+            Some(Ok(text)) => tip.push(Tip::Action(format!("{input} = {text}"))),
+            Some(Err(e)) => {
+                tip.push(Tip::Action(format!("no answer: {input} stays as it was")));
+                tip.push(Tip::Note(e.to_string()));
+            }
+            None => tip.push(Tip::Note(format!("solving {input}…"))),
+        }
+        chart_view::tooltip_lines(ctx, g.pointer, &tip);
     }
 
     /// Why the last goal-seek failed, next to its point, until the next press.
@@ -534,9 +577,18 @@ impl App {
                 return;
             }
         }
-        // 5. fill handle
+        // 5. fill handle: drag to fill; double-click fills down as far as the column beside goes
         if self.edit.is_none() && self.fill_handle(g).contains(pos) {
             let s = self.sel();
+            if dbl {
+                if let Some(dst) = ops::fill_down_extent(&self.eng, s) {
+                    let e = ops::fill(&mut self.eng, s, dst);
+                    self.exec(e);
+                    self.anchor = (dst.r0, dst.c0);
+                    self.cursor = (dst.r1, dst.c1);
+                }
+                return;
+            }
             self.drag = Drag::Fill { src: s, dst: s };
             return;
         }
@@ -734,7 +786,7 @@ impl App {
         let mut texts = Vec::new();
         for r in 0..s.used_extent().0 {
             if let Some(k) = s.key(r, c) {
-                if let Some((t, _, _)) = self.cell_display(k, &pal) {
+                if let Some((t, ..)) = self.cell_display(k, &pal) {
                     texts.push(t);
                 }
             }
@@ -804,9 +856,10 @@ impl App {
                         blockers.push(b);
                     }
                 }
-                if let Some((mut text, color, right)) = self.cell_display(k, pal) {
+                if let Some((mut text, color, right, shorter)) = self.cell_display(k, pal) {
                     let mut clip = rect;
-                    let needed = ctx.fonts_mut(|f| f.layout_no_wrap(text.clone(), font.clone(), color).size().x) + 10.0;
+                    let width = |t: &str| ctx.fonts_mut(|f| f.layout_no_wrap(t.to_string(), font.clone(), color).size().x) + 10.0;
+                    let needed = width(&text);
                     if !right {
                         // text overflows into empty cells to its right
                         let mut c2 = c + 1;
@@ -827,11 +880,17 @@ impl App {
                             clip.min.x = g.x(c2);
                         }
                         if clip.width() < needed {
+                            // still too wide: fewer decimals, then scientific, before giving up
+                            let full = text.clone();
+                            if let Some(t) = shorter.into_iter().find(|t| width(t) <= rect.width()) {
+                                text = t;
+                            } else {
+                                text = "###".to_string();
+                            }
                             clip = rect;
                             if hover.is_some_and(|p| rect.contains(p)) {
-                                too_wide = Some(text.clone());
+                                too_wide = Some(full);
                             }
-                            text = "###".to_string();
                         } else if clip.min.x < rect.min.x {
                             let cover = Rect::from_min_max(Pos2::new(clip.left(), rect.top()), Pos2::new(rect.left(), rect.bottom() - 1.0));
                             cp.rect_filled(cover, 0.0, pal.bg);

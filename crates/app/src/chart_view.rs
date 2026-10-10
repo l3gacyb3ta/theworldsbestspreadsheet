@@ -308,10 +308,36 @@ pub fn draw(p: &Painter, rect: Rect, chart: &Chart, dark: bool, fixed: Option<((
     (yaxis, hits)
 }
 
+/// A line of a [`tooltip_lines`] tooltip; the kind sets how loud it is.
+pub enum Tip {
+    /// The data under the pointer: largest and brightest, read first.
+    Value(String),
+    /// What you can do here: the accent colour.
+    Action(String),
+    /// Where the data came from, or why you can't act on it: small and dim.
+    Note(String),
+}
+
+/// A plain tooltip: one line style, for a single fact (like a number too wide for its cell).
 pub fn tooltip(ctx: &egui::Context, pos: Pos2, text: &str) {
+    tooltip_lines(ctx, pos, &[Tip::Note(text.to_string())]);
+}
+
+/// A tooltip that ranks its lines: the value first and loudest, then the actions, then notes.
+pub fn tooltip_lines(ctx: &egui::Context, pos: Pos2, lines: &[Tip]) {
+    use egui::text::{LayoutJob, TextFormat};
     let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("wbs_tip")));
-    let font = FontId::proportional(12.0);
-    let galley = p.layout(text.to_string(), font, Color32::WHITE, 320.0);
+    let mut job = LayoutJob { wrap: egui::text::TextWrapping { max_width: 320.0, ..Default::default() }, ..Default::default() };
+    for (i, l) in lines.iter().enumerate() {
+        let (text, format) = match l {
+            Tip::Value(t) => (t, TextFormat::simple(FontId::proportional(13.5), Color32::WHITE)),
+            Tip::Action(t) => (t, TextFormat::simple(FontId::proportional(12.0), Color32::from_rgb(0x7d, 0xd3, 0xfc))),
+            Tip::Note(t) => (t, TextFormat::simple(FontId::proportional(11.0), Color32::from_gray(165))),
+        };
+        let sep = if i == 0 { "" } else { "\n" };
+        job.append(&format!("{sep}{text}"), 0.0, format);
+    }
+    let galley = p.layout_job(job);
     let r = Rect::from_min_size(pos + Vec2::new(14.0, 14.0), galley.size() + Vec2::splat(12.0));
     p.rect_filled(r, 5.0, Color32::from_rgba_unmultiplied(20, 22, 28, 235));
     p.galley(r.min + Vec2::splat(6.0), galley, Color32::WHITE);

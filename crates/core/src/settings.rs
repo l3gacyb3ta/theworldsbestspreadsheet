@@ -68,7 +68,9 @@ pub struct Setting {
     pub scope: Scope,
     pub section: &'static str,
     pub label: &'static str,
-    /// Mini-markdown, shown under the setting and on the help page.
+    /// One short line under the setting in the settings window.
+    pub summary: &'static str,
+    /// Mini-markdown: the full story, on the help page and when hovering the setting.
     pub help: &'static str,
     pub kind: Kind,
     pub default: Def,
@@ -83,6 +85,7 @@ pub const AUTOSAVE_ENABLED: &Setting = &Setting {
     scope: Scope::App,
     section: "Autosave",
     label: "Autosave",
+    summary: "Save workbooks that already have a file a while after a change.",
     help: "When on, a workbook that already has a file is saved to that file a set time after its first unsaved change. \
            An untitled workbook is never autosaved (nothing asks where to save it), and quitting still asks about changes made since. \
            The status bar shows when autosave is on and when it last saved.",
@@ -96,6 +99,7 @@ pub const AUTOSAVE_INTERVAL: &Setting = &Setting {
     scope: Scope::App,
     section: "Autosave",
     label: "Autosave after",
+    summary: "Delay after the first unsaved change.",
     help: "How long after the first unsaved change autosave writes the file. It waits while you're typing in a cell or dragging.",
     kind: Kind::Int { min: 5, max: 3600, unit: "seconds" },
     default: Def::Int(60),
@@ -107,6 +111,7 @@ pub const AUTOSAVE_WORKBOOK: &Setting = &Setting {
     scope: Scope::Workbook,
     section: "Autosave",
     label: "Autosave this workbook",
+    summary: "Override the app's Autosave for this workbook.",
     help: "Overrides the app's **Autosave** for this workbook only, for example to never autosave a template. Saved in the workbook file.",
     kind: Kind::Choice(&[("app", "as the app setting says"), ("always", "always"), ("never", "never")]),
     default: Def::Text("app"),
@@ -118,6 +123,7 @@ pub const TRACE_AT_START: &Setting = &Setting {
     scope: Scope::App,
     section: "View",
     label: "Trace on at start",
+    summary: "Highlight precedents and dependents when the app starts.",
     help: "Whether **Trace** (highlighting the selected cell's precedents and dependents) is on when the app starts. \
            Changing it here also switches Trace now; the toolbar button switches it for this session only.",
     kind: Kind::Bool,
@@ -130,6 +136,7 @@ pub const GOAL_SEEK_LIVE_MS: &Setting = &Setting {
     scope: Scope::App,
     section: "Charts",
     label: "Live goal-seek limit",
+    summary: "Slower solves wait until you release the point.",
     help: "Dragging a computed chart point goal-seeks an input on every frame. If one solve takes longer than this, \
            the drag stops following the pointer and solves once when you let go. Raise it on a fast machine, lower it if dragging stutters.",
     kind: Kind::Int { min: 1, max: 5000, unit: "ms" },
@@ -142,6 +149,7 @@ pub const DISPLAY_NAME: &Setting = &Setting {
     scope: Scope::App,
     section: "Collaboration",
     label: "Your name",
+    summary: "Shown next to your selection in shared workbooks.",
     help: "The name other people see next to your selection when you share a workbook. It's self-declared: there are no accounts, \
            so anyone can type any name. Empty means you show as \"Anonymous\".",
     kind: Kind::Text { check: check_display_name },
@@ -154,6 +162,7 @@ pub const COLOUR: &Setting = &Setting {
     scope: Scope::App,
     section: "Collaboration",
     label: "Your colour",
+    summary: "Your selection outline in shared workbooks.",
     help: "The colour of your selection outline and name tag in other people's windows when you share a workbook.",
     kind: Kind::Colour,
     default: Def::Colour([0x0e, 0xa5, 0x72]),
@@ -165,6 +174,7 @@ pub const SYNC_SERVER: &Setting = &Setting {
     scope: Scope::App,
     section: "Collaboration",
     label: "Sync server",
+    summary: "Where shared workbooks sync. Its operator can read them.",
     help: "The server shared workbooks sync through: a `ws://` or `wss://` address. The default is the public Automerge server, \
            which needs no setup. **Its operator can read every workbook shared through it**: the server stores documents unencrypted. \
            For anything private, run your own server and put its address here.",
