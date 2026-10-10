@@ -679,7 +679,7 @@ impl<'e> Interp<'e> {
                 st.push(from_rows(vec![x, y], name)?);
             }
             Pi => st.push(Value::Num(Num::plain(std::f64::consts::PI))),
-            Line | Scatter | Bar => {
+            Line | Scatter | Path | Bar => {
                 let ys = pop_num(st, name)?;
                 let xs = pop(st, name)?;
                 if ys.rank() != 1 {
@@ -697,6 +697,7 @@ impl<'e> Interp<'e> {
                 let mark = match b {
                     Line => Mark::Line,
                     Scatter => Mark::Scatter,
+                    Path => Mark::Path,
                     _ => Mark::Bar,
                 };
                 st.push(Value::Chart(Arc::new(Chart::single(crate::chart::Layer { mark, xs, ys }))));

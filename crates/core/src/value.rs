@@ -306,6 +306,7 @@ impl Value {
                         let m = match l.mark {
                             crate::chart::Mark::Line => "line",
                             crate::chart::Mark::Scatter => "scatter",
+                            crate::chart::Mark::Path => "path",
                             crate::chart::Mark::Bar => "bar",
                         };
                         format!("{m} ({} points)", l.ys.len())

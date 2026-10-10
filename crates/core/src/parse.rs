@@ -14,7 +14,7 @@ pub enum Builtin {
     Add, Sub, Mul, Div, Pow, Neg, Abs, Sqrt, Exp, Log, Log10, Log2, Sin, Cos, Tan,
     Floor, Ceil, Round, Min, Max, Dup, Drop, Swap, Over, Rot, Len, Range, If,
     Lt, Gt, Le, Ge, Eq, Ne, Not, Sum, Mean, Rev, Join, First, Last, Pick, Transpose,
-    Couple, Pi, Line, Scatter, Bar, Layer, Title, XLabel, YLabel, Size,
+    Couple, Pi, Line, Scatter, Path, Bar, Layer, Title, XLabel, YLabel, Size,
 }
 
 pub const BUILTINS: &[(&str, Builtin, &str)] = {
@@ -66,6 +66,7 @@ pub const BUILTINS: &[(&str, Builtin, &str)] = {
         ("pi", Pi, " → π"),
         ("line", Line, "xs ys → line chart"),
         ("scatter", Scatter, "xs ys → scatter chart"),
+        ("path", Path, "xs ys → points joined in order"),
         ("bar", Bar, "cats vals → bar chart"),
         ("layer", Layer, "chart chart → combined chart"),
         ("title", Title, "chart \"t\" → chart with title"),
