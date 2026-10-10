@@ -129,7 +129,7 @@ impl App {
                         _ => None,
                     };
                     let why = |p: Prov| match p {
-                        Prov::Derived(k, _) => format!("computed in {}", self.label(k)),
+                        Prov::Derived(k, i) => format!("computed in {}", self.label(self.eng.element_cell(k, i))),
                         _ => "computed by the chart's own program".to_string(),
                     };
                     match (hit.prov, xk) {

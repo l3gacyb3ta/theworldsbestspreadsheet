@@ -123,7 +123,7 @@ These are the things that make Excel good and are non-negotiable:
 ## 7. charts
 
 - A chart is a **value**: a program returns a chart, and it spills into a rectangular region. It lives in the dependency graph like any other cell.
-- Charts are built by composing words, not via a wizard: `xs ys line`, `xs ys scatter`, `cats vals bar`, plus composition words for layering, axes, labels. Axes use the values' units automatically.
+- Charts are built by composing words, not via a wizard: `xs ys line`, `xs ys scatter`, `xs ys path` (points joined in the order given), `cats vals bar`, plus composition words for layering, axes, labels. Axes use the values' units automatically.
 - **Bidirectional editing, v0 scope**: dragging a point that is bound directly to a literal input cell writes that cell. Points backed by derived values are not draggable in v0 but show, on hover, which input they would solve for.
 - **Later**: dragging a derived point picks one upstream input and goal-seeks it with a 1-D root finder ("what growth rate makes this hit 1M").
 
