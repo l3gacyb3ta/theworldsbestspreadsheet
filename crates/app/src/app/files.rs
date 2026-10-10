@@ -66,8 +66,8 @@ pub enum Pending {
 
 /// A hash of everything the user would call the document: sheet names and
 /// order, cell sources by position, sizes and names. Unlike comparing the
-/// saved JSON, it ignores the sheet growing as you scroll and hash-map order,
-/// so undoing back to the saved state counts as clean again.
+/// saved JSON, it ignores hash-map order, hidden content and which rows are
+/// stored, so undoing back to the saved state counts as clean again.
 pub(super) fn fingerprint(wb: &Workbook) -> u64 {
     fn one(x: impl Hash) -> u64 {
         let mut h = DefaultHasher::new();

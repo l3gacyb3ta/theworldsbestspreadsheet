@@ -15,7 +15,7 @@ fn sid(e: &Engine, name: &str) -> SheetId {
 
 fn key(e: &mut Engine, sheet: SheetId, r: &str) -> CellKey {
     let a = a1::parse_ref(r).unwrap();
-    e.wb.sheet_mut(sheet).unwrap().key_grow(a.row, a.col)
+    e.wb.sheet(sheet).unwrap().key(a.row, a.col).unwrap()
 }
 
 fn set(e: &mut Engine, sheet: SheetId, r: &str, text: &str) {
@@ -133,9 +133,9 @@ fn ops() -> Vec<(&'static str, Build)> {
 }
 
 /// Unrelated edits elsewhere that shift positions under the op, and the ops they aren't unrelated
-/// to: a sheet's place is "after its neighbour", so an edit placed next to the sheet the op moves,
-/// or one that moves or deletes that sheet or the neighbour an undo is anchored on, is a real
-/// conflict, not an unrelated edit. PR 2's position keys make those follow the old place instead.
+/// to. Undo puts a sheet back at its old tab key, so it no longer depends on a neighbour; but a new
+/// or moved sheet is placed "after" a sheet, so an edit placed next to the sheet the op moves, or
+/// one that moves or deletes the op's own sheet, is a real conflict, not an unrelated edit.
 fn others() -> Vec<(&'static str, Build, &'static [&'static str])> {
     vec![
         ("insert a row at the top", |e| e.insert_rows_edit(sid(e, "Sheet1"), 0, 1), &[]),
@@ -146,7 +146,7 @@ fn others() -> Vec<(&'static str, Build, &'static [&'static str])> {
         // after units, which "move sheet" moves
         ("add a sheet at the end", |e| e.add_sheet_edit(3), &["move sheet"]),
         ("move data last", |e| e.move_sheet_edit(sid(e, "data"), 2), &["delete sheet", "move sheet"]),
-        ("delete units", |e| e.delete_sheet_edit(sid(e, "units")).unwrap(), &["move sheet"]),
+        ("delete units", |e| e.delete_sheet_edit(sid(e, "units")).unwrap(), &[]),
     ]
 }
 

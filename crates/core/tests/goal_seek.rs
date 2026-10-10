@@ -15,7 +15,7 @@ fn key(e: &Engine, r: &str) -> CellKey {
 
 fn set(e: &mut Engine, r: &str, text: &str) {
     let a = a1::parse_ref(r).unwrap();
-    let k = e.wb.sheets[0].key_grow(a.row, a.col);
+    let k = e.wb.sheets[0].key(a.row, a.col).unwrap();
     e.set_text(k, text);
 }
 
@@ -27,8 +27,9 @@ fn show(e: &Engine, r: &str) -> String {
     }
 }
 
-/// Every cell's text and what it shows, plus the sheet sizes: what "unchanged" means.
-fn snapshot(e: &Engine) -> (Vec<String>, usize, usize) {
+/// Every cell's text and what it shows, the stored rows and columns, and the whole saved document:
+/// what "unchanged" means. (Trials whose spills reach past the stored rows write nothing.)
+fn snapshot(e: &Engine) -> (Vec<String>, usize, usize, String) {
     let s = &e.wb.sheets[0];
     let mut out = Vec::new();
     for r in 0..60 {
@@ -38,13 +39,12 @@ fn snapshot(e: &Engine) -> (Vec<String>, usize, usize) {
             out.push(format!("{at}: {} = {}", e.wb.cell_text(k), show(e, &at)));
         }
     }
-    (out, s.rows.len(), s.cols.len())
+    (out, s.rows.len(), s.cols.len(), serde_json::to_string(&e.wb).unwrap())
 }
 
 /// The demo's growth model: monthly revenue for `months` months.
 fn model() -> Engine {
     let mut e = Engine::new(default_workbook());
-    e.wb.sheets[0].ensure_size(60, 8);
     for (at, text) in [
         ("B3", "120000 [USD]"),
         ("B4", "4.0 [%]"),
@@ -120,7 +120,7 @@ fn failures_leave_the_document_alone_and_say_why() {
     assert_eq!(err, "out of reach: B10 stays at 120,000 USD for growth from -4,092 % to 4,100 %");
     assert_eq!(snapshot(&e), before);
     // months only changes how many there are; fewer than 12 and month 12 is gone. Trial values
-    // make the spill grow the sheet — that's put back too.
+    // spill far past the stored rows, into virtual ones: nothing is written.
     let err = e.goal_seek(&Goal { index: 11, input: key(&e, "B5"), ..goal.clone() }).unwrap_err();
     assert!(err.starts_with("out of reach: B21 stays at 184,734.49 USD for months from 12 to 24,600 "), "{err}");
     assert!(err.ends_with("(at months = 0 it's an error: B10 has only 0 values)"), "{err}");

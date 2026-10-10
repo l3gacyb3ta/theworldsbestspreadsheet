@@ -64,11 +64,16 @@ is an ordinary, editable `units` sheet; exchange rates are inputs you can scrub.
   filling (the positional delta is re-resolved to ids at the destination). This
   is the only way inserts, deletes, moves and sorts can never rewrite or break
   a reference.
-- **Rows/columns are tombstoned lists** (like a list CRDT): deleting the end row of
-  a range shrinks the range instead of breaking it, and undo revives the ids.
-  A deleted row, column or sheet keeps its cells, hidden, so undo brings them back
-  with any edit made to them since. Every edit and its undo name rows, columns and
-  sheets by id, never by position (groundwork for collaboration, #18).
+- **Row/column order is a position key per id** (fractional indexing, with
+  tombstones): deleting the end row of a range shrinks the range instead of
+  breaking it, and undo revives the ids. A deleted row, column or sheet keeps its
+  cells, hidden, so undo brings them back with any edit made to them since. Every
+  edit and its undo name rows, columns and sheets by id, never by position
+  (groundwork for collaboration, #18; `docs/design/automerge.md` §2.2).
+- **Rows past the stored ones are virtual**, with ids derived from the sheet's seed:
+  a new sheet stores no rows, and scrolling, selecting, references, spills and
+  goal-seek never write to the document. A row is stored only when an edit needs
+  its place written down (an insert in front of it, a delete, a sort).
 - **Sorting** moves rows by id, so single references follow their cells; ranges
   over the sorted block keep covering the same block.
 - **Dimensions are propagated statically** (SPEC §4, `crates/core/src/dims.rs`): an

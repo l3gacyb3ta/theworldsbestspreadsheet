@@ -9,7 +9,7 @@ use wbs_core::stdlib::default_workbook;
 
 fn set(e: &mut Engine, r: &str, text: &str) {
     let a = a1::parse_ref(r).unwrap();
-    let k = e.wb.sheets[0].key_grow(a.row, a.col);
+    let k = e.wb.sheets[0].key(a.row, a.col).unwrap();
     e.set_text(k, text);
 }
 

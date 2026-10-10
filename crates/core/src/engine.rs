@@ -8,6 +8,7 @@ use crate::dims::{self, Halt, SVal, StaticEnv, StaticTrace};
 use crate::eval::{run_program, run_traced, Env, EvalErr, TraceStep};
 use crate::ids::*;
 use crate::model::{classify, Cell, Kind, NameDef, Piece, Sheet, StoredRef, Workbook};
+use crate::poskey;
 use crate::parse::{declares, CompileError, Compiled, Compiler, Declares, Dep, OpKind, Symbols};
 use crate::units::{Dim, Quant, UnitInfo};
 use crate::value::{Num, Prov, Text, Value};
@@ -101,12 +102,15 @@ pub enum Shown<'a> {
 
 /// A reversible change to the document. Every edit and its inverse name rows, columns and sheets
 /// by id, never by position, so an undo still hits the right rows after other edits moved them.
-/// A row or column place is "in front of this row" (`None`: at the end), a sheet's place is "after
-/// this sheet" (`None`: first), so new sheets appended at the end never shift it.
+/// A row or column place is "in front of this row" (`None`: after the stored rows), a new sheet's
+/// place is "after this sheet" (`None`: first); undo puts things back at their old position keys.
+/// An edit that needs a virtual row's place written down (insert in front of it, delete it, sort
+/// it) materialises it first (`model::Axis`); its inverse ends with `Materialise`, so undo leaves
+/// nothing stored that wasn't. Writing a cell never materialises anything.
 #[derive(Clone, Debug)]
 pub enum Edit {
     Cells(Vec<(CellKey, Option<Cell>)>),
-    /// New rows, in front of row `before` (alive or deleted). Inverse: `DeleteRows`.
+    /// New rows, in front of row `before` (alive, deleted or virtual). Inverse: `DeleteRows`.
     InsertRows { sheet: SheetId, before: Option<RowId>, ids: Vec<RowId> },
     /// Hides rows where they are; their cells stay, hidden. Inverse: `RestoreRows`.
     DeleteRows { sheet: SheetId, ids: Vec<RowId> },
@@ -115,8 +119,14 @@ pub enum Edit {
     DeleteCols { sheet: SheetId, ids: Vec<ColId> },
     RestoreCols { sheet: SheetId, ids: Vec<ColId> },
     /// A sort: each `(row, place)` puts `row` where row `place` was; the rows are a permutation
-    /// of the places. Inverse: the same pairs swapped (plus the range corners it rewrote).
+    /// of the places. The rows from the first place to the last get fresh position keys.
+    /// Inverse: `RowKeys` with their old keys (plus the range corners it rewrote).
     PermuteRows { sheet: SheetId, moves: Vec<(RowId, RowId)> },
+    /// Puts rows at these position keys. Inverse: their old keys.
+    RowKeys { sheet: SheetId, keys: Vec<(RowId, String)> },
+    /// Sets how many of a sheet's virtual rows and columns are materialised (stored). Nothing
+    /// visible changes. Lowering keeps any row that changed since or that a stored row comes after.
+    Materialise { sheet: SheetId, rows: usize, cols: usize },
     /// Sets (`Some`) or removes one name. Inverse: the name's old definition.
     Name { name: String, def: Option<NameDef> },
     /// `None` is the default size.
@@ -124,10 +134,14 @@ pub enum Edit {
     ColWidth { sheet: SheetId, col: ColId, width: Option<f32> },
     /// Puts a whole new sheet, with its own ids, after sheet `after`. Inverse: `DeleteSheet`.
     InsertSheet { after: Option<SheetId>, sheet: Box<Sheet> },
-    /// Hides a sheet with everything in it (`Workbook::deleted_sheets`). Inverse: `RestoreSheet`.
+    /// Hides a sheet with everything in it (`Workbook::deleted_sheets`); it keeps its tab key.
+    /// Inverse: `RestoreSheet`, which shows it again at that key.
     DeleteSheet { sheet: SheetId },
-    RestoreSheet { sheet: SheetId, after: Option<SheetId> },
+    RestoreSheet { sheet: SheetId },
+    /// Moves a sheet right after sheet `after`. Inverse: `SheetPos` with its old key.
     MoveSheet { sheet: SheetId, after: Option<SheetId> },
+    /// Puts a sheet at this tab key. Inverse: its old key.
+    SheetPos { sheet: SheetId, pos: String },
     RenameSheet { sheet: SheetId, name: String },
     Batch(Vec<Edit>),
 }
@@ -702,19 +716,23 @@ impl Engine {
             Edit::InsertRows { sheet, before, ids } => {
                 let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
                 *structural = true;
+                let filled = s.filled();
                 s.rows.insert_before(before, &ids);
-                Edit::DeleteRows { sheet, ids }
+                unfill(s, filled, Edit::DeleteRows { sheet, ids })
             }
             Edit::InsertCols { sheet, before, ids } => {
                 let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
                 *structural = true;
+                let filled = s.filled();
                 s.cols.insert_before(before, &ids);
-                Edit::DeleteCols { sheet, ids }
+                unfill(s, filled, Edit::DeleteCols { sheet, ids })
             }
             Edit::DeleteRows { sheet, ids } => {
                 let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
                 *structural = true;
-                Edit::RestoreRows { sheet, ids: s.rows.set_dead(&ids, true) }
+                let filled = s.filled();
+                let inv = Edit::RestoreRows { sheet, ids: s.rows.set_dead(&ids, true) };
+                unfill(s, filled, inv)
             }
             Edit::RestoreRows { sheet, ids } => {
                 let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
@@ -724,7 +742,9 @@ impl Engine {
             Edit::DeleteCols { sheet, ids } => {
                 let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
                 *structural = true;
-                Edit::RestoreCols { sheet, ids: s.cols.set_dead(&ids, true) }
+                let filled = s.filled();
+                let inv = Edit::RestoreCols { sheet, ids: s.cols.set_dead(&ids, true) };
+                unfill(s, filled, inv)
             }
             Edit::RestoreCols { sheet, ids } => {
                 let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
@@ -736,9 +756,8 @@ impl Engine {
                 // cells within a range, it doesn't move the range.
                 let before = self.range_bounds_on(sheet);
                 let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
-                if !s.rows.permute(&moves) {
-                    return Edit::Batch(vec![]);
-                }
+                let filled = s.filled();
+                let Some(old_keys) = s.rows.permute(&moves) else { return Edit::Batch(vec![]) };
                 *structural = true;
                 let mut restore = Vec::new();
                 for (k, cell, bounds) in before {
@@ -759,8 +778,20 @@ impl Engine {
                         restore.push((k, Some(cell)));
                     }
                 }
-                let back = moves.into_iter().map(|(row, place)| (place, row)).collect();
-                Edit::Batch(vec![Edit::PermuteRows { sheet, moves: back }, Edit::Cells(restore)])
+                let inv = Edit::Batch(vec![Edit::RowKeys { sheet, keys: old_keys }, Edit::Cells(restore)]);
+                unfill(self.wb.sheet(sheet).unwrap(), filled, inv)
+            }
+            Edit::RowKeys { sheet, keys } => {
+                let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
+                *structural = true;
+                let filled = s.filled();
+                let inv = Edit::RowKeys { sheet, keys: s.rows.set_keys(&keys) };
+                unfill(s, filled, inv)
+            }
+            // nothing visible changes: no recalc
+            Edit::Materialise { sheet, rows, cols } => {
+                let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
+                Edit::Materialise { sheet, rows: s.rows.fill(rows), cols: s.cols.fill(cols) }
             }
             Edit::Name { name, def } => {
                 *structural = true;
@@ -796,34 +827,44 @@ impl Engine {
                 let mut sheet = *sheet;
                 sheet.reindex();
                 self.wb.deleted_sheets.retain(|s| s.id != id);
-                self.place_sheet(sheet, after);
+                sheet.pos = self.key_after(after);
+                self.show_sheet(sheet);
                 Edit::DeleteSheet { sheet: id }
             }
             Edit::DeleteSheet { sheet } => {
                 // the last sheet stays: the app always shows one
                 let Some(at) = self.wb.sheet_index(sheet).filter(|_| self.wb.sheets.len() > 1) else { return Edit::Batch(vec![]) };
                 *structural = true;
-                let after = self.sheet_before(at);
                 let s = self.wb.sheets.remove(at);
                 self.wb.deleted_sheets.push(s);
-                Edit::RestoreSheet { sheet, after }
+                Edit::RestoreSheet { sheet }
             }
-            Edit::RestoreSheet { sheet, after } => {
+            Edit::RestoreSheet { sheet } => {
                 let Some(at) = self.wb.deleted_sheets.iter().position(|s| s.id == sheet) else { return Edit::Batch(vec![]) };
                 *structural = true;
                 let mut s = self.wb.deleted_sheets.remove(at);
                 s.reindex();
-                self.place_sheet(s, after);
+                self.show_sheet(s);
                 Edit::DeleteSheet { sheet }
             }
             Edit::MoveSheet { sheet, after } => {
                 let Some(from) = self.wb.sheet_index(sheet) else { return Edit::Batch(vec![]) };
+                if after == Some(sheet) {
+                    return Edit::Batch(vec![]);
+                }
                 *structural = true;
-                let old = self.sheet_before(from);
-                let after = if after == Some(sheet) { old } else { after };
-                let s = self.wb.sheets.remove(from);
-                self.place_sheet(s, after);
-                Edit::MoveSheet { sheet, after: old }
+                let mut s = self.wb.sheets.remove(from);
+                let old = std::mem::replace(&mut s.pos, self.key_after(after));
+                self.show_sheet(s);
+                Edit::SheetPos { sheet, pos: old }
+            }
+            Edit::SheetPos { sheet, pos } => {
+                let Some(from) = self.wb.sheet_index(sheet) else { return Edit::Batch(vec![]) };
+                *structural = true;
+                let mut s = self.wb.sheets.remove(from);
+                let old = std::mem::replace(&mut s.pos, pos);
+                self.show_sheet(s);
+                Edit::SheetPos { sheet, pos: old }
             }
             Edit::RenameSheet { sheet, name } => {
                 let Some(s) = self.wb.sheet_mut(sheet) else { return Edit::Batch(vec![]) };
@@ -838,12 +879,19 @@ impl Engine {
         }
     }
 
-    /// Puts a sheet right after `after` in the tab order: first if `None`, last if that sheet isn't showing.
-    fn place_sheet(&mut self, s: Sheet, after: Option<SheetId>) {
+    /// A tab key right after sheet `after` (first if `None`, last if that sheet isn't showing).
+    fn key_after(&self, after: Option<SheetId>) -> String {
         let at = match after {
             None => 0,
             Some(a) => self.wb.sheet_index(a).map_or(self.wb.sheets.len(), |i| i + 1),
         };
+        let lo = at.checked_sub(1).map_or("", |i| self.wb.sheets[i].pos.as_str());
+        poskey::between(lo, self.wb.sheets.get(at).map(|s| s.pos.as_str()))
+    }
+
+    /// Shows a sheet at its place in the tab order (by its key).
+    fn show_sheet(&mut self, s: Sheet) {
+        let at = self.wb.sheets.partition_point(|x| (&x.pos, x.id) < (&s.pos, s.id));
         self.wb.sheets.insert(at, s);
     }
 
@@ -903,14 +951,15 @@ impl Engine {
 
     // ---- rows and columns: these turn the positions the user sees into an edit by id ----
 
-    /// `n` new rows so that the first is at visible row `at` (`at` = the row count appends).
+    /// `n` new rows so that the first is at visible row `at`: in front of the row there, which
+    /// may be virtual (the insert materialises it).
     pub fn insert_rows_edit(&self, sheet: SheetId, at: usize, n: usize) -> Edit {
         let before = self.wb.sheet(sheet).and_then(|s| s.rows.get(at));
         Edit::InsertRows { sheet, before, ids: (0..n).map(|_| RowId(fresh_id())).collect() }
     }
 
     pub fn delete_rows_edit(&self, sheet: SheetId, at: usize, n: usize) -> Edit {
-        let ids = self.wb.sheet(sheet).map(|s| s.rows.ids().iter().skip(at).take(n).copied().collect()).unwrap_or_default();
+        let ids = self.wb.sheet(sheet).map(|s| (at..at + n).filter_map(|i| s.rows.get(i)).collect()).unwrap_or_default();
         Edit::DeleteRows { sheet, ids }
     }
 
@@ -920,7 +969,7 @@ impl Engine {
     }
 
     pub fn delete_cols_edit(&self, sheet: SheetId, at: usize, n: usize) -> Edit {
-        let ids = self.wb.sheet(sheet).map(|s| s.cols.ids().iter().skip(at).take(n).copied().collect()).unwrap_or_default();
+        let ids = self.wb.sheet(sheet).map(|s| (at..at + n).filter_map(|i| s.cols.get(i)).collect()).unwrap_or_default();
         Edit::DeleteCols { sheet, ids }
     }
 
@@ -933,11 +982,12 @@ impl Engine {
             n += 1;
         }
         let after = self.sheet_before(at.min(self.wb.sheets.len()));
-        Edit::InsertSheet { after, sheet: Box::new(Sheet::new(&format!("Sheet{n}"), 200, 26)) }
+        Edit::InsertSheet { after, sheet: Box::new(Sheet::new(&format!("Sheet{n}"))) }
     }
 
-    /// A copy right after the original. It keeps the row and column ids (cells are keyed by
-    /// sheet too, so nothing collides), which makes its own-sheet references point at the copy.
+    /// A copy right after the original. It keeps the row and column ids, and the seed of the virtual
+    /// ones (cells are keyed by sheet too, so nothing collides), which makes its own-sheet
+    /// references point at the copy.
     pub fn duplicate_sheet_edit(&self, sheet: SheetId) -> Result<Edit, String> {
         let at = self.wb.sheet_index(sheet).ok_or("no such sheet")?;
         let mut copy = self.wb.sheets[at].clone();
@@ -1409,9 +1459,6 @@ impl Engine {
         };
         let reg = Region { sheet: k.sheet, r0, c0, rows: size.0, cols: size.1 };
         changed.extend(self.set_desired(k, Some(reg)));
-        if let Some(s) = self.wb.sheet_mut(k.sheet) {
-            s.ensure_size(r0 + size.0, c0 + size.1);
-        }
         // blocked?
         let keys = self.region_keys(&reg);
         if let Some(b) = keys.iter().copied().find(|p| *p != k && self.nodes.contains_key(p)) {
@@ -1512,6 +1559,16 @@ impl Engine {
             }
         }
         None
+    }
+}
+
+/// An edit's inverse `inv`, then back to the materialised rows and columns `filled` the sheet had
+/// before the edit (if it materialised any).
+fn unfill(s: &Sheet, filled: (usize, usize), inv: Edit) -> Edit {
+    if s.filled() == filled {
+        inv
+    } else {
+        Edit::Batch(vec![inv, Edit::Materialise { sheet: s.id, rows: filled.0, cols: filled.1 }])
     }
 }
 

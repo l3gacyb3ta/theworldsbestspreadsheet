@@ -285,9 +285,8 @@ impl Engine {
         let tlabel = self.wb.cell_label(self.element_cell(g.target, g.index), home);
         let decimals = if lit.is_date { 0 } else { g.decimals.unwrap_or(lit.decimals) };
         let opts = Opts::for_literal(lit.value, decimals, lit.is_date, g.tol);
+        // trials only write the input cell (a spill past the stored rows reaches virtual ones)
         let orig = self.wb.cell(g.input).cloned();
-        // a trial value can make a spill grow the sheet; put the sheet sizes back too
-        let axes: Vec<_> = self.wb.sheets.iter().map(|s| (s.id, s.rows.clone(), s.cols.clone())).collect();
         let res = {
             let mut f = |x: f64| {
                 let s = if lit.is_date { format_lit(x, 0, true) } else { format!("{x}") };
@@ -297,11 +296,6 @@ impl Engine {
             solve(&mut f, lit.value, g.want, &opts)
         };
         self.apply(Edit::Cells(vec![(g.input, orig)]));
-        for (id, rows, cols) in axes {
-            if let Some(s) = self.wb.sheet_mut(id) {
-                (s.rows, s.cols) = (rows, cols);
-            }
-        }
         let unit = text[lit.span.end..].trim();
         let unit = unit.strip_prefix('[').and_then(|u| u.strip_suffix(']')).unwrap_or(unit);
         let input = |x: f64| {

@@ -12,6 +12,7 @@ pub mod lex;
 pub mod model;
 pub mod ops;
 pub mod parse;
+pub mod poskey;
 pub mod rational;
 pub mod settings;
 pub mod solve;
