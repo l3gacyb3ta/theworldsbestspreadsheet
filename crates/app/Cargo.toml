@@ -10,6 +10,10 @@ eframe = { version = "0.36", features = ["persistence"] }
 serde_json = "1"
 # Native file dialogs: AppKit on macOS, xdg-desktop-portal over D-Bus on Linux (no GTK needed).
 rfd = "0.17"
+# The app preferences file: TOML edited in place (comments, order and unknown keys survive), in the platform config dir.
+# The app preferences file: TOML edited in place (comments, order and unknown keys survive), in the platform config dir.
+toml_edit = "0.25"
+directories = "6"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = { version = "0.21", default-features = false }

@@ -11,6 +11,7 @@ use eframe::egui::{self, Color32, Event, FontId, Rect, RichText, TextEdit, Ui, V
 use wbs_core::engine::{Engine, Scratch};
 use wbs_core::help::{self, Block, Category, Hit, Inline, WordDoc, ERRORS, SAMPLE, SAMPLE_NAMES, WORDS};
 use wbs_core::ids::{CellKey, SheetId};
+use wbs_core::settings::{self, Scope};
 use wbs_core::value::Value;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -65,6 +66,24 @@ pub const TITLE: &str = "Help — the world's best spreadsheet";
 
 fn viewport_id() -> ViewportId {
     ViewportId::from_hash_of("help")
+}
+
+/// Runs edit commands from the menu bar (undo, copy…) in the viewport `ctx` belongs to.
+pub fn replay_edit_commands(ctx: &egui::Context, cmds: Vec<Command>) {
+    for c in cmds {
+        match c {
+            Command::Cut => ctx.send_viewport_cmd(ViewportCommand::RequestCut),
+            Command::Copy => ctx.send_viewport_cmd(ViewportCommand::RequestCopy),
+            Command::Paste => ctx.send_viewport_cmd(ViewportCommand::RequestPaste),
+            // the menu's key equivalent swallowed the keystroke: replay it for the focused field
+            c => {
+                if let Some(s) = c.shortcut() {
+                    let ev = Event::Key { key: s.logical_key, physical_key: None, pressed: true, repeat: false, modifiers: s.modifiers };
+                    ctx.input_mut(|i| i.events.push(ev));
+                }
+            }
+        }
+    }
 }
 
 impl Help {
@@ -221,20 +240,7 @@ impl Help {
                 if std::mem::take(&mut self.raise) {
                     ctx.send_viewport_cmd(ViewportCommand::Focus);
                 }
-                for c in std::mem::take(&mut self.forward) {
-                    match c {
-                        Command::Cut => ctx.send_viewport_cmd(ViewportCommand::RequestCut),
-                        Command::Copy => ctx.send_viewport_cmd(ViewportCommand::RequestCopy),
-                        Command::Paste => ctx.send_viewport_cmd(ViewportCommand::RequestPaste),
-                        // the menu's key equivalent swallowed the keystroke: replay it for the focused field
-                        c => {
-                            if let Some(s) = c.shortcut() {
-                                let ev = Event::Key { key: s.logical_key, physical_key: None, pressed: true, repeat: false, modifiers: s.modifiers };
-                                ctx.input_mut(|i| i.events.push(ev));
-                            }
-                        }
-                    }
-                }
+                replay_edit_commands(&ctx, std::mem::take(&mut self.forward));
                 for &c in keys {
                     let Some(s) = c.shortcut() else { continue };
                     if ctx.input_mut(|i| i.consume_shortcut(&s)) {
@@ -667,6 +673,23 @@ impl Help {
                 }
             }
             Block::Generated(g) if g == "sample" => sample_grid(ui),
+            Block::Generated(g) if g == "settings" => {
+                for scope in [Scope::App, Scope::Workbook] {
+                    for section in settings::sections(scope) {
+                        ui.add_space(10.0);
+                        ui.label(RichText::new(format!("{} — {section}", scope.title())).strong().size(15.0));
+                        for s in settings::SETTINGS.iter().filter(|s| s.scope == scope && s.section == section) {
+                            ui.add_space(6.0);
+                            self.inline_para(ui, &format!("**{}**  `{}`", s.label, s.key));
+                            self.inline_para(ui, s.help);
+                            self.inline_para(ui, &format!("Takes {}. Default: {}.", s.kind_text(), s.show(&s.default_val())));
+                            if let Some(p) = s.pending {
+                                ui.label(RichText::new(p).italics().weak());
+                            }
+                        }
+                    }
+                }
+            }
             Block::Generated(_) => {}
         }
     }

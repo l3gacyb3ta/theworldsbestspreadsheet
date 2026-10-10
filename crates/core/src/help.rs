@@ -342,6 +342,7 @@ const TOPIC_SOURCES: &[(&str, &str)] = &[
     topic!("charts"),
     topic!("errors"),
     topic!("keys"),
+    topic!("settings"),
     topic!("principles"),
 ];
 
@@ -373,9 +374,12 @@ pub enum Block {
     Example(Vec<(String, String)>),
     /// Two-column table rows from `| a | b |` lines.
     Table(Vec<(String, String)>),
-    /// `{{name}}`: generated content (e.g. the error table).
+    /// `{{name}}`: generated content (e.g. the error table); one of `DIRECTIVES`.
     Generated(String),
 }
+
+/// The `{{name}}` directives the help window knows how to fill in.
+pub const DIRECTIVES: &[&str] = &["errors", "sample", "settings"];
 
 /// Paragraphs are separated by blank lines; `## ` headings, `- ` bullets,
 /// fenced code, `| a | b |` tables, `{{name}}` directives.
@@ -742,6 +746,19 @@ pub fn search(query: &str) -> Vec<(Hit, String)> {
             scored.push((score, Hit::Topic(t.id), format!("{} — {}", t.title, snippet)));
         }
     }
+    // settings are listed on a generated page, so search their declarations
+    for s in crate::settings::SETTINGS {
+        let score = if s.label.to_lowercase().contains(&q) || s.key.contains(&q) {
+            60
+        } else if s.help.to_lowercase().contains(&q) {
+            25
+        } else {
+            0
+        };
+        if score > 0 {
+            scored.push((score, Hit::Topic("settings"), format!("Settings — {} ({})", s.label, s.key)));
+        }
+    }
     scored.sort_by(|a, b| b.0.cmp(&a.0));
     scored.into_iter().map(|(_, h, s)| (h, s)).collect()
 }
@@ -896,7 +913,7 @@ mod tests {
                         String::new()
                     }
                     Block::Generated(g) => {
-                        if g != "errors" && g != "sample" {
+                        if !DIRECTIVES.contains(&g.as_str()) {
                             bad.push(format!("{}: unknown directive {g}", t.id));
                         }
                         String::new()
@@ -917,6 +934,20 @@ mod tests {
             }
         }
         assert!(bad.is_empty(), "\n{}", bad.join("\n"));
+    }
+
+    #[test]
+    fn settings_page_lists_every_setting() {
+        let body = topic("settings").expect("a settings topic").body;
+        assert!(parse_markdown(body).contains(&Block::Generated("settings".into())));
+        for s in crate::settings::SETTINGS {
+            for i in inlines(s.help) {
+                if let Inline::Link { target, .. } = i {
+                    assert!(topic(target.trim_start_matches('#')).is_some() || word_doc(&target).is_some(), "{}: broken link {target}", s.key);
+                }
+            }
+        }
+        assert!(search("autosave").iter().any(|(h, s)| *h == Hit::Topic("settings") && s.contains("autosave.enabled")));
     }
 
     #[test]

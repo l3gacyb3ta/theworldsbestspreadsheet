@@ -39,6 +39,7 @@
 | ⌘Q | quit (asks first if there are unsaved changes) |
 | F1 | help for the current cell or word; in the help window, closes it |
 | ⌘/ | search help |
+| ⌘, | open [[#settings]] |
 
 On Linux and Windows ⌘ is Ctrl. On macOS the same commands are in the menu bar;
 elsewhere they're in the File, Edit, View and Help menus at the top of the window.

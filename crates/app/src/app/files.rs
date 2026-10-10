@@ -102,6 +102,9 @@ pub(super) fn fingerprint(wb: &Workbook) -> u64 {
     for (n, d) in &wb.names {
         (n, d.cell, d.input).hash(&mut h);
     }
+    for (k, v) in &wb.settings {
+        (k, v.to_string()).hash(&mut h);
+    }
     h.finish()
 }
 
@@ -150,6 +153,7 @@ impl App {
         self.bar_scrub = None;
         self.input_scrub = None;
         self.tabs = Default::default();
+        self.autosave = Default::default();
         self.mark_clean();
     }
 
@@ -163,6 +167,7 @@ impl App {
             Ok(eng) => {
                 self.status = Some(format!("opened {}", path.display()));
                 self.load(eng, Some(path));
+                self.note_setting_problems();
                 true
             }
             Err(e) => {
@@ -203,7 +208,7 @@ impl App {
         }
     }
 
-    fn write_to(&mut self, path: PathBuf) -> bool {
+    pub(super) fn write_to(&mut self, path: PathBuf) -> bool {
         let res = serde_json::to_string_pretty(&self.eng.wb).map_err(|e| e.to_string()).and_then(|s| std::fs::write(&path, s).map_err(|e| e.to_string()));
         match res {
             Ok(()) => {
