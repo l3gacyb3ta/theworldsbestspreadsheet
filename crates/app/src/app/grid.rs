@@ -402,7 +402,7 @@ impl App {
                     self.autofit(ctx, c);
                 } else {
                     let cid = self.sheet().cols.get(c).unwrap();
-                    let w0 = self.sheet().col_widths.get(&cid).copied().unwrap_or(DEF_W);
+                    let w0 = self.sheet().col_widths.get(&cid).copied();
                     self.drag = Drag::Col { col: c, x0: pos.x, w0 };
                 }
                 return;
@@ -427,7 +427,7 @@ impl App {
         if in_row_hdr {
             if let Some(r) = self.row_border(g, pos) {
                 let rid = self.sheet().rows.get(r).unwrap();
-                let h0 = self.sheet().row_heights.get(&rid).copied().unwrap_or(DEF_H);
+                let h0 = self.sheet().row_heights.get(&rid).copied();
                 self.drag = Drag::Row { row: r, y0: pos.y, h0 };
                 return;
             }
@@ -587,13 +587,13 @@ impl App {
                 ctx.set_cursor_icon(if mods.alt { CursorIcon::Copy } else { CursorIcon::Grabbing });
             }
             Drag::Col { col, x0, w0 } => {
-                let w = (*w0 + pos.x - *x0).max(24.0);
+                let w = (w0.unwrap_or(DEF_W) + pos.x - *x0).max(24.0);
                 let cid = self.eng.wb.sheets[ix].cols.get(*col).unwrap();
                 self.eng.wb.sheets[ix].col_widths.insert(cid, w);
                 ctx.set_cursor_icon(CursorIcon::ResizeColumn);
             }
             Drag::Row { row, y0, h0 } => {
-                let h = (*h0 + pos.y - *y0).max(14.0);
+                let h = (h0.unwrap_or(DEF_H) + pos.y - *y0).max(14.0);
                 let rid = self.eng.wb.sheets[ix].rows.get(*row).unwrap();
                 self.eng.wb.sheets[ix].row_heights.insert(rid, h);
                 ctx.set_cursor_icon(CursorIcon::ResizeRow);
@@ -665,6 +665,23 @@ impl App {
                     self.redo.clear();
                 }
             }
+            // the drag resized live; the whole drag is one undo step
+            Drag::Col { col, w0, .. } => {
+                let s = self.sheet();
+                let (sheet, cid) = (s.id, s.cols.get(col).unwrap());
+                if s.col_widths.get(&cid).copied() != w0 {
+                    self.undo.push(Edit::ColWidth { sheet, col: cid, width: w0 });
+                    self.redo.clear();
+                }
+            }
+            Drag::Row { row, h0, .. } => {
+                let s = self.sheet();
+                let (sheet, rid) = (s.id, s.rows.get(row).unwrap());
+                if s.row_heights.get(&rid).copied() != h0 {
+                    self.undo.push(Edit::RowHeight { sheet, row: rid, height: h0 });
+                    self.redo.clear();
+                }
+            }
             _ => {}
         }
     }
@@ -685,9 +702,13 @@ impl App {
             .iter()
             .map(|t| ctx.fonts_mut(|f| f.layout_no_wrap(t.clone(), font.clone(), Color32::WHITE).size().x))
             .fold(0.0f32, f32::max);
-        let cid = self.sheet().cols.get(c).unwrap();
-        let ix = self.sheet_ix;
-        self.eng.wb.sheets[ix].col_widths.insert(cid, (w + 18.0).clamp(40.0, 600.0));
+        let (sheet, cid) = (self.sid(), self.sheet().cols.get(c).unwrap());
+        let width = Some((w + 18.0).clamp(40.0, 600.0));
+        if self.sheet().col_widths.get(&cid).copied() != width {
+            let inv = self.eng.apply(Edit::ColWidth { sheet, col: cid, width });
+            self.undo.push(inv);
+            self.redo.clear();
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -977,32 +998,28 @@ impl App {
             let sid = sel.sheet;
             let col = a1::col_name(self.cursor.1);
             if ui.button(format!("Insert {} row(s) above", sel.rows())).clicked() {
-                let ids = (0..sel.rows()).map(|_| wbs_core::ids::RowId(wbs_core::ids::fresh_id())).collect();
-                self.exec(Edit::InsertRows { sheet: sid, at: sel.r0, ids });
+                self.exec(self.eng.insert_rows_edit(sid, sel.r0, sel.rows()));
                 ui.close();
             }
             if ui.button(format!("Insert {} row(s) below", sel.rows())).clicked() {
-                let ids = (0..sel.rows()).map(|_| wbs_core::ids::RowId(wbs_core::ids::fresh_id())).collect();
-                self.exec(Edit::InsertRows { sheet: sid, at: sel.r1 + 1, ids });
+                self.exec(self.eng.insert_rows_edit(sid, sel.r1 + 1, sel.rows()));
                 ui.close();
             }
             if ui.button(format!("Delete row(s) {}–{}", sel.r0 + 1, sel.r1 + 1)).clicked() {
-                self.exec(Edit::DeleteRows { sheet: sid, at: sel.r0, n: sel.rows() });
+                self.exec(self.eng.delete_rows_edit(sid, sel.r0, sel.rows()));
                 ui.close();
             }
             ui.separator();
             if ui.button(format!("Insert {} column(s) left", sel.cols())).clicked() {
-                let ids = (0..sel.cols()).map(|_| wbs_core::ids::ColId(wbs_core::ids::fresh_id())).collect();
-                self.exec(Edit::InsertCols { sheet: sid, at: sel.c0, ids });
+                self.exec(self.eng.insert_cols_edit(sid, sel.c0, sel.cols()));
                 ui.close();
             }
             if ui.button(format!("Insert {} column(s) right", sel.cols())).clicked() {
-                let ids = (0..sel.cols()).map(|_| wbs_core::ids::ColId(wbs_core::ids::fresh_id())).collect();
-                self.exec(Edit::InsertCols { sheet: sid, at: sel.c1 + 1, ids });
+                self.exec(self.eng.insert_cols_edit(sid, sel.c1 + 1, sel.cols()));
                 ui.close();
             }
             if ui.button(format!("Delete column(s) {}–{}", a1::col_name(sel.c0), a1::col_name(sel.c1))).clicked() {
-                self.exec(Edit::DeleteCols { sheet: sid, at: sel.c0, n: sel.cols() });
+                self.exec(self.eng.delete_cols_edit(sid, sel.c0, sel.cols()));
                 ui.close();
             }
             ui.separator();

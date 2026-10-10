@@ -80,6 +80,10 @@ pub(super) fn fingerprint(wb: &Workbook) -> u64 {
         // order-independent sums over the hash maps
         let mut sum = 0u64;
         for ((r, c), cell) in &s.cells {
+            // cells in deleted rows and columns are kept, hidden: like deleted sheets, not part of the document's look
+            if !s.visible(*r, *c) {
+                continue;
+            }
             let mut ch = DefaultHasher::new();
             (si, s.row_index(*r), s.col_index(*c)).hash(&mut ch);
             for p in &cell.pieces {

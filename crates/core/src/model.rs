@@ -182,37 +182,54 @@ impl<I: Copy + Eq + std::hash::Hash> Axis<I> {
         self.pos.insert(id, self.alive.len());
         self.alive.push(id);
     }
+    /// Whether `id` is in the list at all, alive or deleted.
+    pub fn contains(&self, id: I) -> bool {
+        self.pos.contains_key(&id) || self.tomb.contains_key(&id)
+    }
     /// Inserts (or revives) ids so they appear starting at visible index `at`.
     pub fn insert(&mut self, at: usize, ids: &[I]) {
+        self.insert_before(self.get(at), ids);
+    }
+    /// Inserts (or revives) ids just in front of `before` (alive or deleted; the end if `None` or unknown).
+    pub fn insert_before(&mut self, before: Option<I>, ids: &[I]) {
         for id in ids {
             self.dead.remove(id);
             self.order.retain(|x| x != id);
         }
-        let slot = match self.alive.get(at) {
-            Some(next) => self.order.iter().position(|x| x == next).unwrap(),
-            None => self.order.len(),
-        };
+        let slot = before.and_then(|b| self.order.iter().position(|x| *x == b)).unwrap_or(self.order.len());
         self.order.splice(slot..slot, ids.iter().copied());
         self.reindex();
     }
-    pub fn delete(&mut self, at: usize, n: usize) -> Vec<I> {
-        let ids: Vec<I> = self.alive.iter().skip(at).take(n).copied().collect();
-        for id in &ids {
-            self.dead.insert(*id);
-        }
-        self.reindex();
-        ids
-    }
-    /// Replaces the visible ids at `at..at+new.len()` with a permutation of them.
-    pub fn permute(&mut self, at: usize, new: &[I]) {
-        let old: Vec<I> = self.alive[at..at + new.len()].to_vec();
-        let mut it = new.iter();
-        for slot in self.order.iter_mut() {
-            if old.contains(slot) {
-                *slot = *it.next().unwrap();
+    /// Deletes (`dead`) or restores ids in place. Returns the ids whose state changed, in the
+    /// given order: exactly what the opposite call needs to undo it.
+    pub fn set_dead(&mut self, ids: &[I], dead: bool) -> Vec<I> {
+        let changed: Vec<I> = ids.iter().copied().filter(|id| self.contains(*id) && self.dead.contains(id) != dead).collect();
+        for id in &changed {
+            if dead {
+                self.dead.insert(*id);
+            } else {
+                self.dead.remove(id);
             }
         }
+        if !changed.is_empty() {
+            self.reindex();
+        }
+        changed
+    }
+    /// Each `(id, place)` puts `id` where `place` was. The ids must be a permutation of the places;
+    /// otherwise nothing changes and this returns false. Undo is the same pairs swapped.
+    pub fn permute(&mut self, moves: &[(I, I)]) -> bool {
+        let slots: HashMap<I, usize> = self.order.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+        let places: HashSet<I> = moves.iter().map(|m| m.1).collect();
+        let ids: HashSet<I> = moves.iter().map(|m| m.0).collect();
+        if places.len() != moves.len() || ids != places || !places.iter().all(|p| slots.contains_key(p)) {
+            return false;
+        }
+        for (id, place) in moves {
+            self.order[slots[place]] = *id;
+        }
         self.reindex();
+        true
     }
 }
 
@@ -292,32 +309,10 @@ impl Sheet {
         let k = self.key(row, col)?;
         self.cell(k.row, k.col)
     }
-    /// Deleted rows' cells are removed from the map and returned (for undo).
-    pub fn delete_rows(&mut self, at: usize, n: usize) -> (Vec<RowId>, Vec<((RowId, ColId), Cell)>) {
-        let ids = self.rows.delete(at, n);
-        let mut removed = Vec::new();
-        self.cells.retain(|k, c| {
-            if ids.contains(&k.0) {
-                removed.push((*k, c.clone()));
-                false
-            } else {
-                true
-            }
-        });
-        (ids, removed)
-    }
-    pub fn delete_cols(&mut self, at: usize, n: usize) -> (Vec<ColId>, Vec<((RowId, ColId), Cell)>) {
-        let ids = self.cols.delete(at, n);
-        let mut removed = Vec::new();
-        self.cells.retain(|k, c| {
-            if ids.contains(&k.1) {
-                removed.push((*k, c.clone()));
-                false
-            } else {
-                true
-            }
-        });
-        (ids, removed)
+    /// Whether a cell's row and column are both alive. Cells in deleted rows and columns stay in
+    /// `cells`, hidden, so restoring the row brings them (and any edit made to them since) back.
+    pub fn visible(&self, row: RowId, col: ColId) -> bool {
+        self.rows.index(row).is_some() && self.cols.index(col).is_some()
     }
     pub fn used_extent(&self) -> (usize, usize) {
         let mut r = 0;
@@ -363,8 +358,13 @@ pub struct NameDef {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Workbook {
+    /// The visible sheets, in tab order.
     pub sheets: Vec<Sheet>,
     pub names: BTreeMap<String, NameDef>,
+    /// Deleted sheets, kept whole (like deleted rows) so restoring one brings back its cells and
+    /// any edit made to them since. Nothing outside the edit code looks here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deleted_sheets: Vec<Sheet>,
     /// Per-workbook settings as stored (see `settings`): unknown keys and invalid values are kept as they are.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub settings: BTreeMap<String, serde_json::Value>,
@@ -372,7 +372,7 @@ pub struct Workbook {
 
 impl Workbook {
     pub fn empty() -> Workbook {
-        Workbook { sheets: Vec::new(), names: BTreeMap::new(), settings: BTreeMap::new() }
+        Workbook { sheets: Vec::new(), names: BTreeMap::new(), deleted_sheets: Vec::new(), settings: BTreeMap::new() }
     }
     pub fn sheet(&self, id: SheetId) -> Option<&Sheet> {
         self.sheets.iter().find(|s| s.id == id)
@@ -418,7 +418,7 @@ impl Workbook {
         self.sheet(k.sheet)?.pos(k)
     }
     pub fn after_load(&mut self) {
-        for s in &mut self.sheets {
+        for s in self.sheets.iter_mut().chain(&mut self.deleted_sheets) {
             s.reindex();
         }
     }
@@ -633,7 +633,8 @@ mod tests {
         assert_eq!(wb.render(&pieces, sid), "=B3 $C$4 + A1:A3 sum");
         wb.sheet_mut(sid).unwrap().rows.insert(1, &[RowId(1), RowId(2)]);
         assert_eq!(wb.render(&pieces, sid), "=B5 $C$6 + A1:A5 sum");
-        wb.sheet_mut(sid).unwrap().delete_rows(4, 1); // the row holding B3 and the range's end
+        let row = wb.sheet(sid).unwrap().rows.get(4).unwrap();
+        wb.sheet_mut(sid).unwrap().rows.set_dead(&[row], true); // the row holding B3 and the range's end
         assert_eq!(wb.render(&pieces, sid), "=#ref! $C$5 + A1:A4 sum");
 
     }

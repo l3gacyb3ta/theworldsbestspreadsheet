@@ -846,7 +846,7 @@ impl App {
             }
             TabAct::Add => Ok(self.eng.add_sheet_edit(n)),
             TabAct::Duplicate(id) => self.eng.duplicate_sheet_edit(id),
-            TabAct::Move(id, to) => Ok(Edit::MoveSheet { sheet: id, to }),
+            TabAct::Move(id, to) => Ok(self.eng.move_sheet_edit(id, to)),
         };
         match edit {
             Ok(e) => {

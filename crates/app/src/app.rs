@@ -108,8 +108,9 @@ enum Drag {
     Fill { src: CRect, dst: CRect },
     /// Dragging the selection by its border: `grab` is the cell under the press; Alt copies instead.
     Move { src: CRect, grab: (usize, usize), dst: CRect, copy: bool },
-    Col { col: usize, x0: f32, w0: f32 },
-    Row { row: usize, y0: f32, h0: f32 },
+    /// Resizing a column (row) by its header border: `w0` (`h0`) is the size at the press, `None` the default.
+    Col { col: usize, x0: f32, w0: Option<f32> },
+    Row { row: usize, y0: f32, h0: Option<f32> },
     Scrub { key: CellKey, orig: Option<Cell>, text: String, lit: Lit, x0: f32 },
     Point { key: CellKey, orig: Option<Cell>, text: String, lit: Lit, axis: YAxis, cell_disp: wbs_core::units::DispUnit },
     Goal(Box<GoalDrag>),
@@ -378,7 +379,7 @@ impl App {
         let prev = self.sid();
         let follow = match &e {
             Edit::InsertSheet { sheet, .. } => sheet.id,
-            Edit::MoveSheet { sheet, .. } | Edit::RenameSheet { sheet, .. } => *sheet,
+            Edit::RestoreSheet { sheet, .. } | Edit::MoveSheet { sheet, .. } | Edit::RenameSheet { sheet, .. } => *sheet,
             _ => prev,
         };
         let inv = self.eng.apply(e);

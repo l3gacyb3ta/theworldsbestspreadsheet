@@ -23,10 +23,16 @@ pub struct CellKey {
 }
 
 thread_local! {
-    static RNG: Cell<u64> = Cell::new({
+    static RNG: Cell<u64> = Cell::new(seed());
+}
+
+/// OS entropy, so two processes started at the same instant (two peers) never share a sequence.
+/// The clock is only a fallback for a system without an entropy source.
+fn seed() -> u64 {
+    getrandom::u64().unwrap_or_else(|_| {
         let t = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0);
         t ^ 0x9E37_79B9_7F4A_7C15
-    });
+    })
 }
 
 pub fn fresh_id() -> u64 {
@@ -38,4 +44,36 @@ pub fn fresh_id() -> u64 {
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^ (z >> 31)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    /// Two fresh workbooks created at the same instant (each thread is a fresh generator, like a
+    /// fresh process) must not share ids: the seed comes from the OS, not the clock.
+    #[test]
+    fn ids_come_from_os_entropy() {
+        let go = Arc::new(Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let go = go.clone();
+                std::thread::spawn(move || {
+                    go.wait();
+                    let wb = crate::stdlib::default_workbook();
+                    (wb.sheets[0].id, wb.sheets[0].rows.ids()[0], wb.sheets[0].cols.ids()[0])
+                })
+            })
+            .collect();
+        let firsts: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        for (i, a) in firsts.iter().enumerate() {
+            for b in &firsts[i + 1..] {
+                assert_ne!(a.0, b.0);
+                assert_ne!(a.1, b.1);
+                assert_ne!(a.2, b.2);
+            }
+        }
+        assert_ne!(seed(), seed());
+    }
 }

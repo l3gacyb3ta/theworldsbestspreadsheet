@@ -227,7 +227,8 @@ fn structure_edits_keep_refs() {
     set(&mut e, "A3", "3");
     set(&mut e, "B1", "=A1:A3 sum A2 +");
     let sid = e.wb.sheets[0].id;
-    let undo = e.apply(wbs_core::Edit::InsertRows { sheet: sid, at: 1, ids: vec![wbs_core::ids::RowId(42)] });
+    let before = e.wb.sheets[0].rows.get(1);
+    let undo = e.apply(wbs_core::Edit::InsertRows { sheet: sid, before, ids: vec![wbs_core::ids::RowId(42)] });
     assert_eq!(e.wb.cell_text(key(&e, "B1")), "=A1:A4 sum A3 +");
     set(&mut e, "A2", "100");
     assert_eq!(show(&e, "B1"), "108");
@@ -235,7 +236,7 @@ fn structure_edits_keep_refs() {
     e.apply(undo);
     assert_eq!(e.wb.cell_text(key(&e, "B1")), "=A1:A3 sum A2 +");
     // delete last row of the range: it shrinks
-    let inv = e.apply(wbs_core::Edit::DeleteRows { sheet: sid, at: 2, n: 1 });
+    let inv = e.apply(e.delete_rows_edit(sid, 2, 1));
     assert_eq!(e.wb.cell_text(key(&e, "B1")), "=A1:A2 sum A2 +");
     assert_eq!(show(&e, "B1"), "5");
     e.apply(inv);
@@ -295,7 +296,7 @@ fn save_load_roundtrip() {
     e.set_name("x", Some(k), true).unwrap();
     let c = e.wb.sheets[0].cols.get(1).unwrap();
     e.wb.sheets[0].col_widths.insert(c, 150.0);
-    e.apply(wbs_core::Edit::DeleteRows { sheet: e.wb.sheets[0].id, at: 5, n: 1 });
+    e.apply(e.delete_rows_edit(e.wb.sheets[0].id, 5, 1));
     let json = serde_json::to_string(&e.wb).unwrap();
     let wb2: wbs_core::model::Workbook = serde_json::from_str(&json).unwrap();
     let e2 = Engine::new(wb2);
@@ -469,7 +470,8 @@ fn range_gaps_marker_round_trips() {
     assert_eq!(e.wb.cell_text(key(&e, "B1")), "=A1:A3? sum");
     assert_eq!(show(&e, "B1"), "4");
     let sid = e.wb.sheets[0].id;
-    let undo = e.apply(wbs_core::Edit::InsertRows { sheet: sid, at: 1, ids: vec![wbs_core::ids::RowId(77)] });
+    let before = e.wb.sheets[0].rows.get(1);
+    let undo = e.apply(wbs_core::Edit::InsertRows { sheet: sid, before, ids: vec![wbs_core::ids::RowId(77)] });
     assert_eq!(e.wb.cell_text(key(&e, "B1")), "=A1:A4? sum");
     assert_eq!(e.wb.cell_text(key(&e, "C1")), "=$A$1:$A$4? sum");
     assert_eq!(show(&e, "B1"), "4");

@@ -8,3 +8,5 @@ license-file = "../../LICENSE"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 rustc-hash = "2.1"
+# Seeds id generation from OS entropy, so two peers never start the same id sequence.
+getrandom = "0.4.3"
