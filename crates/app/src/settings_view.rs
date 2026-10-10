@@ -1,6 +1,7 @@
 //! The settings window, drawn entirely from the declarations in
-//! `wbs_core::settings`: a section per group, a widget per kind, the help text,
-//! any problem with the stored value, and Reset. It doesn't change anything
+//! `wbs_core::settings`: a section per group, a widget per kind, a one-line
+//! summary (the full help is on hover and in Help ▸ Settings), any problem with
+//! the stored value, and Reset. It doesn't change anything
 //! itself; it returns the changes for the app to apply.
 //!
 //! Like help, it's its own OS window (an immediate viewport), drawn as an
@@ -116,11 +117,18 @@ impl SettingsWindow {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.set_max_width(560.0);
             ui.label(RichText::new(Scope::App.title()).strong().size(18.0));
-            let place = match src.prefs.path() {
-                Some(p) => format!("Yours, on this machine. Saved in {} when you change something.", p.display()),
-                None => "Yours, for this session (there's no settings file).".to_string(),
-            };
-            ui.label(RichText::new(place).weak());
+            match src.prefs.path() {
+                Some(p) => {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.label(RichText::new("Located at ").weak());
+                        ui.add(egui::Label::new(RichText::new(p.display().to_string()).monospace()).selectable(true));
+                    });
+                }
+                None => {
+                    ui.label(RichText::new("Not saved: there's no settings file.").weak());
+                }
+            }
             if let Some(e) = src.prefs.file_error() {
                 ui.label(RichText::new(e).color(err_colour(ui)));
             }
@@ -129,7 +137,7 @@ impl SettingsWindow {
             }
             ui.add_space(16.0);
             ui.label(RichText::new(format!("{} — {}", Scope::Workbook.title(), src.doc_name)).strong().size(18.0));
-            ui.label(RichText::new("Saved in the workbook file: changing one is an unsaved change to the workbook.").weak());
+            ui.label(RichText::new("Saved in the workbook file.").weak());
             for section in settings::sections(Scope::Workbook) {
                 self.section(ui, section, Scope::Workbook, src, changes);
             }
@@ -138,8 +146,7 @@ impl SettingsWindow {
                 .collect();
             if !unknown.is_empty() {
                 ui.add_space(16.0);
-                ui.label(RichText::new("Not used by this version").strong().size(15.0));
-                ui.label(RichText::new("Kept as they are, so a newer version (or a typo you fix) still finds them.").weak());
+                ui.label(RichText::new("Not used by this version").strong().size(15.0)).on_hover_text("Kept as they are, so a newer version (or a typo you fix) still finds them.");
                 for u in unknown {
                     inline_para(ui, &format!("• {u}"));
                 }
@@ -161,7 +168,7 @@ impl SettingsWindow {
                 ui.horizontal(|ui| {
                     // a checkbox carries its own label
                     if !matches!(s.kind, Kind::Bool) {
-                        ui.label(RichText::new(s.label).strong());
+                        ui.label(RichText::new(s.label).strong()).on_hover_ui(|ui| inline_para(ui, s.help));
                     }
                     if let Some(v) = self.widget(ui, s, &val) {
                         changes.push((s, Some(v)));
@@ -178,11 +185,10 @@ impl SettingsWindow {
                     }
                 }
                 if let Some(why) = problem {
-                    let msg = format!("The stored value isn't used: {why}. Using the default ({}) until you change it or press Reset.", s.show(&s.default_val()));
+                    let msg = format!("Stored value ignored ({why}). Using the default, {}.", s.show(&s.default_val()));
                     ui.label(RichText::new(msg).color(err_colour(ui)));
                 }
-                inline_para(ui, s.help);
-                ui.label(RichText::new(format!("{}  ·  default {}", s.key, s.show(&s.default_val()))).small().weak().monospace());
+                ui.label(RichText::new(s.summary).weak());
                 if let Some(p) = s.pending {
                     ui.label(RichText::new(p).italics().weak());
                 }
@@ -195,7 +201,7 @@ impl SettingsWindow {
         match s.kind {
             Kind::Bool => {
                 let mut b = val.as_bool();
-                ui.checkbox(&mut b, RichText::new(s.label).strong()).changed().then_some(Val::Bool(b))
+                ui.checkbox(&mut b, RichText::new(s.label).strong()).on_hover_ui(|ui| inline_para(ui, s.help)).changed().then_some(Val::Bool(b))
             }
             Kind::Int { min, max, unit } => {
                 let mut n = val.as_int();
