@@ -80,8 +80,10 @@ is an ordinary, editable `units` sheet; exchange rates are inputs you can scrub.
   continue the series; otherwise the pattern repeats. Formulas move relative refs.
 - **Charts**: `xs ys line|scatter`, `cats vals bar`, `layer`, `title`,
   `xlabel`, `ylabel`, `cols rows size`. Points read directly from literal cells
-  are draggable and write the cell; derived points show which inputs they'd
-  solve for (goal-seek is future work).
+  are draggable and write the cell. Dragging a computed point goal-seeks one
+  upstream input (`crates/core/src/solve.rs`: bracket outward, then Brent) so
+  the point lands there; a click on it switches the input. No answer means no
+  change, and the point says why.
 
 ## Help system
 
@@ -111,8 +113,9 @@ builtin, or an error message without an explanation fails the build.
 
 Arrows/⇧arrows, Enter/Tab, F2 or double-click to edit, Delete clears, ⌘C/⌘X/⌘V,
 ⌘Z/⇧⌘Z, ⌘D fill down, ⌘E accept "extend formula", ⌘N/⌘O/⌘S/⇧⌘S new/open/save/save as. Alt-drag a number
-(in a cell or the formula bar) to scrub it, ⇧ for ×10. Right-click for
-insert/delete rows/columns and sort.
+(in a cell or the formula bar) to scrub it, ⇧ for ×10. Drag a chart point to
+edit its cell, or (a computed point) goal-seek an input; click a computed point
+to switch the input. Right-click for insert/delete rows/columns and sort.
 
 ## License
 

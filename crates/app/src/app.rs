@@ -111,6 +111,32 @@ enum Drag {
     Row { row: usize, y0: f32, h0: f32 },
     Scrub { key: CellKey, orig: Option<Cell>, text: String, lit: Lit, x0: f32 },
     Point { key: CellKey, orig: Option<Cell>, text: String, lit: Lit, axis: YAxis, cell_disp: wbs_core::units::DispUnit },
+    Goal(Box<GoalDrag>),
+}
+
+/// Dragging a computed chart point: goal-seeks `input` so element `index` of `target` lands at the pointer.
+struct GoalDrag {
+    target: CellKey,
+    index: usize,
+    input: CellKey,
+    orig: Option<Cell>,
+    axis: YAxis,
+    /// Where the point was, where the press was, and the pointer now.
+    at: Pos2,
+    press: Pos2,
+    pointer: Pos2,
+    /// The input literal's decimals at the press; Shift (`fine`) writes two more.
+    decimals: usize,
+    fine: bool,
+    /// False until the pointer leaves the press spot: a click switches the input instead.
+    moved: bool,
+    /// Solving every frame; turned off for the rest of the drag when one solve takes too long.
+    live: bool,
+    /// The target value under the pointer, in the axis's display unit.
+    want: Option<f64>,
+    /// The last solve: the input's new text, or why there's no answer.
+    outcome: Option<Result<String, String>>,
+    solve_ms: f64,
 }
 
 /// Per-frame grid geometry.
@@ -195,6 +221,12 @@ pub struct App {
     name_buf: String,
     name_for: Option<CellKey>,
     chart_hits: Vec<(PointHit, YAxis)>,
+    /// The input a computed cell's chart points goal-seek, when switched from the default (click the point).
+    goal_inputs: std::collections::HashMap<CellKey, CellKey>,
+    /// Why the last goal-seek found no answer, shown at its point (target, element) until the next press.
+    goal_note: Option<(CellKey, usize, String)>,
+    /// A goal-seek slower than this stops following the pointer and solves on release.
+    goal_live_ms: f64,
     editor_rect: Option<Rect>,
     trace: bool,
     tabs: panels::Tabs,
@@ -256,6 +288,9 @@ impl App {
             name_buf: String::new(),
             name_for: None,
             chart_hits: Vec::new(),
+            goal_inputs: Default::default(),
+            goal_note: None,
+            goal_live_ms: 50.0,
             editor_rect: None,
             trace: true,
             tabs: Default::default(),
@@ -307,6 +342,7 @@ impl App {
 
     fn exec(&mut self, e: Edit) {
         self.cut = None;
+        self.goal_note = None;
         let t = std::time::Instant::now();
         let inv = self.apply_edit(e);
         self.last_recalc_ms = t.elapsed().as_secs_f64() * 1000.0;

@@ -12,8 +12,8 @@ pub enum Prov {
     None,
     /// Read directly from a literal number cell; dragging it writes that cell.
     Literal(CellKey),
-    /// Read from a computed cell.
-    Derived(CellKey),
+    /// Element `i` (row-major) of a computed cell's value; dragging it goal-seeks an input.
+    Derived(CellKey, usize),
 }
 
 #[derive(Clone, Debug, PartialEq)]
