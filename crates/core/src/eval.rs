@@ -35,7 +35,7 @@ pub struct Interp<'e> {
     depth: usize,
 }
 
-const MAX_DEPTH: usize = 64;
+pub(crate) const MAX_DEPTH: usize = 64;
 
 pub fn run_program(env: &dyn Env, ops: &[Op]) -> Result<Value, EvalErr> {
     let mut it = Interp { env, depth: 0 };
@@ -521,13 +521,16 @@ impl<'e> Interp<'e> {
                 if !c.q.is_dimensionless() {
                     return Err(Step::Here("if needs a dimensionless condition".into()));
                 }
+                // both branches must measure the same thing, so the result's dimension is static
+                if let (Value::Num(t), Value::Num(e)) = (&t, &e) {
+                    same_dims(&t.q, &e.q, name)?;
+                }
                 if let Some(cv) = c.as_scalar() {
                     st.push(if cv != 0.0 { t } else { e });
                 } else {
                     let (Value::Num(t), Value::Num(e)) = (t, e) else {
                         return Err(Step::Here("if with an array condition needs number branches".into()));
                     };
-                    same_dims(&t.q, &e.q, name)?;
                     let picked = broadcast3(&c, &t, &e)?;
                     st.push(Value::Num(Num::with_shape(picked.0, picked.1, t.q.clone())));
                 }
@@ -702,8 +705,12 @@ fn join(x: Value, y: Value) -> R<Value> {
         }
     };
     let (rx, ry) = (rank(&x), rank(&y));
-    let mut rows = promote(x, ry)?;
+    let mut rows = promote(x.clone(), ry)?;
     rows.extend(promote(y, rx)?);
+    // two empty arrays join to an empty array that keeps the left one's units
+    if rows.is_empty() {
+        return Ok(x);
+    }
     from_rows(rows, "join")
 }
 

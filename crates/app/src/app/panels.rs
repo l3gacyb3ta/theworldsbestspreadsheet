@@ -184,6 +184,8 @@ impl App {
         // 3. the stack at the caret
         if kind == Kind::Program {
             let s = self.eng.eval_scratch(&text, home);
+            // the static pass: dimensions even where evaluation stops, and the unit error the cell will show
+            let dims = self.eng.static_scratch(&text, home);
             ui.horizontal(|ui| {
                 ui.add_space(176.0);
                 ui.label(RichText::new("stack").small().weak());
@@ -192,10 +194,22 @@ impl App {
                     Some(st) => help_view::stack_chips(ui, &st.stack),
                     None => help_view::stack_chips(ui, &[]),
                 }
-                if let Err(e) = &s.result {
-                    let past_error = e.span.as_ref().is_none_or(|sp| sp.start < at);
+                if s.result.is_err() {
+                    if let Some((_, stack)) = dims.steps.iter().rfind(|(sp, _)| sp.end <= at).filter(|(_, st)| !st.is_empty()) {
+                        let d: Vec<String> = stack.iter().map(|v| v.to_string()).collect();
+                        ui.label(RichText::new(format!("  dims: {}", d.join(" · "))).small().weak())
+                            .on_hover_text("inferred without evaluating");
+                    }
+                }
+                let err = match (&dims.error, &s.result) {
+                    (Some(e), _) => Some((&e.msg, &e.span)),
+                    (None, Err(e)) => Some((&e.msg, &e.span)),
+                    _ => None,
+                };
+                if let Some((msg, span)) = err {
+                    let past_error = span.as_ref().is_none_or(|sp| sp.start < at);
                     if past_error && at >= text.trim_end().len() {
-                        ui.label(RichText::new(format!("  ✗ {}", e.msg)).color(syntax::C_ERR).small());
+                        ui.label(RichText::new(format!("  ✗ {msg}")).color(syntax::C_ERR).small());
                     }
                 }
             });
@@ -885,6 +899,7 @@ impl App {
             }
             Shown::Error(e) => {
                 ui.colored_label(Color32::from_rgb(0xdc, 0x26, 0x26), &e.msg);
+                static_dim_label(ui, &self.eng, k);
                 match &e.kind {
                     ErrKind::Upstream(u) => {
                         if ui.link(format!("→ go to {}", self.label(*u))).clicked() {
@@ -1079,6 +1094,15 @@ impl App {
                 }
             });
         });
+    }
+}
+
+/// A cell's dimension from the static pass, for when there's no value to read it from.
+fn static_dim_label(ui: &mut Ui, eng: &Engine, k: CellKey) {
+    if let Some(v @ wbs_core::dims::SVal::Num(n)) = eng.static_value(k) {
+        if n.dim.is_some() {
+            ui.label(RichText::new(format!("dimension: {v}")).small().weak()).on_hover_text("inferred without evaluating");
+        }
     }
 }
 

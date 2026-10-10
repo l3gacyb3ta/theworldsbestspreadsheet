@@ -22,6 +22,12 @@ Inside the brackets: unit names, `*`, `/`, powers (`^2`, `^-1`, fractions like `
 
 The error appears on the cell where the mismatch happens. Cells that depend on it show `#upstream` and link back to it.
 
+## Checked before anything is computed
+
+A dimension never depends on a value, so the sheet works out every cell's dimension from its program and the dimensions of the cells it reads — without computing a single number. A mismatch shows up the moment you type it, even if an input is still empty or has its own error: `=A1 1 [m] 1 [s] + +` reports the `+` straight away, not that `A1` is empty. The inspector shows a cell's dimension even when it has no value yet, and while editing, the hint strip shows the dimensions on the stack where evaluation can't go.
+
+What it can't know ahead is left to evaluation: an empty cell could hold any unit, and an exponent read from a cell (`A1 B1 ^`) is only known once computed — write it in the program (`A1 2 ^`) and it is.
+
 ## Multiplying composes units
 
 `*` and `/` combine units, cancelling identical ones. Nothing is renamed behind your back: `kg*m/s^2` stays `kg*m/s^2` until you ask for newtons.
