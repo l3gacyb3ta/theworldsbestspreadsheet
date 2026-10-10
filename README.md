@@ -18,7 +18,7 @@ the platform config dir (`~/Library/Application Support/wbs`, `~/.config/wbs`),
 and per-workbook settings saved in the workbook file. Every setting is declared
 once in `crates/core/src/settings.rs`; the settings window, storage, validation
 and Help ▸ Settings are generated from those declarations. Autosave is one of
-them (off by default).
+them (on by default, for workbooks that already have a file).
 
 ## Layout
 

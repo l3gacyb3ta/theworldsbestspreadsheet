@@ -1501,12 +1501,15 @@ fn autosave_never_asks_where_and_follows_the_workbook_override() {
 }
 
 #[test]
-fn autosave_is_off_by_default() {
+fn autosave_is_on_by_default() {
     let mut h = harness();
     let p = tmp_file("autosave_default.wbs.json");
+    let _ = std::fs::remove_file(&p);
     h.state_mut().path = Some(p.clone());
     type_into(&mut h, "H25", "42");
-    wait(&mut h, 65.0);
-    assert!(!p.exists());
-    assert_eq!(h.state().autosave_note(0.0), None);
+    wait(&mut h, 30.0);
+    assert!(!p.exists(), "not before the 60 s default interval");
+    wait(&mut h, 35.0);
+    assert!(p.exists(), "a workbook with a file is autosaved without asking");
+    assert_eq!(h.state().autosave_note(0.0).as_deref(), Some("autosaved"));
 }
