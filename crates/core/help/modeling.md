@@ -4,7 +4,7 @@ A model is a few inputs and a lot of consequences. The sheet is built to make "w
 
 ## Scrubbing
 
-Hold **Alt** and drag a number left or right — in a cell, or any number in the formula bar — and every dependent cell updates as you move. Hold **Shift** too for ten times faster. The step size is the number's last decimal place: `4.0` moves by 0.1, `4.00` by 0.01. Zero is a stop: one drag never takes a number from positive to negative or back, so a damping or a rate can't go negative by accident. Let go at 0 and drag again to cross it. The whole drag is one undo step.
+Hold **Alt** and drag a number left or right — in a cell, or any number in the formula bar — and every dependent cell updates as you move. Hold **Shift** too for ten times faster. The step size is the number's last decimal place: `4.0` moves by 0.1, `4.00` by 0.01. The whole drag is one undo step.
 
 ## Named inputs
 
