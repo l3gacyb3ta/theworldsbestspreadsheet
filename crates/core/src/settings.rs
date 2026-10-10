@@ -87,7 +87,7 @@ pub const AUTOSAVE_ENABLED: &Setting = &Setting {
            An untitled workbook is never autosaved (nothing asks where to save it), and quitting still asks about changes made since. \
            The status bar shows when autosave is on and when it last saved.",
     kind: Kind::Bool,
-    default: Def::Bool(false),
+    default: Def::Bool(true),
     pending: None,
 };
 

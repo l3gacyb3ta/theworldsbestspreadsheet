@@ -195,7 +195,7 @@ mod tests {
     fn defaults_without_a_file_and_nothing_written() {
         let p = tmp("missing.toml");
         let prefs = Prefs::load(p.clone());
-        assert_eq!(prefs.val(AUTOSAVE_ENABLED), Val::Bool(false));
+        assert_eq!(prefs.val(AUTOSAVE_ENABLED), Val::Bool(true));
         assert_eq!(prefs.val(AUTOSAVE_INTERVAL), Val::Int(60));
         assert_eq!(prefs.val(SYNC_SERVER), Val::Text("wss://sync.automerge.org".into()));
         assert!(prefs.problems().is_empty() && prefs.unknown_keys().is_empty() && prefs.file_error().is_none());
@@ -206,16 +206,16 @@ mod tests {
     fn round_trip_through_the_file() {
         let p = tmp("round_trip.toml");
         let mut prefs = Prefs::load(p.clone());
-        prefs.set(AUTOSAVE_ENABLED, Some(&Val::Bool(true))).unwrap();
+        prefs.set(AUTOSAVE_ENABLED, Some(&Val::Bool(false))).unwrap();
         prefs.set(AUTOSAVE_INTERVAL, Some(&Val::Int(30))).unwrap();
         prefs.set(COLOUR, Some(&Val::Colour([1, 2, 3]))).unwrap();
         prefs.set(DISPLAY_NAME, Some(&Val::Text("Ada".into()))).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(text.starts_with("# the world's best spreadsheet"), "{text}");
-        assert!(text.contains("[autosave]\nenabled = true\ninterval_seconds = 30\n"), "{text}");
+        assert!(text.contains("[autosave]\nenabled = false\ninterval_seconds = 30\n"), "{text}");
         assert!(text.contains("colour = \"#010203\""), "{text}");
         let back = Prefs::load(p.clone());
-        assert_eq!(back.val(AUTOSAVE_ENABLED), Val::Bool(true));
+        assert_eq!(back.val(AUTOSAVE_ENABLED), Val::Bool(false));
         assert_eq!(back.val(AUTOSAVE_INTERVAL), Val::Int(30));
         assert_eq!(back.val(COLOUR), Val::Colour([1, 2, 3]));
         assert_eq!(back.val(DISPLAY_NAME), Val::Text("Ada".into()));
@@ -235,7 +235,7 @@ mod tests {
         let src = "# mine\n[autosave]\nenabled = \"yes\" # typo\ninterval_seconds = 2\n\n[sync]\nserver_url = \"https://example.com\"\n";
         std::fs::write(&p, src).unwrap();
         let mut prefs = Prefs::load(p.clone());
-        assert_eq!(prefs.get(AUTOSAVE_ENABLED), (Val::Bool(false), Some("expected true or false, found \"yes\"".into())));
+        assert_eq!(prefs.get(AUTOSAVE_ENABLED), (Val::Bool(true), Some("expected true or false, found \"yes\"".into())));
         assert_eq!(prefs.get(AUTOSAVE_INTERVAL), (Val::Int(60), Some("must be from 5 to 3600 seconds, found 2".into())));
         assert_eq!(prefs.get(SYNC_SERVER).1.as_deref(), Some("must start with wss:// or ws://"));
         assert_eq!(prefs.problems().len(), 3);
@@ -262,8 +262,8 @@ mod tests {
         let text = std::fs::read_to_string(&p).unwrap();
         assert_eq!(text, "future = 1\n\n[autosave]\nenabled = true\nsmart = \"maybe\"\ninterval_seconds = 10\n\n[plugins]\nlist = [\"a\", \"b\"]\n");
         // dotted keys work as well as tables
-        std::fs::write(&p, "autosave.enabled = true\n").unwrap();
-        assert_eq!(Prefs::load(p).val(AUTOSAVE_ENABLED), Val::Bool(true));
+        std::fs::write(&p, "autosave.enabled = false\n").unwrap();
+        assert_eq!(Prefs::load(p).val(AUTOSAVE_ENABLED), Val::Bool(false));
     }
 
     #[test]
