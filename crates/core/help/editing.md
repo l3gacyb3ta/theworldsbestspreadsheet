@@ -34,7 +34,7 @@ Type a program next to a filled column and the sheet offers to extend it down to
 
 ⇧⌘C (Edit ▸ Copy Values) copies what the cells show instead of their programs, as text you could type back in: pasting it, here or in another sheet, gives the same values, now as plain numbers and text.
 
-- Numbers keep their display unit and every digit: a cell showing `5,300 m` copies as `5300 [m]`, `50 %` as `50 [%]`, `20 °C` as `20 [°C]`. A value float arithmetic left a hair off copies with all its digits (`100.00000000000006 [°C]`), so it pastes back exactly.
+- Numbers keep their display unit, to 15 significant digits: a cell showing `5,300 m` copies as `5300 [m]`, `50 %` as `50 [%]`, `20 °C` as `20 [°C]`. A number typed with 15 digits or fewer pastes back exactly; a computed one may lose float noise past the 15th digit (`0.1 0.2 +` copies as `0.3`).
 - Dates copy as ISO dates: `2026-01-31`.
 - Text copies as it is, with a `'` in front only where it would otherwise be read as a number, a date, a program or a definition (`'5`, `'=x`). Tabs and line breaks in it become spaces.
 - A spilled array copies one value per cell.

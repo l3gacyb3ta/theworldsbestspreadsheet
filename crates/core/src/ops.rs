@@ -249,8 +249,8 @@ pub fn value_literal(e: &Engine, k: CellKey) -> String {
     }
 }
 
-/// `5300 [m]` for 5300 m: the shortest number that converts back to exactly `canonical` in the display
-/// unit (all 17 digits if that's what it takes); dates as ISO dates.
+/// `5300 [m]` for 5300 m: the number in its display unit, rounded to 15 significant digits (so `0.1 0.2 +`
+/// copies as `0.3`, and anything typed with 15 digits or fewer copies exactly); dates as ISO dates.
 fn quantity_literal(canonical: f64, q: &Quant) -> String {
     let shown = q.disp.to_display(canonical);
     if !shown.is_finite() {
@@ -259,10 +259,7 @@ fn quantity_literal(canonical: f64, q: &Quant) -> String {
     if q.disp.is_date() && q.absolute.is_some() {
         return fmt_date(shown);
     }
-    let best = (0..17)
-        .filter_map(|p| format!("{shown:.p$e}").parse::<f64>().ok())
-        .find(|x| q.disp.to_canonical(*x) == canonical)
-        .unwrap_or(shown);
+    let best: f64 = format!("{shown:.14e}").parse().unwrap_or(shown);
     let ax = best.abs();
     let n = if ax == 0.0 || (1e-6..1e15).contains(&ax) { format!("{best}") } else { format!("{best:e}") };
     if q.disp.is_none() {
@@ -819,15 +816,16 @@ mod tests {
             ["hello", "'5", "'=A1", "'  padded", "'dim x", "=\"2026-01-31\"", "'it's", "=1 [m] 1 [s] +"],
             ["1", "2", "=A4:B5 10 *", "", "=A4:A5 1 [km] *", "", "", ""],
             ["3", "4", "", "", "", "", "", ""],
+            ["4.0 [%]", "0.05", "120000 [USD]", "123456789012345", "0.1 [km]", "-37.5 [°F]", "1.5e-7 [m]", "98.6 [°F]"],
         ];
         for (r, row) in rows.iter().enumerate() {
             for (c, t) in row.iter().enumerate() {
                 e.set_text(k(&e, s, r, c), t);
             }
         }
-        let clip = copy_values(&e, Rect::span(s, (0, 0), (4, 7)));
+        let clip = copy_values(&e, Rect::span(s, (0, 0), (5, 7)));
         let lines: Vec<&str> = clip.lines().collect();
-        assert_eq!(lines.len(), 5);
+        assert_eq!(lines.len(), 6);
         assert_eq!(lines[0].split('\t').count(), 8);
         let at = |r: usize, c: usize| lines[r].split('\t').nth(c).unwrap().to_string();
         // re-typeable literals, not the display (`5,300 m`)
@@ -839,8 +837,12 @@ mod tests {
         assert_eq!(at(1, 1), "25.5 [°C]");
         assert_eq!(at(1, 2), "2026-01-31");
         assert_eq!(at(1, 3), "2026-03-02");
-        // shown as 100 °C, but the conversion left it a hair over: the copy keeps every digit, so it pastes back exactly
-        assert_eq!(at(1, 4), "100.00000000000006 [°C]");
+        // computed values are rounded to 15 significant digits, dropping float noise
+        assert_eq!(at(0, 6), "0.3");
+        assert_eq!(at(1, 4), "100 [°C]");
+        assert_eq!(at(0, 1), "1766.66666666667 [m]");
+        assert_eq!(at(5, 0), "4 [%]");
+        assert_eq!(at(5, 3), "123456789012345");
         assert_eq!(at(1, 5), "-0.25 [m/s^2]");
         // text is quoted only where it would read as something else
         assert_eq!(at(2, 0), "hello");
@@ -854,15 +856,22 @@ mod tests {
         assert_eq!(at(2, 7), "#err");
         assert_eq!((at(3, 2), at(3, 3), at(4, 2), at(4, 3)), ("10".into(), "20".into(), "30".into(), "40".into()));
         assert_eq!((at(3, 4), at(4, 4)), ("1 [km]".into(), "3 [km]".into()));
-        // pasting back reproduces every value exactly, units and full precision included
+        // pasting back reproduces every value with 15 significant digits or fewer exactly, units included;
+        // computed values with more come back within the rounding
+        let noisy = [(0, 1), (0, 3), (0, 4), (0, 6), (1, 4), (1, 6)];
         let ed = paste_text(&mut e, &clip, s, (10, 0));
         e.apply(ed);
-        for r in 0..5 {
+        for r in 0..6 {
             for c in 0..8 {
                 let (a, b) = (exact(&e, k(&e, s, r, c)), exact(&e, k(&e, s, r + 10, c)));
-                match a {
-                    V::Err(code) => assert_eq!(b, V::Text(code.into())),
-                    a => assert_eq!(a, b, "{} pasted back as {:?}", at(r, c), b),
+                match (a, b) {
+                    (V::Err(code), b) => assert_eq!(b, V::Text(code.into())),
+                    (V::Num(x, qa), V::Num(y, qb)) if noisy.contains(&(r, c)) => {
+                        assert_eq!(qa, qb);
+                        let tol = if (r, c) == (0, 6) { 1e-15 } else { 1e-14 };
+                        assert!((x - y).abs() <= tol * x.abs(), "{} pasted back as {y}, was {x}", at(r, c));
+                    }
+                    (a, b) => assert_eq!(a, b, "{} pasted back as {:?}", at(r, c), b),
                 }
             }
         }

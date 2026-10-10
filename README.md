@@ -122,7 +122,7 @@ builtin, or an error message without an explanation fails the build.
 ## Keys
 
 Arrows/⇧arrows, Enter/Tab, F2 or double-click to edit, Delete clears, ⌘C/⌘X/⌘V,
-⇧⌘C copy values (as literals: `5300 [m]`), ⌘Z/⇧⌘Z, ⌘D fill down, ⌘E accept "extend formula", ⌘N/⌘O/⌘S/⇧⌘S new/open/save/save as. Alt-drag a number
+⇧⌘C copy values (as literals to 15 significant digits: `5300 [m]`), ⌘Z/⇧⌘Z, ⌘D fill down, ⌘E accept "extend formula", ⌘N/⌘O/⌘S/⇧⌘S new/open/save/save as. Alt-drag a number
 (in a cell or the formula bar) to scrub it, ⇧ for ×10. Drag a chart point to
 edit its cell, or (a computed point) goal-seek an input; click a computed point
 to switch the input. Right-click for insert/delete rows/columns and sort.
