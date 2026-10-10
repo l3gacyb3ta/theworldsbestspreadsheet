@@ -501,8 +501,12 @@ impl Engine {
                 Ok(v) => {
                     let mut v = v.clone();
                     if let Value::Num(n) = &mut v {
-                        let p = if self.kind(k) == Kind::Number { Prov::Literal(k) } else { Prov::Derived(k) };
-                        n.prov = Some(Arc::new(vec![p; n.len()]));
+                        let p: Vec<Prov> = if self.kind(k) == Kind::Number {
+                            vec![Prov::Literal(k); n.len()]
+                        } else {
+                            (0..n.len()).map(|i| Prov::Derived(k, i)).collect()
+                        };
+                        n.prov = Some(Arc::new(p));
                     }
                     Ok(v)
                 }
@@ -531,7 +535,6 @@ impl Engine {
             Shown::Error(_) => return Err(format!("{} has an error", label())),
             Shown::Value { value, dr, dc, anchor } => (value, dr, dc, anchor),
         };
-        let prov = if anchor == k && self.kind(k) == Kind::Number { Prov::Literal(k) } else { Prov::Derived(anchor) };
         match v {
             Value::Num(n) => {
                 let i = match n.shape.as_slice() {
@@ -541,6 +544,7 @@ impl Engine {
                     _ => return Err(format!("{} holds a rank {} array", label(), n.rank())),
                 };
                 let x = *n.data.get(i).ok_or_else(|| format!("{} is an empty array", label()))?;
+                let prov = if anchor == k && self.kind(k) == Kind::Number { Prov::Literal(k) } else { Prov::Derived(anchor, i) };
                 let mut s = Num::scalar(x, n.q.clone());
                 s.prov = Some(Arc::new(vec![prov]));
                 Ok(Value::Num(s))

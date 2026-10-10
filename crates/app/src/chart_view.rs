@@ -2,6 +2,7 @@
 
 use eframe::egui::{self, epaint::TextShape, Align2, Color32, FontId, Painter, Pos2, Rect, Stroke, StrokeKind, Vec2};
 use wbs_core::chart::{Chart, Mark, Xs};
+use wbs_core::ids::CellKey;
 use wbs_core::units::DispUnit;
 use wbs_core::value::{fmt_date, fmt_num, Prov};
 
@@ -27,6 +28,8 @@ pub struct YAxis {
     pub y0: f64,
     pub y1: f64,
     pub disp: DispUnit,
+    /// The chart's cell, set by the grid once drawn.
+    pub anchor: Option<CellKey>,
 }
 
 impl YAxis {
@@ -95,7 +98,8 @@ fn short(v: f64) -> String {
     }
 }
 
-pub fn draw(p: &Painter, rect: Rect, chart: &Chart, dark: bool) -> (YAxis, Vec<PointHit>) {
+/// `fixed` keeps the y range (while a point is dragged, so it stays under the pointer).
+pub fn draw(p: &Painter, rect: Rect, chart: &Chart, dark: bool, fixed: Option<(f64, f64)>) -> (YAxis, Vec<PointHit>) {
     let (bg, fg, grid, muted) = if dark {
         (Color32::from_rgb(0x1f, 0x22, 0x28), Color32::from_gray(220), Color32::from_gray(60), Color32::from_gray(150))
     } else {
@@ -148,9 +152,9 @@ pub fn draw(p: &Painter, rect: Rect, chart: &Chart, dark: bool) -> (YAxis, Vec<P
         ylo = ylo.min(0.0);
         yhi = yhi.max(0.0);
     }
-    let (y0, y1) = pad(ylo, yhi);
+    let (y0, y1) = fixed.unwrap_or_else(|| pad(ylo, yhi));
     let (x0, x1) = pad(xlo, xhi);
-    let yaxis = YAxis { plot, y0, y1, disp: ydisp.clone() };
+    let yaxis = YAxis { plot, y0, y1, disp: ydisp.clone(), anchor: None };
     let xs = |v: f64| plot.left() + (((v - x0) / (x1 - x0)) as f32) * plot.width();
     let cat_x = |i: usize| plot.left() + (i as f32 + 0.5) / ncat.max(1) as f32 * plot.width();
 

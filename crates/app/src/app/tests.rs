@@ -217,6 +217,118 @@ fn drag_bar_writes_literal() {
     assert_eq!(src.split_whitespace().next().unwrap().split('.').nth(1).map(str::len), Some(2), "{src}");
 }
 
+fn cell_key(h: &Harness<'static, App>, at: &str) -> CellKey {
+    let r = a1::parse_ref(at).unwrap();
+    h.state().eng.wb.sheets[0].key(r.row, r.col).unwrap()
+}
+
+/// Where the revenue chart draws element `i` of B10, and its y axis.
+fn revenue_point(h: &Harness<'static, App>, i: usize) -> (Pos2, YAxis) {
+    let b10 = cell_key(h, "B10");
+    let hit = h.state().chart_hits.iter().find(|(p, _)| p.prov == Prov::Derived(b10, i)).map(|(p, a)| (p.pos, a.clone()));
+    hit.expect("revenue point on the chart")
+}
+
+fn revenue(h: &Harness<'static, App>, i: usize) -> f64 {
+    match h.state().eng.result(cell_key(h, "B10")) {
+        Some(Ok(Value::Num(n))) => n.shown(i),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Drags in steps, with a snapshot and `mid` checks before letting go.
+fn drag_with_shot(h: &mut Harness<'static, App>, from: Pos2, to: Pos2, mods: Modifiers, name: &str, mid: &dyn Fn(&Harness<'static, App>)) {
+    h.event(Event::ModifiersChanged(mods));
+    h.event(Event::PointerMoved(from));
+    h.run_steps(1);
+    press(h, from, true, mods);
+    for i in 1..=6 {
+        h.event(Event::PointerMoved(from + (to - from) * (i as f32 / 6.0)));
+        h.run_steps(1);
+    }
+    shot(h, name);
+    mid(h);
+    press(h, to, false, mods);
+    h.event(Event::ModifiersChanged(Modifiers::NONE));
+    h.run_steps(2);
+}
+
+#[test]
+fn drag_derived_point_goal_seeks_an_input() {
+    let mut h = harness();
+    let (b10, b4) = (cell_key(&h, "B10"), cell_key(&h, "B4"));
+    let (p, _) = revenue_point(&h, 7);
+    h.hover_at(p);
+    h.run_steps(1);
+    shot(&mut h, "10_goal_hover");
+    // the default is the first named input upstream (start); a click switches to the next (growth)
+    click(&mut h, p, Modifiers::NONE);
+    assert_eq!(h.state().goal_inputs.get(&b10), Some(&b4));
+    assert_eq!(source(&h, "B4"), "4.0 [%]", "a click changes nothing in the sheet");
+    h.hover_at(p);
+    h.run_steps(1);
+    shot(&mut h, "11_goal_hover_growth");
+    let undo0 = h.state().undo.len();
+    let (p, axis) = revenue_point(&h, 7);
+    let to = p - Vec2::new(0.0, 80.0);
+    let want = axis.from_screen(to.y);
+    drag_with_shot(&mut h, p, to, Modifiers::NONE, "12_goal_dragging", &|h| assert_ne!(source(h, "B4"), "4.0 [%]", "live"));
+    shot(&mut h, "13_goal_solved");
+    let src = source(&h, "B4");
+    assert!(src.ends_with(" [%]") && src != "4.0 [%]", "{src}");
+    assert_eq!(src.split_whitespace().next().unwrap().split('.').nth(1).map(str::len), Some(1), "keeps one decimal: {src}");
+    let got = revenue(&h, 7);
+    // one decimal of growth is about ±0.35% of month-8 revenue
+    assert!((got - want).abs() < want * 0.01, "month 8 = {got}, wanted {want}");
+    assert_eq!(h.state().undo.len(), undo0 + 1, "one undo step");
+    assert!(h.state().status.as_deref().unwrap_or("").starts_with("goal-seek: growth (B4) = "), "{:?}", h.state().status);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run_steps(2);
+    assert_eq!(source(&h, "B4"), "4.0 [%]");
+    assert_eq!(shown(&h, "B21"), "184,734.49 USD");
+}
+
+#[test]
+fn goal_seek_without_an_answer_changes_nothing() {
+    let mut h = harness();
+    let (p, _) = revenue_point(&h, 0);
+    // month 1 is the start revenue: with growth chosen, no growth rate moves it
+    click(&mut h, p, Modifiers::NONE);
+    let undo0 = h.state().undo.len();
+    let (p, _) = revenue_point(&h, 0);
+    drag_with_shot(&mut h, p, p - Vec2::new(0.0, 60.0), Modifiers::NONE, "14_goal_out_of_reach", &|_| {});
+    shot(&mut h, "15_goal_note");
+    assert_eq!(source(&h, "B4"), "4.0 [%]");
+    assert_eq!(h.state().undo.len(), undo0);
+    let note = h.state().goal_note.as_ref().map(|n| n.2.clone()).unwrap_or_default();
+    assert!(note.starts_with("out of reach: B10 stays at 120,000 USD for growth from "), "{note}");
+    // the next press clears it
+    let away = center(&h, "E25");
+    click(&mut h, away, Modifiers::NONE);
+    assert!(h.state().goal_note.is_none());
+}
+
+#[test]
+fn slow_goal_seek_solves_on_release() {
+    let mut h = harness();
+    h.state_mut().goal_live_ms = -1.0;
+    let undo0 = h.state().undo.len();
+    let (p, axis) = revenue_point(&h, 7);
+    // the default input: start revenue
+    let to = p - Vec2::new(0.0, 50.0);
+    let want = axis.from_screen(to.y);
+    drag_with_shot(&mut h, p, to, Modifiers::SHIFT, "16_goal_on_release", &|h| assert_eq!(source(h, "B3"), "120000 [USD]", "nothing changes until release"));
+    let src = source(&h, "B3");
+    assert!(src.ends_with(" [USD]") && src != "120000 [USD]", "{src}");
+    // Shift: two more decimals than the literal's none
+    assert_eq!(src.split_whitespace().next().unwrap().split('.').nth(1).map(str::len), Some(2), "{src}");
+    assert!((revenue(&h, 7) - want).abs() < want * 0.002, "{} vs {want}", revenue(&h, 7));
+    assert_eq!(h.state().undo.len(), undo0 + 1);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run_steps(2);
+    assert_eq!(source(&h, "B3"), "120000 [USD]");
+}
+
 #[test]
 fn errors_point_at_the_token() {
     let mut h = harness();

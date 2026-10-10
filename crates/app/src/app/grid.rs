@@ -4,6 +4,7 @@
 use super::*;
 use crate::chart_view;
 use std::collections::HashSet;
+use wbs_core::solve::Goal;
 
 impl App {
     fn geometry(&mut self, area: Rect) -> Geo {
@@ -133,20 +134,22 @@ impl App {
                             ctx.set_cursor_icon(CursorIcon::ResizeVertical);
                             chart_view::tooltip(ctx, pos, &format!("{}\ndrag to edit {}", hit.label, self.label(k)));
                         }
-                        Prov::Derived(k) => {
-                            let inputs = self.eng.upstream_inputs(k);
-                            let names: Vec<String> = inputs
-                                .iter()
-                                .take(4)
-                                .map(|i| match self.eng.name_of(*i) {
-                                    Some(n) => format!("{n} ({})", self.label(*i)),
-                                    None => self.label(*i),
-                                })
-                                .collect();
-                            let solve = if names.is_empty() { "no literal inputs upstream".to_string() } else { format!("would solve for: {}", names.join(", ")) };
-                            chart_view::tooltip(ctx, pos, &format!("{}\nderived from {} — not draggable yet\n{solve}", hit.label, self.label(k)));
+                        Prov::Derived(k, i) => {
+                            let elem = self.eng.element_cell(k, i);
+                            let from = if elem == k { format!("computed in {}", self.label(k)) } else { format!("{}, spilled from {}", self.label(elem), self.label(k)) };
+                            let how = match self.goal_choice(k) {
+                                None => "no number cells upstream — nothing to goal-seek".to_string(),
+                                Some((pick, cands)) => {
+                                    ctx.set_cursor_icon(CursorIcon::ResizeVertical);
+                                    let at = cands.iter().position(|c| *c == pick).unwrap_or(0);
+                                    let others: Vec<String> = (1..cands.len()).take(4).map(|j| self.input_name(cands[(at + j) % cands.len()])).collect();
+                                    let switch = if others.is_empty() { String::new() } else { format!("\nclick to switch to {}", others.join(", then ")) };
+                                    format!("drag to goal-seek {}{switch}", self.input_name(pick))
+                                }
+                            };
+                            chart_view::tooltip(ctx, pos, &format!("{}\n{from}\n{how}", hit.label));
                         }
-                        Prov::None => chart_view::tooltip(ctx, pos, &hit.label),
+                        Prov::None => chart_view::tooltip(ctx, pos, &format!("{}\ncomputed by the chart's own program — not draggable", hit.label)),
                     }
                 } else if self.fill_handle(g).contains(pos) && self.edit.is_none() {
                     ctx.set_cursor_icon(CursorIcon::Crosshair);
@@ -226,6 +229,157 @@ impl App {
             .min_by(|a, b| a.0.pos.distance(pos).partial_cmp(&b.0.pos.distance(pos)).unwrap())
             .map(|(h, a)| (h, a))
     }
+    /// The number cells a computed cell's points can goal-seek (named inputs first), and the one they do:
+    /// the first, unless a click on one of its points switched it.
+    fn goal_choice(&self, target: CellKey) -> Option<(CellKey, Vec<CellKey>)> {
+        let cands = self.eng.upstream_inputs(target);
+        let pick = self.goal_inputs.get(&target).copied().filter(|k| cands.contains(k)).or(cands.first().copied())?;
+        Some((pick, cands))
+    }
+    /// `growth (B4)`, or `B4` for an unnamed cell.
+    fn input_name(&self, k: CellKey) -> String {
+        match self.eng.name_of(k) {
+            Some(n) => format!("{n} ({})", self.label(k)),
+            None => self.label(k),
+        }
+    }
+    fn shown_text(&self, k: CellKey) -> String {
+        match self.eng.shown(k) {
+            Shown::Value { value, dr, dc, .. } => value.display_at(dr, dc),
+            Shown::Error(e) => e.short().to_string(),
+            Shown::Empty => String::new(),
+        }
+    }
+
+    fn goal_update(&mut self, ctx: &egui::Context, g: &mut GoalDrag, pos: Pos2, mods: Modifiers) {
+        ctx.set_cursor_icon(CursorIcon::ResizeVertical);
+        g.pointer = pos;
+        if !g.moved {
+            if pos.distance(g.press) < 3.0 {
+                return;
+            }
+            g.moved = true;
+        }
+        let want = g.axis.from_screen(pos.y);
+        if g.want == Some(want) && g.fine == mods.shift {
+            return;
+        }
+        g.want = Some(want);
+        g.fine = mods.shift;
+        if g.live {
+            self.goal_run(g, true);
+        }
+    }
+
+    /// Solves for the pointer's value and writes the input, or puts it back as it was if there's no answer.
+    /// `live`: a solve slower than `goal_live_ms` writes nothing and leaves the rest of the drag to the release.
+    fn goal_run(&mut self, g: &mut GoalDrag, live: bool) {
+        let Some(want) = g.want else { return };
+        let a = &g.axis;
+        let goal = Goal {
+            target: g.target,
+            index: g.index,
+            want: a.disp.to_canonical(want),
+            // a thousandth of the axis: finer than the pointer can aim
+            tol: (a.y1 - a.y0).abs() / 1000.0 * a.disp.factor.abs(),
+            input: g.input,
+            decimals: Some(g.decimals + if g.fine { 2 } else { 0 }),
+        };
+        let t = std::time::Instant::now();
+        let res = self.eng.goal_seek(&goal);
+        g.solve_ms = t.elapsed().as_secs_f64() * 1000.0;
+        self.last_recalc_ms = g.solve_ms;
+        if live && g.solve_ms > self.goal_live_ms {
+            g.live = false;
+            g.outcome = None;
+            if self.eng.wb.cell(g.input) != g.orig.as_ref() {
+                self.eng.apply(Edit::Cells(vec![(g.input, g.orig.clone())]));
+            }
+            return;
+        }
+        g.outcome = Some(match res {
+            Ok(s) => {
+                if s.text != self.eng.wb.cell_text(g.input) {
+                    self.eng.set_text(g.input, &s.text);
+                }
+                Ok(s.text)
+            }
+            Err(e) => {
+                if self.eng.wb.cell(g.input) != g.orig.as_ref() {
+                    self.eng.apply(Edit::Cells(vec![(g.input, g.orig.clone())]));
+                }
+                Err(e)
+            }
+        });
+    }
+
+    fn goal_end(&mut self, mut g: GoalDrag) {
+        if !g.moved {
+            // a click: the next candidate input
+            if let Some((pick, cands)) = self.goal_choice(g.target) {
+                let at = cands.iter().position(|c| *c == pick).unwrap_or(0);
+                let next = cands[(at + 1) % cands.len()];
+                self.goal_inputs.insert(g.target, next);
+                self.status = Some(format!("dragging {}'s points now goal-seeks {}", self.label(g.target), self.input_name(next)));
+            }
+            return;
+        }
+        if !g.live {
+            self.goal_run(&mut g, false);
+        }
+        let elem = self.eng.element_cell(g.target, g.index);
+        match &g.outcome {
+            Some(Ok(text)) => {
+                self.status = Some(format!("goal-seek: {} = {text} puts {} at {}", self.input_name(g.input), self.label(elem), self.shown_text(elem)))
+            }
+            Some(Err(e)) => {
+                self.status = Some(format!("goal-seek: no answer — {e}"));
+                self.goal_note = Some((g.target, g.index, e.clone()));
+            }
+            None => {}
+        }
+        if self.eng.wb.cell(g.input) != g.orig.as_ref() {
+            self.undo.push(Edit::Cells(vec![(g.input, g.orig)]));
+            self.redo.clear();
+        }
+    }
+
+    /// The ghost line at the pointer's value and what the solve says, while dragging a computed point.
+    fn paint_goal(&self, ctx: &egui::Context, cp: &Painter, pal: &Pal) {
+        let Drag::Goal(g) = &self.drag else { return };
+        if !g.moved {
+            return;
+        }
+        let Some(want) = g.want else { return };
+        let y = g.axis.to_screen(want);
+        let plot = g.axis.plot;
+        cp.extend(egui::Shape::dashed_line(&[Pos2::new(plot.left(), y), Pos2::new(plot.right(), y)], Stroke::new(1.5, pal.sel), 5.0, 4.0));
+        cp.circle_stroke(Pos2::new(g.at.x, y), 5.0, Stroke::new(2.0, pal.sel));
+        let res = ((g.axis.y1 - g.axis.y0).abs() / 1000.0).max(f64::MIN_POSITIVE);
+        let step = 10f64.powf(res.log10().floor());
+        let shown = wbs_core::value::group_thousands(&wbs_core::value::fmt_num((want / step).round() * step));
+        let unit = if g.axis.disp.is_none() { String::new() } else { format!(" {}", g.axis.disp) };
+        let input = self.input_name(g.input);
+        let head = format!("goal: {} = {shown}{unit}", self.label(self.eng.element_cell(g.target, g.index)));
+        let body = match &g.outcome {
+            _ if !g.live => format!("release to goal-seek {input}\n(a solve takes {:.0} ms here — too slow to follow the pointer)", g.solve_ms),
+            Some(Ok(text)) => format!("solved: {input} = {text}"),
+            Some(Err(e)) => format!("no answer, {input} stays as it was:\n{e}"),
+            None => format!("solving {input}"),
+        };
+        chart_view::tooltip(ctx, g.pointer, &format!("{head}\n{body}"));
+    }
+
+    /// Why the last goal-seek failed, next to its point, until the next press.
+    fn paint_goal_note(&self, cp: &Painter, pal: &Pal) {
+        let Some((target, index, msg)) = &self.goal_note else { return };
+        let Some((hit, _)) = self.chart_hits.iter().find(|(h, _)| h.prov == Prov::Derived(*target, *index)) else { return };
+        let galley = cp.layout(format!("no answer: {msg}"), FontId::proportional(11.5), pal.err, 260.0);
+        let r = Rect::from_min_size(hit.pos + Vec2::new(10.0, 8.0), galley.size() + Vec2::splat(10.0));
+        cp.rect_filled(r, 4.0, pal.bg);
+        cp.rect_stroke(r, 4.0, Stroke::new(1.0, pal.err), StrokeKind::Inside);
+        cp.galley(r.min + Vec2::splat(5.0), galley, pal.err);
+    }
 
     #[allow(clippy::too_many_arguments)]
     fn press(
@@ -241,6 +395,7 @@ impl App {
         in_row_hdr: bool,
     ) {
         let ix = self.sheet_ix;
+        self.goal_note = None;
         if in_col_hdr {
             if let Some(c) = self.col_border(g, pos) {
                 if dbl {
@@ -307,9 +462,18 @@ impl App {
             self.drag = Drag::Ref { start: (r, c) };
             return;
         }
-        // 2. dragging a chart point bound to a literal cell
+        // 2. dragging a chart point: one bound to a literal cell writes it; a computed one goal-seeks an input
         if self.edit.is_none() {
             if let Some((hit, axis)) = self.chart_hit(pos) {
+                if let Prov::Derived(target, index) = hit.prov {
+                    if let Some((input, _)) = self.goal_choice(target) {
+                        let decimals = ops::cell_literal(&self.eng.wb.cell_text(input)).map_or(0, |l| l.decimals);
+                        let (axis, at, orig) = (axis.clone(), hit.pos, self.eng.wb.cell(input).cloned());
+                        let g = GoalDrag { target, index, input, orig, axis, at, press: pos, pointer: pos, decimals, fine: false, moved: false, live: true, want: None, outcome: None, solve_ms: 0.0 };
+                        self.drag = Drag::Goal(Box::new(g));
+                        return;
+                    }
+                }
                 if let Prov::Literal(k) = hit.prov {
                     let text = self.eng.wb.cell_text(k);
                     let disp = match self.eng.result(k) {
@@ -359,6 +523,12 @@ impl App {
     }
 
     fn drag_update(&mut self, ctx: &egui::Context, g: &Geo, pos: Pos2, mods: Modifiers) {
+        if let Drag::Goal(_) = self.drag {
+            let Drag::Goal(mut gd) = std::mem::replace(&mut self.drag, Drag::None) else { unreachable!() };
+            self.goal_update(ctx, &mut gd, pos, mods);
+            self.drag = Drag::Goal(gd);
+            return;
+        }
         let autoscroll = matches!(self.drag, Drag::Select | Drag::Ref { .. } | Drag::Fill { .. } | Drag::Move { .. });
         if autoscroll {
             let c = g.cells;
@@ -440,6 +610,7 @@ impl App {
                     self.last_recalc_ms = t.elapsed().as_secs_f64() * 1000.0;
                 }
             }
+            Drag::Goal(_) => {}
             Drag::Point { key, text, lit, axis, cell_disp, .. } => {
                 ctx.set_cursor_icon(CursorIcon::ResizeVertical);
                 let shown = axis.from_screen(pos.y);
@@ -487,6 +658,7 @@ impl App {
             Drag::Move { src, dst, .. } => {
                 self.move_block(src, (dst.r0, dst.c0));
             }
+            Drag::Goal(g) => self.goal_end(*g),
             Drag::Scrub { key, orig, .. } | Drag::Point { key, orig, .. } => {
                 if self.eng.wb.cell(key) != orig.as_ref() {
                     self.undo.push(Edit::Cells(vec![(key, orig)]));
@@ -622,7 +794,15 @@ impl App {
             let Some((nr, nc)) = self.eng.spill_size(a) else { continue };
             let rect = g.rect(r0, c0, r0 + nr - 1, c0 + nc - 1);
             if let Some(Ok(Value::Chart(ch))) = self.eng.result(a) {
-                let (axis, hits) = chart_view::draw(&cp, rect, ch, dark);
+                // the chart under a point drag keeps its y range
+                let held = match &self.drag {
+                    Drag::Goal(g) => Some(&g.axis),
+                    Drag::Point { axis, .. } => Some(axis),
+                    _ => None,
+                };
+                let fixed = held.filter(|ax| ax.anchor == Some(a)).map(|ax| (ax.y0, ax.y1));
+                let (mut axis, hits) = chart_view::draw(&cp, rect, ch, dark, fixed);
+                axis.anchor = Some(a);
                 for h in hits {
                     chart_hits.push((h, axis.clone()));
                 }
@@ -733,6 +913,8 @@ impl App {
         painter.line_segment([Pos2::new(area.left(), g.cells.top()), Pos2::new(area.right(), g.cells.top())], Stroke::new(1.0, pal.grid));
         painter.line_segment([Pos2::new(g.cells.left(), area.top()), Pos2::new(g.cells.left(), area.bottom())], Stroke::new(1.0, pal.grid));
         self.chart_hits = chart_hits;
+        self.paint_goal_note(&cp, pal);
+        self.paint_goal(ctx, &cp, pal);
     }
 
     fn cell_editor(&mut self, ui: &mut Ui, g: &Geo, pal: &Pal, sid: SheetId) {

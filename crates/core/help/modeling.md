@@ -20,7 +20,7 @@ The inspector's **Step through** shows a cell's program token by token with the 
 
 ## Charts as instruments
 
-A chart whose points come straight from input cells is a control: drag a point and the input changes. Hover a point that's computed and it tells you which inputs it depends on. See [[#charts]].
+A chart whose points come straight from input cells is a control: drag a point and the input changes. Drag a point that's computed and the sheet goal-seeks: it solves for the input value that puts the point where you let go — the first named input upstream, or click the point to switch to the next. If nothing reaches it, nothing changes and the point says why. See [[#charts]].
 
 ## Exchange rates and other factors
 
