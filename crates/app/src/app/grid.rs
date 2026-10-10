@@ -99,6 +99,7 @@ impl App {
         self.geo = Some(g.clone());
         self.paint(ui, &ctx, &pal, &g, area, dark, sid);
         self.cell_editor(ui, &g, &pal, sid);
+        self.ime_area(&ctx, g.cell(self.cursor.0, self.cursor.1));
         self.offer_banner(ui, &g, sid);
         self.context_menu(&resp);
     }

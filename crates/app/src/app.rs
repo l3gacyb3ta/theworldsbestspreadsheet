@@ -99,6 +99,10 @@ struct Editing {
     pick: Option<usize>,
     /// The completion list was closed with Escape (until the text or caret changes).
     comp_closed: bool,
+    /// An IME composition is in progress (its preedit text is part of `text`).
+    composing: bool,
+    /// Byte span of a composition started on a selected cell, held here until it's committed and the editor takes focus.
+    preedit: Option<Range<usize>>,
 }
 
 enum Drag {
@@ -429,7 +433,7 @@ impl App {
         let orig = self.eng.wb.cell_text(k);
         let text = text.unwrap_or_else(|| orig.clone());
         let cursor = text.chars().count();
-        self.edit = Some(Editing { key: k, orig, text, cursor, ref_span: None, in_bar, pick: None, comp_closed: false });
+        self.edit = Some(Editing { key: k, orig, text, cursor, ref_span: None, in_bar, pick: None, comp_closed: false, composing: false, preedit: None });
         self.focus_req = Some((ctx.cumulative_pass_nr() + 1, cursor));
         self.offer = None;
     }

@@ -36,6 +36,7 @@ enum TabAct {
 impl App {
     /// Grid keyboard: only when no text field has focus.
     pub(super) fn keys(&mut self, ctx: &egui::Context) {
+        self.ime_events(ctx);
         let (events, mods) = ctx.input(|i| (i.events.clone(), i.modifiers));
         let focused = ctx.memory(|m| m.focused());
         if self.edit.is_some() {
@@ -89,6 +90,83 @@ impl App {
                 _ => {}
             }
         }
+    }
+
+    /// IME composition (Japanese, Chinese, Korean, dead keys, emoji committed by an IME). The OS only composes while egui asks for
+    /// IME, which a focused text field does and the grid does too (`ime_area`). A composition started on a selected cell
+    /// starts an edit and is kept in its text, the editor unfocused, until it's committed: focusing a text field would
+    /// interrupt it. Enter, Tab and Escape belong to the IME while composing, so they're dropped if they get through.
+    fn ime_events(&mut self, ctx: &egui::Context) {
+        use egui::ImeEvent;
+        let events = ctx.input(|i| i.events.clone());
+        if !events.iter().any(|e| matches!(e, Event::Ime(_))) && !self.edit.as_ref().is_some_and(|e| e.composing) {
+            return;
+        }
+        let grid = ctx.memory(|m| m.focused().is_none());
+        let mut composing = self.edit.as_ref().is_some_and(|e| e.composing);
+        let mut keep = vec![true; events.len()];
+        // whether the last IME event this frame left a composition going
+        let mut active = None;
+        for (i, ev) in events.iter().enumerate() {
+            let (text, commit) = match ev {
+                Event::Ime(ImeEvent::Preedit { text, .. }) => (text, false),
+                Event::Ime(ImeEvent::Commit(text)) => (text, true),
+                Event::Key { key: Key::Enter | Key::Tab | Key::Escape, pressed: true, .. } if composing => {
+                    // only one: should the IME have ended without telling us, the next press works
+                    keep[i] = false;
+                    composing = false;
+                    continue;
+                }
+                _ => continue,
+            };
+            composing = !commit && !text.is_empty();
+            active = Some(composing);
+            if self.edit.is_none() && grid && !text.is_empty() {
+                // typing replaces the cell, as with Event::Text
+                let (r, c) = self.cursor;
+                self.start_edit(ctx, r, c, Some(String::new()), false);
+                if let Some(ed) = &mut self.edit {
+                    ed.preedit = Some(0..0);
+                    self.focus_req = None;
+                }
+            }
+            let Some(ed) = self.edit.as_mut() else { continue };
+            let Some(span) = ed.preedit.clone() else { continue };
+            ed.text.replace_range(span.clone(), text);
+            let end = span.start + text.len();
+            ed.preedit = Some(if commit { end..end } else { span.start..end });
+            keep[i] = false;
+        }
+        if let Some(ed) = &mut self.edit {
+            ed.composing = composing;
+            if let Some(span) = ed.preedit.clone().filter(|_| active == Some(false)) {
+                if ed.text.is_empty() {
+                    // composed nothing (e.g. Escape in the IME): leave the cell as it was
+                    self.edit = None;
+                } else {
+                    ed.preedit = None;
+                    ed.cursor = ed.text[..span.end].chars().count();
+                    // this frame's IME events are consumed, so the editor can take focus now
+                    self.focus_req = Some((ctx.cumulative_pass_nr(), ed.cursor));
+                }
+            }
+        }
+        if keep.contains(&false) {
+            let mut k = keep.into_iter();
+            ctx.input_mut(|i| i.events.retain(|_| k.next().unwrap_or(true)));
+        }
+    }
+
+    /// Lets the OS IME compose while the grid has the keyboard (see `ime_events`), its candidate window at the cell.
+    pub(super) fn ime_area(&self, ctx: &egui::Context, cell: Rect) {
+        let rect = match &self.edit {
+            None if self.confirm.is_none() && ctx.memory(|m| m.focused().is_none()) => cell,
+            Some(e) if e.preedit.is_some() => self.editor_rect.unwrap_or(cell),
+            _ => return,
+        };
+        let cursor_rect = Rect::from_min_size(rect.min + Vec2::new(5.0, 2.0), Vec2::new(1.0, rect.height() - 4.0));
+        let ime = egui::output::IMEOutput { purpose: egui::IMEPurpose::Normal, rect, cursor_rect, should_interrupt_composition: false };
+        ctx.output_mut(|o| o.ime = Some(ime));
     }
 
     /// F1: open help (in front) at the page that explains what's under the caret

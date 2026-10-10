@@ -14,7 +14,10 @@ fn harness_dt(dt: f32) -> Harness<'static, App> {
         .with_size([1440.0, 900.0])
         .with_step_dt(dt)
         .wgpu()
-        .build_eframe(|_| App::new(PathBuf::from("/nonexistent/ui-test.wbs.json")));
+        .build_eframe(|cc| {
+            crate::fonts::install(&cc.egui_ctx);
+            App::new(PathBuf::from("/nonexistent/ui-test.wbs.json"))
+        });
     h.run_steps(3);
     h
 }
@@ -928,6 +931,128 @@ fn edit_commands_reach_the_grid_and_the_editor() {
     let injected = std::mem::take(&mut h.state_mut().inject);
     assert!(matches!(injected[..], [Event::Key { key: Key::Z, pressed: true, modifiers, .. }] if modifiers.command));
     assert_eq!(source(&h, "H25"), "42", "grid undo didn't run");
+}
+
+// ---- IME ----------------------------------------------------------------------
+
+fn preedit(h: &mut Harness<'static, App>, s: &str) {
+    h.event(Event::Ime(egui::ImeEvent::Preedit { text: s.into(), active_range_chars: Some(0..s.chars().count()) }));
+    h.run_steps(1);
+}
+
+/// What winit sends on macOS when Enter (or a candidate click) ends a composition.
+fn ime_commit(h: &mut Harness<'static, App>, s: &str) {
+    h.event(Event::Ime(egui::ImeEvent::Preedit { text: String::new(), active_range_chars: None }));
+    h.event(Event::Ime(egui::ImeEvent::Commit(s.into())));
+    h.run_steps(2);
+}
+
+/// Types 日本 the way the macOS Japanese IME delivers it, with a stray Enter in the middle of the composition.
+fn compose_nihon(h: &mut Harness<'static, App>) {
+    #[expect(deprecated)]
+    h.event(Event::Ime(egui::ImeEvent::Enabled));
+    preedit(h, "n");
+    preedit(h, "に");
+    preedit(h, "にほ");
+    h.key_press(Key::Enter);
+    h.run_steps(1);
+    preedit(h, "日本");
+    ime_commit(h, "日本");
+    #[expect(deprecated)]
+    h.event(Event::Ime(egui::ImeEvent::Disabled));
+    h.run_steps(1);
+}
+
+#[test]
+fn ime_composes_into_a_selected_cell() {
+    let mut h = harness();
+    {
+        let p = center(&h, "H25");
+        click(&mut h, p, Modifiers::NONE);
+    }
+    preedit(&mut h, "n");
+    assert_eq!(edit_text(&h).as_deref(), Some("n"), "the first keystroke starts the edit");
+    preedit(&mut h, "にほ");
+    shot(&mut h, "ime_01_composing_in_grid");
+    assert_eq!(edit_text(&h).as_deref(), Some("にほ"));
+    // the composition isn't interrupted by focusing the editor
+    assert_eq!(h.ctx.memory(|m| m.focused()), None);
+    compose_nihon(&mut h);
+    assert_eq!(edit_text(&h).as_deref(), Some("日本"), "Enter while composing doesn't commit the cell");
+    assert_eq!(h.state().cursor, (24, 7));
+    assert_eq!(h.ctx.memory(|m| m.focused()), Some(Id::new("cell_editor")), "after the commit the editor has the keyboard");
+    typ(&mut h, "語");
+    shot(&mut h, "ime_02_committed");
+    key(&mut h, Key::Enter);
+    assert_eq!(source(&h, "H25"), "日本語");
+    assert_eq!(h.state().cursor, (25, 7));
+}
+
+#[test]
+fn ime_composes_into_the_editors() {
+    let mut h = harness();
+    // in-cell, inside a program's string
+    {
+        let p = center(&h, "H25");
+        click(&mut h, p, Modifiers::NONE);
+    }
+    typ(&mut h, "=\"");
+    compose_nihon(&mut h);
+    assert_eq!(edit_text(&h).as_deref(), Some("=\"日本"));
+    typ(&mut h, "\"");
+    key(&mut h, Key::Enter);
+    assert_eq!(source(&h, "H25"), "=\"日本\"");
+    assert_eq!(shown(&h, "H25"), "日本");
+    // the formula bar (click right of the address label)
+    {
+        let p = center(&h, "H27");
+        click(&mut h, p, Modifiers::NONE);
+    }
+    let addr = h.get_all_by_label("H27").map(|n| n.rect()).min_by(|a, b| a.top().total_cmp(&b.top())).unwrap().right_center();
+    click(&mut h, addr + Vec2::new(400.0, 0.0), Modifiers::NONE);
+    assert!(h.state().edit.as_ref().unwrap().in_bar);
+    compose_nihon(&mut h);
+    assert_eq!(edit_text(&h).as_deref(), Some("日本"));
+    assert!(h.state().edit.as_ref().unwrap().in_bar);
+    shot(&mut h, "ime_04_formula_bar");
+    key(&mut h, Key::Enter);
+    assert_eq!(source(&h, "H27"), "日本");
+}
+
+#[test]
+fn emoji_and_ime_commits_land() {
+    let mut h = harness();
+    // the emoji picker commits without composing
+    {
+        let p = center(&h, "H25");
+        click(&mut h, p, Modifiers::NONE);
+    }
+    h.event(Event::Ime(egui::ImeEvent::Commit("😀".into())));
+    h.run_steps(2);
+    assert_eq!(edit_text(&h).as_deref(), Some("😀"));
+    h.event(Event::Ime(egui::ImeEvent::Commit("🎉".into())));
+    h.run_steps(2);
+    typ(&mut h, " ok");
+    key(&mut h, Key::Enter);
+    assert_eq!(source(&h, "H25"), "😀🎉 ok");
+    // a composition abandoned with Escape leaves the cell alone
+    type_into(&mut h, "H27", "keep");
+    {
+        let p = center(&h, "H27");
+        click(&mut h, p, Modifiers::NONE);
+    }
+    preedit(&mut h, "k");
+    h.event(Event::Ime(egui::ImeEvent::Preedit { text: String::new(), active_range_chars: None }));
+    h.run_steps(2);
+    assert!(h.state().edit.is_none());
+    assert_eq!(source(&h, "H27"), "keep");
+    // other scripts arrive as text; how they render depends on the fonts found (see fonts.rs)
+    let rows = ["😀😂😊😍😘😎😭😅😉😢😡", "👍👎👏🙏💪👀🎉🔥❤️💔💯", "✅❌⭐🌟☀️🌈⚡☕🍕🎂🚀", "🤣🥰🤔🙂🙃🤝🫠🥲🧠🦀", "日本語 ひらがな カタカナ 中文", "한국어 مرحبا שלום हिन्दी"];
+    for (i, r) in rows.iter().enumerate() {
+        type_into(&mut h, &format!("E{}", 24 + i), r);
+        assert_eq!(source(&h, &format!("E{}", 24 + i)), *r);
+    }
+    shot(&mut h, "ime_03_scripts");
 }
 
 // ---- sheet tabs ----------------------------------------------------------------
