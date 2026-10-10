@@ -59,7 +59,7 @@ pub struct Scratch {
 /// because a recalc visits all of it for every cell.
 struct Node {
     kind: Kind,
-    compiled: Result<Arc<Compiled>, CompileError>,
+    compiled: Result<Arc<Compiled>, Box<CompileError>>,
     deps: Vec<Dep>,
     stat: Option<Static>,
     result: Option<CellResult>,
@@ -69,7 +69,8 @@ struct Node {
 struct Static {
     /// What the cell holds (for a unit declaration: its defining quantity).
     val: SVal,
-    err: Option<EvalErr>,
+    /// (Boxed: rare, and a recalc walks every node.)
+    err: Option<Box<EvalErr>>,
 }
 
 impl Static {
@@ -284,7 +285,7 @@ impl Engine {
     }
 
     pub fn compile_error(&self, k: CellKey) -> Option<&CompileError> {
-        self.nodes.get(&k)?.compiled.as_ref().err()
+        self.nodes.get(&k)?.compiled.as_ref().err().map(|e| &**e)
     }
 
     pub fn spill_anchor(&self, k: CellKey) -> Option<CellKey> {
@@ -447,7 +448,7 @@ impl Engine {
 
     /// The unit error the static pass found in a cell, if any.
     pub fn static_error(&self, k: CellKey) -> Option<&EvalErr> {
-        self.stat(&k)?.err.as_ref()
+        self.stat(&k)?.err.as_deref()
     }
 
     /// What a reference to node `k` pushes.
@@ -474,7 +475,7 @@ impl Engine {
         let env = View(self);
         let from = |r: Result<SVal, EvalErr>| match r {
             Ok(val) => Static { val, err: None },
-            Err(e) => Static { val: SVal::Any, err: Some(e) },
+            Err(e) => Static { val: SVal::Any, err: Some(Box::new(e)) },
         };
         match &**c {
             Compiled::Program(ops) => from(dims::analyze(&env, ops)),
@@ -528,15 +529,16 @@ impl Engine {
     // ---- value access used by the interpreter ----------------------------
 
     fn ref_value(&self, k: CellKey) -> Result<Value, String> {
-        if self.wb.sheet(k.sheet).is_none() {
-            return Err("reference to a deleted sheet".into());
-        }
+        // (a cell with a value is on a live sheet: a deleted sheet's cells have no nodes)
         if let Some(r) = self.res(&k) {
             return match r {
                 // provenance was stamped when the result was stored (see recalc)
                 Ok(v) => Ok(v.clone()),
                 Err(_) => Err(format!("{} has an error", self.wb.cell_label(k, None))),
             };
+        }
+        if self.wb.sheet(k.sheet).is_none() {
+            return Err("reference to a deleted sheet".into());
         }
         if self.cover.contains_key(&k) {
             return self.scalar_at(k);
@@ -1025,10 +1027,10 @@ impl Engine {
 
     fn compile_node(&self, k: CellKey, text: &str) -> Node {
         if let Some(e) = self.dead_sheet_ref(k) {
-            return Node { kind: classify(text), compiled: Err(e), deps: vec![], stat: None, result: None };
+            return Node { kind: classify(text), compiled: Err(Box::new(e)), deps: vec![], stat: None, result: None };
         }
         let mut c = Compiler::new(&self.wb, &self.syms, k.sheet);
-        let compiled = c.compile(text).map(Arc::new);
+        let compiled = c.compile(text).map(Arc::new).map_err(Box::new);
         Node { kind: classify(text), compiled, deps: c.deps, stat: None, result: None }
     }
 
@@ -1403,15 +1405,19 @@ impl Engine {
     /// whose wanted region overlaps it — then both are blocked, no matter
     /// which was computed first.
     fn place_spill(&mut self, k: CellKey, res: CellResult) -> (CellResult, Vec<CellKey>) {
+        // most cells neither spill nor did: nothing to update (spills only holds anchors that are in desired)
+        let size = match &res {
+            Ok(v) => v.spill_size(),
+            Err(_) => (1, 1),
+        };
+        if size == (1, 1) && !self.desired.contains_key(&k) {
+            return (res, Vec::new());
+        }
         let old = self.spills.remove(&k);
         let mut changed = Vec::new();
         if let Some(reg) = old {
             changed.extend(self.uncover(&reg));
         }
-        let size = match &res {
-            Ok(v) => v.spill_size(),
-            Err(_) => (1, 1),
-        };
         let pos = if size == (1, 1) { None } else { self.wb.pos(k) };
         let Some((r0, c0)) = pos else {
             changed.extend(self.set_desired(k, None));
@@ -1462,7 +1468,7 @@ impl Engine {
             Err(e) => return Err(CellError { msg: e.msg.clone(), span: e.span.clone(), kind: ErrKind::Local }),
         };
         // A unit error found statically is this cell's, whatever its inputs hold.
-        if let Some(e) = n.stat.as_ref().and_then(|s| s.err.as_ref()) {
+        if let Some(e) = n.stat.as_ref().and_then(|s| s.err.as_deref()) {
             return Err(local(e.msg.clone(), e.span.clone()));
         }
         // An error in a referenced cell is reported as upstream, not here.
