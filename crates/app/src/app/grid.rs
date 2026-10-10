@@ -133,12 +133,57 @@ impl App {
                 if let Some((hit, axis)) = self.chart_hit(pos) {
                     let label = self.hit_label(hit, axis);
                     self.fonts.note(&label);
-                    match hit.prov {
-                        Prov::Literal(k) => {
+                    // scatter and path points move along each axis whose value comes straight from a number cell
+                    let xk = match hit.xprov {
+                        Prov::Literal(k) if hit.prov != Prov::Literal(k) => Some(k),
+                        _ => None,
+                    };
+                    let why = |p: Prov| match p {
+                        Prov::Derived(k, i) => format!("computed in {}", self.label(self.eng.element_cell(k, i))),
+                        _ => "computed by the chart's own program".to_string(),
+                    };
+                    match (hit.prov, xk) {
+                        (Prov::Literal(k), Some(xk)) => {
+                            ctx.set_cursor_icon(CursorIcon::Move);
+                            chart_view::tooltip_lines(
+                                ctx,
+                                pos,
+                                &[
+                                    Tip::Value(label.clone()),
+                                    Tip::Action(format!("drag to edit {} (x) and {} (y)", self.label(xk), self.label(k))),
+                                    Tip::Note("hold Alt to lock to one axis, Shift for finer steps".to_string()),
+                                ],
+                            );
+                        }
+                        (p, Some(xk)) => {
+                            ctx.set_cursor_icon(CursorIcon::ResizeHorizontal);
+                            chart_view::tooltip_lines(
+                                ctx,
+                                pos,
+                                &[
+                                    Tip::Value(label.clone()),
+                                    Tip::Action(format!("drag sideways to edit {}", self.label(xk))),
+                                    Tip::Note(format!("y is {}, so only x moves", why(p))),
+                                ],
+                            );
+                        }
+                        (Prov::Literal(k), None) if hit.two_d && hit.xprov != Prov::Literal(k) => {
+                            ctx.set_cursor_icon(CursorIcon::ResizeVertical);
+                            chart_view::tooltip_lines(
+                                ctx,
+                                pos,
+                                &[
+                                    Tip::Value(label.clone()),
+                                    Tip::Action(format!("drag up and down to edit {}", self.label(k))),
+                                    Tip::Note(format!("x is {}, so only y moves", why(hit.xprov))),
+                                ],
+                            );
+                        }
+                        (Prov::Literal(k), None) => {
                             ctx.set_cursor_icon(CursorIcon::ResizeVertical);
                             chart_view::tooltip_lines(ctx, pos, &[Tip::Value(label.clone()), Tip::Action(format!("drag to edit {}", self.label(k)))]);
                         }
-                        Prov::Derived(k, i) => {
+                        (Prov::Derived(k, i), None) => {
                             let elem = self.eng.element_cell(k, i);
                             let from = if elem == k { format!("computed in {}", self.label(k)) } else { format!("{}, spilled from {}", self.label(elem), self.label(k)) };
                             let mut tip = vec![Tip::Value(label.clone())];
@@ -149,6 +194,10 @@ impl App {
                                     tip.push(Tip::Action(format!("drag to goal-seek {}", self.input_name(pick))));
                                     let at = cands.iter().position(|c| *c == pick).unwrap_or(0);
                                     let others: Vec<String> = (1..cands.len()).take(4).map(|j| self.input_name(cands[(at + j) % cands.len()])).collect();
+                                    // a goal-seek solves for one input, so it never moves x too
+                                    if hit.two_d {
+                                        tip.push(Tip::Note(format!("x is {} too, so only y moves", why(hit.xprov))));
+                                    }
                                     if !others.is_empty() {
                                         tip.push(Tip::Note(format!("click to switch to {}", others.join(", "))));
                                     }
@@ -157,7 +206,7 @@ impl App {
                             tip.push(Tip::Note(from));
                             chart_view::tooltip_lines(ctx, pos, &tip);
                         }
-                        Prov::None => chart_view::tooltip_lines(ctx, pos, &[Tip::Value(label), Tip::Note("computed by the chart's own program: not draggable".to_string())]),
+                        (Prov::None, None) => chart_view::tooltip_lines(ctx, pos, &[Tip::Value(label), Tip::Note("computed by the chart's own program: not draggable".to_string())]),
                     }
                 } else if self.fill_handle(g).contains(pos) && self.edit.is_none() {
                     ctx.set_cursor_icon(CursorIcon::Crosshair);
@@ -251,6 +300,14 @@ impl App {
         let cands = self.eng.upstream_inputs(target);
         let pick = self.goal_inputs.get(&target).copied().filter(|k| cands.contains(k)).or(cands.first().copied())?;
         Some((pick, cands))
+    }
+    /// The literal number cell a chart point's value comes straight from, which dragging it writes.
+    fn point_cell(&self, p: Prov) -> Option<PointCell> {
+        let Prov::Literal(key) = p else { return None };
+        let text = self.eng.wb.cell_text(key);
+        let lit = ops::cell_literal(&text)?;
+        let Some(Ok(Value::Num(n))) = self.eng.result(key) else { return None };
+        Some(PointCell { key, orig: self.eng.wb.cell(key).cloned(), disp: n.q.disp.clone(), text, lit })
     }
     /// `growth (B4)`, or `B4` for an unnamed cell.
     fn input_name(&self, k: CellKey) -> String {
@@ -486,27 +543,24 @@ impl App {
             self.drag = Drag::Ref { start: (r, c) };
             return;
         }
-        // 2. dragging a chart point: one bound to a literal cell writes it; a computed one goal-seeks an input
+        // 2. dragging a chart point: the literal cells behind it (its y; its x too on a scatter or path) are written,
+        // or, with neither, a computed y goal-seeks an input
         if self.edit.is_none() {
             if let Some((hit, axis)) = self.chart_hit(pos) {
+                let y = self.point_cell(hit.prov);
+                let x = if hit.two_d { self.point_cell(hit.xprov).filter(|x| y.as_ref().is_none_or(|y| y.key != x.key)) } else { None };
+                if x.is_some() || y.is_some() {
+                    let axis = axis.clone();
+                    // (a press with Alt held drags the point, locked to one axis, rather than scrubbing the cell under it)
+                    self.drag = Drag::Point { y, x, axis, press: pos };
+                    return;
+                }
                 if let Prov::Derived(target, index) = hit.prov {
                     if let Some((input, _)) = self.goal_choice(target) {
                         let decimals = ops::cell_literal(&self.eng.wb.cell_text(input)).map_or(0, |l| l.decimals);
                         let (axis, at, orig) = (axis.clone(), hit.pos, self.eng.wb.cell(input).cloned());
                         let g = GoalDrag { target, index, input, orig, axis, at, press: pos, pointer: pos, decimals, fine: false, moved: false, live: true, want: None, outcome: None, solve_ms: 0.0 };
                         self.drag = Drag::Goal(Box::new(g));
-                        return;
-                    }
-                }
-                if let Prov::Literal(k) = hit.prov {
-                    let text = self.eng.wb.cell_text(k);
-                    let disp = match self.eng.result(k) {
-                        Some(Ok(Value::Num(n))) => Some(n.q.disp.clone()),
-                        _ => None,
-                    };
-                    if let (Some(lit), Some(cell_disp)) = (ops::cell_literal(&text), disp) {
-                        let axis = axis.clone();
-                        self.drag = Drag::Point { key: k, orig: self.eng.wb.cell(k).cloned(), text, lit, axis, cell_disp };
                         return;
                     }
                 }
@@ -644,24 +698,41 @@ impl App {
                 }
             }
             Drag::Goal(_) => {}
-            Drag::Point { key, text, lit, axis, cell_disp, .. } => {
-                ctx.set_cursor_icon(CursorIcon::ResizeVertical);
-                let shown = axis.from_screen(pos.y);
-                let canonical = axis.disp.to_canonical(shown);
-                let v = cell_disp.to_display(canonical);
-                // keep the literal's own precision (as scrubbing does); Shift for about 1/200 of the axis
-                let decimals = if mods.shift {
-                    let step = (axis.y1 - axis.y0).abs() / 200.0 / cell_disp.factor.abs().max(1e-300) * axis.disp.factor.abs();
-                    let dec = if step > 0.0 { (-step.log10()).ceil().max(0.0) as usize } else { 0 };
-                    dec.max(lit.decimals).min(10)
-                } else {
-                    lit.decimals
-                };
-                let new = ops::replace_span(text, &lit.span, &ops::format_lit(v, decimals, false));
-                let key = *key;
-                if new != self.eng.wb.cell_text(key) {
+            Drag::Point { y, x, axis, press } => {
+                // Alt locks a 2D drag to the axis moved along most since the press (neither, until one leads);
+                // the other cell stays exactly as it was
+                let (mut move_x, mut move_y) = (x.is_some(), y.is_some());
+                let locked = mods.alt && move_x && move_y;
+                if locked {
+                    let d = pos - *press;
+                    (move_x, move_y) = (d.x.abs() > d.y.abs(), d.y.abs() > d.x.abs());
+                    let to = if move_x { "x" } else if move_y { "y" } else { "one axis" };
+                    chart_view::tooltip_lines(ctx, pos, &[Tip::Note(format!("locked to {to} — release Alt to move freely"))]);
+                }
+                ctx.set_cursor_icon(match (move_x, move_y) {
+                    (true, true) => CursorIcon::Move,
+                    (true, false) => CursorIcon::ResizeHorizontal,
+                    (false, true) => CursorIcon::ResizeVertical,
+                    (false, false) => CursorIcon::Move,
+                });
+                let mut writes = Vec::new();
+                if let Some(c) = y {
+                    let new = if move_y { point_text(c, &axis.disp, axis.from_screen(pos.y), axis.y1 - axis.y0, mods.shift) } else { c.text.clone() };
+                    writes.push((c, new));
+                }
+                if let (Some(c), Some(xdisp)) = (x, &axis.xdisp) {
+                    let new = if move_x { point_text(c, xdisp, axis.x_from_screen(pos.x), axis.x1 - axis.x0, mods.shift) } else { c.text.clone() };
+                    writes.push((c, new));
+                }
+                writes.retain(|(c, new)| *new != self.eng.wb.cell_text(c.key));
+                if !writes.is_empty() {
+                    // both cells of a 2D drag in one edit: one recalc; a cell back at its press text gets its original cell back
+                    let cells = writes
+                        .into_iter()
+                        .map(|(c, new)| (c.key, if new == c.text { c.orig.clone() } else { Some(Cell::new(self.eng.wb.parse_text(&new, c.key.sheet))) }))
+                        .collect();
                     let t = std::time::Instant::now();
-                    self.eng.set_text(key, &new);
+                    self.eng.apply(Edit::Cells(cells));
                     self.last_recalc_ms = t.elapsed().as_secs_f64() * 1000.0;
                 }
             }
@@ -692,9 +763,17 @@ impl App {
                 self.move_block(src, (dst.r0, dst.c0));
             }
             Drag::Goal(g) => self.goal_end(*g),
-            Drag::Scrub { key, orig, .. } | Drag::Point { key, orig, .. } => {
+            Drag::Scrub { key, orig, .. } => {
                 if self.eng.wb.cell(key) != orig.as_ref() {
                     self.undo.push(Edit::Cells(vec![(key, orig)]));
+                    self.redo.clear();
+                }
+            }
+            // a diagonal drag that wrote two cells is one undo step
+            Drag::Point { y, x, .. } => {
+                let undo: Vec<_> = y.into_iter().chain(x).filter(|c| self.eng.wb.cell(c.key) != c.orig.as_ref()).map(|c| (c.key, c.orig)).collect();
+                if !undo.is_empty() {
+                    self.undo.push(Edit::Cells(undo));
                     self.redo.clear();
                 }
             }
@@ -859,13 +938,13 @@ impl App {
             let Some((nr, nc)) = self.eng.spill_size(a) else { continue };
             let rect = g.rect(r0, c0, r0 + nr - 1, c0 + nc - 1);
             if let Some(Ok(Value::Chart(ch))) = self.eng.result(a) {
-                // the chart under a point drag keeps its y range
+                // the chart under a point drag keeps its ranges
                 let held = match &self.drag {
                     Drag::Goal(g) => Some(&g.axis),
                     Drag::Point { axis, .. } => Some(axis),
                     _ => None,
                 };
-                let fixed = held.filter(|ax| ax.anchor == Some(a)).map(|ax| (ax.y0, ax.y1));
+                let fixed = held.filter(|ax| ax.anchor == Some(a)).map(|ax| ((ax.y0, ax.y1), (ax.x0, ax.x1)));
                 let (mut axis, hits) = chart_view::draw(&cp, rect, ch, dark, fixed);
                 axis.anchor = Some(a);
                 for h in hits {
@@ -1081,4 +1160,18 @@ impl App {
 fn dashed_rect(p: &Painter, r: Rect, stroke: Stroke) {
     let pts = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
     p.extend(egui::Shape::dashed_line(&pts, stroke, 4.0, 3.0));
+}
+
+/// A dragged point's literal cell's new text for the value `shown` in the axis' unit `disp`, the axis spanning `span`:
+/// in the cell's own unit and with its own decimals (a date in whole days); `fine` (Shift) about 1/200 of the axis.
+fn point_text(c: &PointCell, disp: &wbs_core::units::DispUnit, shown: f64, span: f64, fine: bool) -> String {
+    let v = c.disp.to_display(disp.to_canonical(shown));
+    let decimals = if fine {
+        let step = span.abs() / 200.0 / c.disp.factor.abs().max(1e-300) * disp.factor.abs();
+        let dec = if step > 0.0 { (-step.log10()).ceil().max(0.0) as usize } else { 0 };
+        dec.max(c.lit.decimals).min(10)
+    } else {
+        c.lit.decimals
+    };
+    ops::replace_span(&c.text, &c.lit.span, &ops::format_lit(v, decimals, c.lit.is_date))
 }

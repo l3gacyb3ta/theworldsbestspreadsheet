@@ -80,7 +80,10 @@ fn chart_points_know_which_element_they_are() {
     let mut e = e;
     set(&mut e, "A40", "=B21 B22 join B21 B22 join line");
     let Some(Ok(Value::Chart(c))) = e.result(key(&e, "A40")) else { panic!() };
-    assert!(c.layers[0].ys.prov.is_none(), "join computes: provenance is dropped");
+    assert_eq!(c.layers[0].ys.prov.to_vec(2), Some(vec![Prov::Derived(key(&e, "B10"), 11), Prov::Derived(key(&e, "B10"), 12)]), "join only rearranges");
+    set(&mut e, "A40", "=B21 B22 join B21 B22 join 2 * line");
+    let Some(Ok(Value::Chart(c))) = e.result(key(&e, "A40")) else { panic!() };
+    assert!(c.layers[0].ys.prov.is_none(), "* computes: provenance is dropped");
     set(&mut e, "A40", "=A21:A22 B21:B22 line");
     let Some(Ok(Value::Chart(c))) = e.result(key(&e, "A40")) else { panic!() };
     assert_eq!(c.layers[0].ys.prov.to_vec(2), Some(vec![Prov::Derived(key(&e, "B10"), 11), Prov::Derived(key(&e, "B10"), 12)]));

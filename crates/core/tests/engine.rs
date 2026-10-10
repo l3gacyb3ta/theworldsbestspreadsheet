@@ -277,6 +277,28 @@ fn charts() {
 }
 
 #[test]
+fn path_keeps_the_order_given() {
+    let mut e = eng();
+    for (at, x, y) in [("A1", "0", "0 [m]"), ("A2", "1", "0 [m]"), ("A3", "1", "1 [m]"), ("A4", "0", "1 [m]")] {
+        set(&mut e, at, x);
+        set(&mut e, &at.replace('A', "B"), y);
+    }
+    set(&mut e, "D1", "=A1:A4 A1 join B1:B4 B1 join path");
+    let k = key(&e, "D1");
+    let Some(Ok(v @ wbs_core::value::Value::Chart(c))) = e.result(k) else { panic!("{}", show(&e, "D1")) };
+    assert_eq!(v.summary(8), "chart · path (5 points) · 6×14 cells");
+    assert_eq!(c.layers[0].mark, wbs_core::chart::Mark::Path);
+    let wbs_core::chart::Xs::Num(xs) = &c.layers[0].xs else { panic!() };
+    assert_eq!(&*xs.data, &[0.0, 1.0, 1.0, 0.0, 0.0], "not sorted by x");
+    assert_eq!(&*c.layers[0].ys.data, &[0.0, 0.0, 1.0, 1.0, 0.0]);
+    assert_eq!(e.static_value(k), Some(&wbs_core::dims::SVal::Chart), "the static pass knows it's a chart");
+    set(&mut e, "D1", "=A1:A4 B1:B3 path");
+    assert!(show(&e, "D1").contains("4 x values but 3 y values"), "{}", show(&e, "D1"));
+    set(&mut e, "D1", "=\"a\" B1:B4 path");
+    assert!(show(&e, "D1").starts_with("ERR"));
+}
+
+#[test]
 fn percent_is_absorbed_by_dimensioned_quantities() {
     let mut e = eng();
     set(&mut e, "A1", "=4 [%] 100 [USD] *");
