@@ -363,6 +363,32 @@ fn formula_extension_offer() {
     assert_eq!(source(&h, "F29"), "");
 }
 
+#[test]
+fn double_click_fill_handle_lines_up_with_a_spill() {
+    // 60 fps, so two clicks land inside egui's double-click window
+    let mut h = harness_dt(1.0 / 60.0);
+    // a recurrence beside the demo's spilled profit column: no dragging out every row
+    for (at, text) in [("E10", "100"), ("E11", "=E10 0.9 *")] {
+        let p = center(&h, at);
+        click(&mut h, p, Modifiers::NONE);
+        typ(&mut h, text);
+        key(&mut h, Key::Enter);
+    }
+    h.run_steps(60);
+    { let p = center(&h, "E11"); click(&mut h, p, Modifiers::NONE); }
+    h.run_steps(60);
+    let handle = h.state().geo.as_ref().unwrap().cell(10, 4).right_bottom() - Vec2::splat(1.0);
+    for _ in 0..2 {
+        click(&mut h, handle, Modifiers::NONE);
+    }
+    h.run_steps(2);
+    assert_eq!(source(&h, "E33"), "=E32 0.9 *");
+    assert_eq!(source(&h, "E34"), "");
+    assert_eq!(h.state().cursor, (32, 4));
+    undo(&mut h);
+    assert_eq!(source(&h, "E12"), "");
+}
+
 // ---- help system -------------------------------------------------------------
 
 #[test]

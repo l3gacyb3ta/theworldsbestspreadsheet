@@ -52,6 +52,7 @@ A • in the window title means there are unsaved changes.
 |---|---|
 | Alt-drag a number | scrub it (⇧ for ×10) |
 | drag the selection corner | fill |
+| double-click the selection corner | fill down as far as the column beside |
 | drag the selection's border | move the cells (Alt-drag copies them) |
 | drag a header border | resize; double-click to fit |
 | drag a hollow chart point | edit the cell behind it (⇧ for finer steps) |

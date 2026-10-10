@@ -527,9 +527,18 @@ impl App {
                 return;
             }
         }
-        // 5. fill handle
+        // 5. fill handle: drag to fill; double-click fills down as far as the column beside goes
         if self.edit.is_none() && self.fill_handle(g).contains(pos) {
             let s = self.sel();
+            if dbl {
+                if let Some(dst) = ops::fill_down_extent(&self.eng, s) {
+                    let e = ops::fill(&mut self.eng, s, dst);
+                    self.exec(e);
+                    self.anchor = (dst.r0, dst.c0);
+                    self.cursor = (dst.r1, dst.c1);
+                }
+                return;
+            }
             self.drag = Drag::Fill { src: s, dst: s };
             return;
         }

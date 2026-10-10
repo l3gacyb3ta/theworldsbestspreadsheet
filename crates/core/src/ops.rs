@@ -536,26 +536,36 @@ pub fn extension_offer(e: &Engine, k: CellKey) -> Option<Rect> {
     if e.kind(k) != Kind::Program {
         return None;
     }
-    let s = e.wb.sheet(k.sheet)?;
-    let (r, c) = s.pos(k)?;
-    let filled = |row: usize, col: usize| s.cell_at(row, col).is_some();
-    if filled(r + 1, c) {
+    let (r, c) = e.wb.sheet(k.sheet)?.pos(k)?;
+    fill_down_extent(e, Rect::cell(k.sheet, r, c))
+}
+
+/// How far down filling `sel` should go to line up with the data beside it: the column just
+/// left of the selection (or else just right) continues below it, and the fill runs to the
+/// end of that run, stopping before anything already in the selection's columns. Spilled
+/// values count, so a `1000 range` time column sets how far a recurrence beside it extends.
+/// Returns the whole fill target (including `sel`), or `None` when there's nothing to line up with.
+pub fn fill_down_extent(e: &Engine, sel: Rect) -> Option<Rect> {
+    let s = e.wb.sheet(sel.sheet)?;
+    let shows = |row: usize, col: usize| s.key(row, col).is_some_and(|k| !matches!(e.shown(k), Shown::Empty));
+    let below_free = |row: usize| (sel.c0..=sel.c1).all(|c| !shows(row, c));
+    if !below_free(sel.r1 + 1) {
         return None;
     }
     let mut best = None;
-    for nc in [c.checked_sub(1), Some(c + 1)].into_iter().flatten() {
-        if nc >= s.cols.len() || !filled(r, nc) || !filled(r + 1, nc) {
+    for nc in [sel.c0.checked_sub(1), Some(sel.c1 + 1)].into_iter().flatten() {
+        if nc >= s.cols.len() || !shows(sel.r1, nc) || !shows(sel.r1 + 1, nc) {
             continue;
         }
-        let mut end = r + 1;
-        while end + 1 < s.rows.len() && filled(end + 1, nc) && !filled(end + 1, c) {
+        let mut end = sel.r1 + 1;
+        while end + 1 < s.rows.len() && shows(end + 1, nc) && below_free(end + 1) {
             end += 1;
         }
         if best.map(|b: usize| end > b).unwrap_or(true) {
             best = Some(end);
         }
     }
-    best.map(|end| Rect { sheet: k.sheet, r0: r, c0: c, r1: end, c1: c })
+    best.map(|end| Rect { r1: end, ..sel })
 }
 
 #[cfg(test)]
@@ -646,6 +656,29 @@ mod tests {
         e.set_text(k(&e, s, 0, 1), "=A1 2 *");
         let offer = extension_offer(&e, k(&e, s, 0, 1)).unwrap();
         assert_eq!((offer.r0, offer.r1), (0, 4));
+    }
+
+    #[test]
+    fn fill_down_lines_up_with_a_spill_beside_it() {
+        // a recurrence next to a spilled time column: x0, then x(n) from x(n-1)
+        let (mut e, s) = setup();
+        put(&mut e, s, &[("A1", "=12 range 0.5 *"), ("B1", "10"), ("B2", "=B1 0.9 *")]);
+        assert_eq!((val(&e, s, "A2"), val(&e, s, "A12"), val(&e, s, "B2")), ("0.5".into(), "5.5".into(), "9".into()));
+        let ext = fill_down_extent(&e, Rect::cell(s, 1, 1)).unwrap();
+        assert_eq!((ext.r0, ext.r1, ext.c0, ext.c1), (1, 11, 1, 1));
+        let ed = fill(&mut e, Rect::cell(s, 1, 1), ext);
+        e.apply(ed);
+        assert_eq!(text(&e, s, "B12"), "=B11 0.9 *");
+        assert_eq!(text(&e, s, "B13"), "");
+        // the offer after typing a program sees the spill too
+        e.set_text(k(&e, s, 0, 2), "=B1 2 *");
+        assert_eq!(extension_offer(&e, k(&e, s, 0, 2)).map(|r| r.r1), Some(11));
+        // a two-column selection fills both, and stops before what's already below
+        put(&mut e, s, &[("G1", "=8 range"), ("H1", "1"), ("I1", "2"), ("H6", "x")]);
+        let ext = fill_down_extent(&e, Rect::span(s, (0, 7), (0, 8))).unwrap();
+        assert_eq!((ext.r1, ext.c0, ext.c1), (4, 7, 8));
+        // nothing beside it: nothing to line up with
+        assert!(fill_down_extent(&e, Rect::cell(s, 0, 12)).is_none());
     }
 
     fn text(e: &Engine, s: SheetId, at: &str) -> String {
