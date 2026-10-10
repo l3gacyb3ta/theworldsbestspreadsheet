@@ -563,7 +563,8 @@ impl App {
                 (true, false) => CursorIcon::ResizeSouth,
             });
             if let Some(pos) = ctx.pointer_latest_pos() {
-                crate::chart_view::tooltip(ctx, pos, p);
+                use crate::chart_view::{tooltip_lines, Tip};
+                tooltip_lines(ctx, pos, &[Tip::Value(p.clone()), Tip::Note("the input's range ends here".into())]);
             }
         }
         self.pinned = pin;
