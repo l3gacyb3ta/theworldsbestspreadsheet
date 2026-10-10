@@ -346,7 +346,7 @@ impl<'e> Abs<'e> {
             OpKind::Num(x) => st.push(SVal::konst(*x)),
             OpKind::Str(_) => st.push(SVal::Text),
             OpKind::Ref(k) => st.push(self.env.cell(*k).ok_or(Step::Stop)?),
-            OpKind::Range { sheet, a, b, gaps } => match self.env.range(*sheet, a, b, *gaps) {
+            OpKind::Range(r) => match self.env.range(r.sheet, &r.a, &r.b, r.gaps) {
                 Ok(v) => st.push(v),
                 Err(Halt::Err(m)) => return Err(Step::Here(m)),
                 Err(Halt::Stop) => return Err(Step::Stop),
@@ -384,14 +384,14 @@ impl<'e> Abs<'e> {
             }
             OpKind::Local(i) => st.push(locals[*i].clone()),
             OpKind::Builtin(b) => self.builtin(*b, st)?,
-            OpKind::Call(name, k) => self.call(name, *k, st, &op.span)?,
+            OpKind::Call(c) => self.call(&c.0, c.1, st, &op.span)?,
             OpKind::Reduce(c) => {
                 let v = pop(st, "reduce")?;
                 rows_ok(&v)?;
                 // one row is the result itself, so only a word that keeps a row's type has a static result
                 let row = v.forget();
                 let r = match self.apply_quietly(c, &row, &op.span) {
-                    Some(r) if r.same(&row) => match (&c, &row) {
+                    Some(r) if r.same(&row) => match (&**c, &row) {
                         // an empty array sums to zero of its linear unit
                         (Callee::Builtin(Builtin::Add), SVal::Num(n)) if n.abs != Some(false) => SVal::num(n.dim.clone(), None),
                         _ => row,

@@ -54,10 +54,15 @@ pub struct Scratch {
     pub result: CellResult,
 }
 
+/// Everything about a cell with content: what it compiled to, what it reads, and the last
+/// static pass and evaluation. Kept together (and boxed, so the map's table stays small)
+/// because a recalc visits all of it for every cell.
 struct Node {
     kind: Kind,
     compiled: Result<Arc<Compiled>, CompileError>,
     deps: Vec<Dep>,
+    stat: Option<Static>,
+    result: Option<CellResult>,
 }
 
 /// A node's result from the static dimension pass (`dims`).
@@ -143,9 +148,7 @@ impl Edit {
 
 pub struct Engine {
     pub wb: Workbook,
-    nodes: HashMap<CellKey, Node>,
-    results: HashMap<CellKey, CellResult>,
-    statics: HashMap<CellKey, Static>,
+    nodes: HashMap<CellKey, Box<Node>>,
     /// Anchor → region it actually spills into.
     spills: HashMap<CellKey, Region>,
     /// Anchor → region it wants (even when blocked).
@@ -186,7 +189,7 @@ impl<'a> Env for View<'a> {
     }
     fn unit_info(&self, name: &str) -> Result<Arc<UnitInfo>, String> {
         let Some(k) = self.0.syms.units.get(name) else { return Err(format!("unknown unit {name}")) };
-        match self.0.results.get(k) {
+        match self.0.res(k) {
             Some(Ok(Value::Unit(u))) => Ok(u.clone()),
             Some(Err(_)) => Err(format!("unit {name} has an error (at {})", self.0.wb.cell_label(*k, None))),
             _ => Err(format!("unit {name} isn't ready")),
@@ -231,7 +234,7 @@ impl<'a> StaticEnv for View<'a> {
         let k = e.syms.units.get(name)?;
         match &**e.nodes.get(k)?.compiled.as_ref().ok()? {
             Compiled::Base { dim, .. } => Some((Some(Dim::base(dim)), false)),
-            Compiled::UnitDef { offset, .. } => Some((e.statics.get(k).and_then(|s| s.val.dim().cloned()), offset.is_some())),
+            Compiled::UnitDef { offset, .. } => Some((e.stat(k).and_then(|s| s.val.dim().cloned()), offset.is_some())),
             _ => None,
         }
     }
@@ -245,8 +248,6 @@ impl Engine {
         let mut e = Engine {
             wb,
             nodes: HashMap::default(),
-            results: HashMap::default(),
-            statics: HashMap::default(),
             spills: HashMap::default(),
             desired: HashMap::default(),
             cover: HashMap::default(),
@@ -267,7 +268,15 @@ impl Engine {
     // ---- queries ---------------------------------------------------------
 
     pub fn result(&self, k: CellKey) -> Option<&CellResult> {
-        self.results.get(&k)
+        self.res(&k)
+    }
+
+    fn res(&self, k: &CellKey) -> Option<&CellResult> {
+        self.nodes.get(k)?.result.as_ref()
+    }
+
+    fn stat(&self, k: &CellKey) -> Option<&Static> {
+        self.nodes.get(k)?.stat.as_ref()
     }
 
     pub fn kind(&self, k: CellKey) -> Kind {
@@ -288,14 +297,14 @@ impl Engine {
     }
 
     pub fn shown(&self, k: CellKey) -> Shown<'_> {
-        if let Some(r) = self.results.get(&k) {
+        if let Some(r) = self.res(&k) {
             return match r {
                 Ok(v) => Shown::Value { value: v, dr: 0, dc: 0, anchor: k },
                 Err(e) => Shown::Error(e),
             };
         }
         if let Some(a) = self.cover.get(&k) {
-            if let (Some(Ok(v)), Some(reg), Some((r, c))) = (self.results.get(a), self.spills.get(a), self.wb.pos(k)) {
+            if let (Some(Ok(v)), Some(reg), Some((r, c))) = (self.res(a), self.spills.get(a), self.wb.pos(k)) {
                 return Shown::Value { value: v, dr: r - reg.r0, dc: c - reg.c0, anchor: *a };
             }
         }
@@ -428,7 +437,7 @@ impl Engine {
     /// quantity that defines it.
     pub fn static_value(&self, k: CellKey) -> Option<&SVal> {
         let k = if self.nodes.contains_key(&k) { k } else { *self.cover.get(&k)? };
-        self.statics.get(&k).map(|s| &s.val)
+        self.stat(&k).map(|s| &s.val)
     }
 
     /// The dimension a cell's value statically has, if known.
@@ -438,7 +447,7 @@ impl Engine {
 
     /// The unit error the static pass found in a cell, if any.
     pub fn static_error(&self, k: CellKey) -> Option<&EvalErr> {
-        self.statics.get(&k)?.err.as_ref()
+        self.stat(&k)?.err.as_ref()
     }
 
     /// What a reference to node `k` pushes.
@@ -447,7 +456,7 @@ impl Engine {
             Some(Ok(Compiled::UnitDef { .. } | Compiled::Base { .. })) => SVal::Other("unit"),
             Some(Ok(Compiled::Dim(_))) => SVal::Other("dimension"),
             Some(Ok(Compiled::WordDef { .. })) => SVal::Other("word"),
-            Some(Ok(_)) => self.statics.get(&k).map_or(SVal::Any, |s| s.val.forget()),
+            Some(Ok(_)) => self.stat(&k).map_or(SVal::Any, |s| s.val.forget()),
             _ => SVal::Any,
         }
     }
@@ -481,23 +490,7 @@ impl Engine {
         }
     }
 
-    /// Whether an edit leaves a cell's static result as it was: a number
-    /// literal whose value changed but not its unit (scrubbing).
-    fn same_statics(&self, k: CellKey, old: &Node, new: &Node) -> bool {
-        if old.kind != Kind::Number || new.kind != Kind::Number || old.deps != new.deps {
-            return false;
-        }
-        if self.statics.get(&k).is_none_or(|s| s.err.is_some()) {
-            return false;
-        }
-        match (old.compiled.as_deref(), new.compiled.as_deref()) {
-            (Ok(Compiled::Program(a)), Ok(Compiled::Program(b))) => {
-                a.len() == b.len()
-                    && a.iter().zip(b).all(|(x, y)| matches!((&x.kind, &y.kind), (OpKind::Num(_), OpKind::Num(_))) || x.kind == y.kind)
-            }
-            _ => false,
-        }
-    }
+
 
     /// Every unit with its defining cell and current definition, sorted by name.
     pub fn units_list(&self) -> Vec<(String, CellKey, Option<Arc<UnitInfo>>)> {
@@ -506,7 +499,7 @@ impl Engine {
             .units
             .iter()
             .map(|(n, k)| {
-                let info = match self.results.get(k) {
+                let info = match self.res(k) {
                     Some(Ok(Value::Unit(u))) => Some(u.clone()),
                     _ => None,
                 };
@@ -538,7 +531,7 @@ impl Engine {
         if self.wb.sheet(k.sheet).is_none() {
             return Err("reference to a deleted sheet".into());
         }
-        if let Some(r) = self.results.get(&k) {
+        if let Some(r) = self.res(&k) {
             return match r {
                 // provenance was stamped when the result was stored (see recalc)
                 Ok(v) => Ok(v.clone()),
@@ -1029,11 +1022,11 @@ impl Engine {
 
     fn compile_node(&self, k: CellKey, text: &str) -> Node {
         if let Some(e) = self.dead_sheet_ref(k) {
-            return Node { kind: classify(text), compiled: Err(e), deps: vec![] };
+            return Node { kind: classify(text), compiled: Err(e), deps: vec![], stat: None, result: None };
         }
         let mut c = Compiler::new(&self.wb, &self.syms, k.sheet);
         let compiled = c.compile(text).map(Arc::new);
-        Node { kind: classify(text), compiled, deps: c.deps }
+        Node { kind: classify(text), compiled, deps: c.deps, stat: None, result: None }
     }
 
     /// A reference into a deleted sheet renders as `#ref!`; say which kind of deletion it was.
@@ -1089,14 +1082,12 @@ impl Engine {
         self.nodes.clear();
         self.rdeps.clear();
         self.range_deps.clear();
-        self.results.clear();
-        self.statics.clear();
         self.spills.clear();
         self.desired.clear();
         self.cover.clear();
         for (k, text) in &content {
             let n = self.compile_node(*k, text);
-            self.nodes.insert(*k, n);
+            self.nodes.insert(*k, Box::new(n));
             self.index_deps(*k);
         }
         self.graph_gen += 1;
@@ -1120,21 +1111,25 @@ impl Engine {
         for k in keys {
             let k = *k;
             self.unindex_deps(k);
-            let old = self.nodes.remove(&k);
+            let mut old = self.nodes.remove(&k);
             let text = self.wb.cell_text(k);
             // a cell in a deleted row or column is kept but hidden: not part of the graph (as in `rebuild`)
             if !text.trim().is_empty() && self.wb.pos(k).is_some() {
-                let n = self.compile_node(k, &text);
-                self.nodes.insert(k, n);
+                let mut n = self.compile_node(k, &text);
+                // scrubbing a number never changes a dimension: the static pass's result still holds,
+                // and nothing downstream needs it again
+                match old.as_mut() {
+                    Some(o) if same_statics(o, &n) => n.stat = o.stat.take(),
+                    _ => static_seeds.push(k),
+                }
+                self.nodes.insert(k, Box::new(n));
                 self.index_deps(k);
+            } else {
+                static_seeds.push(k);
             }
             // same dependencies (e.g. a scrubbed number): the graph, and so the plan, still hold
             if !matches!((&old, self.nodes.get(&k)), (Some(o), Some(n)) if o.deps == n.deps) {
                 self.graph_gen += 1;
-            }
-            // scrubbing a number never changes a dimension: nothing downstream needs the static pass again
-            if !matches!((&old, self.nodes.get(&k)), (Some(o), Some(n)) if self.same_statics(k, o, n)) {
-                static_seeds.push(k);
             }
             seeds.push(k);
             // A cell typed into (or cleared from) a spill region affects the spiller.
@@ -1261,8 +1256,6 @@ impl Engine {
             let gone: Vec<CellKey> = dirty.iter().filter(|k| !self.nodes.contains_key(k)).copied().collect();
             let mut changed_positions: Vec<CellKey> = Vec::new();
             for k in &gone {
-                self.results.remove(k);
-                self.statics.remove(k);
                 changed_positions.extend(self.set_desired(*k, None));
                 if let Some(reg) = self.spills.remove(k) {
                     changed_positions.extend(self.uncover(&reg));
@@ -1277,38 +1270,36 @@ impl Engine {
             }
             for (k, cycle) in order {
                 if let Some(path) = cycle {
-                    self.results.insert(
-                        k,
-                        Err(CellError {
+                    let n = self.nodes.get_mut(&k).unwrap();
+                    n.stat = Some(Static::any());
+                    n.result = Some(Err(CellError {
                             msg: format!(
                                 "cycle: {}",
                                 path.iter().chain(path.first()).map(|c| self.wb.cell_label(*c, Some(k.sheet))).collect::<Vec<_>>().join(" → ")
                             ),
                             span: None,
                             kind: ErrKind::Cycle(path),
-                        }),
-                    );
-                    self.statics.insert(k, Static::any());
+                        }));
                     changed_positions.extend(self.set_desired(k, None));
                     if let Some(reg) = self.spills.remove(&k) {
                         changed_positions.extend(self.uncover(&reg));
                     }
                     continue;
                 }
-                if static_dirty.as_ref().is_none_or(|s| s.contains(&k)) || !self.statics.contains_key(&k) {
+                if static_dirty.as_ref().is_none_or(|s| s.contains(&k)) || self.stat(&k).is_none() {
                     let s = self.compute_static(k);
-                    self.statics.insert(k, s);
+                    self.nodes.get_mut(&k).unwrap().stat = Some(s);
                 }
                 self.last_eval_count += 1;
-                let res = self.evaluate(k);
+                let (res, kind) = self.evaluate(k);
                 let (mut res, changed) = self.place_spill(k, res);
                 changed_positions.extend(changed);
                 // Stamp the provenance a reference to this cell carries once, here, so
                 // every reference is an Arc clone instead of a fresh allocation.
                 if let Ok(Value::Num(n)) = &mut res {
-                    n.prov = Provs::Cell(k, self.kind(k) == Kind::Number);
+                    n.prov = Provs::Cell(k, kind == Kind::Number);
                 }
-                self.results.insert(k, res);
+                self.nodes.get_mut(&k).unwrap().result = Some(res);
             }
             if changed_positions.is_empty() {
                 return reusable.map(|o| (dirty, o));
@@ -1456,14 +1447,19 @@ impl Engine {
         (res, changed)
     }
 
-    fn evaluate(&self, k: CellKey) -> CellResult {
-        let Some(n) = self.nodes.get(&k) else { return Err(local("no content".into(), None)) };
+    /// The cell's value, and its kind (read here so the caller needn't look the node up again).
+    fn evaluate(&self, k: CellKey) -> (CellResult, Kind) {
+        let Some(n) = self.nodes.get(&k) else { return (Err(local("no content".into(), None)), Kind::Empty) };
+        (self.evaluate_node(n, k), n.kind)
+    }
+
+    fn evaluate_node(&self, n: &Node, k: CellKey) -> CellResult {
         let compiled = match &n.compiled {
             Ok(c) => c,
             Err(e) => return Err(CellError { msg: e.msg.clone(), span: e.span.clone(), kind: ErrKind::Local }),
         };
         // A unit error found statically is this cell's, whatever its inputs hold.
-        if let Some(e) = self.static_error(k) {
+        if let Some(e) = n.stat.as_ref().and_then(|s| s.err.as_ref()) {
             return Err(local(e.msg.clone(), e.span.clone()));
         }
         // An error in a referenced cell is reported as upstream, not here.
@@ -1530,13 +1526,30 @@ impl Engine {
             if let Dep::Cell(p) = d {
                 let src = if self.nodes.contains_key(p) { Some(*p) } else { self.cover.get(p).copied() };
                 if let Some(src) = src {
-                    if src != k && matches!(self.results.get(&src), Some(Err(_))) {
+                    if src != k && matches!(self.res(&src), Some(Err(_))) {
                         return Some(src);
                     }
                 }
             }
         }
         None
+    }
+}
+
+/// Whether an edit leaves a cell's static result as it was: a number
+/// literal whose value changed but not its unit (scrubbing).
+fn same_statics(old: &Node, new: &Node) -> bool {
+    if old.kind != Kind::Number || new.kind != Kind::Number || old.deps != new.deps {
+        return false;
+    }
+    if old.stat.as_ref().is_none_or(|s| s.err.is_some()) {
+        return false;
+    }
+    match (old.compiled.as_deref(), new.compiled.as_deref()) {
+        (Ok(Compiled::Program(a)), Ok(Compiled::Program(b))) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| matches!((&x.kind, &y.kind), (OpKind::Num(_), OpKind::Num(_))) || x.kind == y.kind)
+        }
+        _ => false,
     }
 }
 

@@ -220,7 +220,7 @@ impl<'e> Interp<'e> {
             OpKind::Num(x) => stack.push(Value::Num(Num::plain(*x))),
             OpKind::Str(s) => stack.push(Value::Text(Text { shape: vec![], data: Arc::new(vec![s.clone()]) })),
             OpKind::Ref(k) => stack.push(self.env.cell_value(*k)?),
-            OpKind::Range { sheet, a, b, gaps } => stack.push(self.env.range_value(*sheet, a, b, *gaps)?),
+            OpKind::Range(r) => stack.push(self.env.range_value(r.sheet, &r.a, &r.b, r.gaps)?),
             OpKind::Unit(u) => {
                 let n = pop_num(stack, "a unit")?;
                 stack.push(Value::Num(self.apply_unit(n, u)?));
@@ -231,7 +231,7 @@ impl<'e> Interp<'e> {
             }
             OpKind::Local(i) => stack.push(locals[*i].clone()),
             OpKind::Builtin(b) => self.builtin(*b, stack)?,
-            OpKind::Call(name, k) => self.call(name, *k, stack, &op.span)?,
+            OpKind::Call(c) => self.call(&c.0, c.1, stack, &op.span)?,
             OpKind::Reduce(c) => {
                 let v = pop(stack, "reduce")?;
                 stack.push(self.reduce(c, v, &op.span)?);
