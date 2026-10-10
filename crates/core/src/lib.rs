@@ -13,6 +13,7 @@ pub mod model;
 pub mod ops;
 pub mod parse;
 pub mod rational;
+pub mod settings;
 pub mod solve;
 pub mod stdlib;
 pub mod units;

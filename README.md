@@ -13,6 +13,13 @@ Without an argument it reopens the last workbook you used. File ▸ New / Open�
 Save As… use native file dialogs (the xdg desktop portal on Linux), and closing
 with unsaved changes asks first.
 
+Settings (⌘, — Ctrl+, on Linux) are app preferences, kept in `settings.toml` in
+the platform config dir (`~/Library/Application Support/wbs`, `~/.config/wbs`),
+and per-workbook settings saved in the workbook file. Every setting is declared
+once in `crates/core/src/settings.rs`; the settings window, storage, validation
+and Help ▸ Settings are generated from those declarations. Autosave is one of
+them (off by default).
+
 ## Layout
 
 | crate | what |

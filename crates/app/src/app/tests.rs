@@ -1273,3 +1273,240 @@ fn dragging_the_selection_border_moves_and_alt_copies() {
     assert_eq!(h.state().cursor, (26, 6));
     assert_eq!(source(&h, "G27"), "5");
 }
+
+// ---- settings and autosave ----
+
+use crate::prefs::Prefs;
+use wbs_core::settings::{self as decl, Val};
+
+/// A harness whose preferences come from `toml` in a temporary file (never the user's config dir).
+fn harness_with_prefs(name: &str, toml: Option<&str>) -> (Harness<'static, App>, PathBuf) {
+    let p = tmp_file(name);
+    if let Some(t) = toml {
+        std::fs::write(&p, t).unwrap();
+    }
+    let prefs_path = p.clone();
+    let mut h = Harness::builder()
+        .with_size([1440.0, 900.0])
+        .wgpu()
+        .build_eframe(move |_| App::new(PathBuf::from("/nonexistent/ui-test.wbs.json")).with_prefs(Prefs::load(prefs_path.clone())));
+    h.run_steps(3);
+    (h, p)
+}
+
+#[test]
+fn settings_window_shows_every_setting_and_applies_changes() {
+    let toml = "# my settings\n[autosave]\nenabled = \"yes\"\n\n[view]\ntrace = false\n\n[someday]\nfeature = 1\n";
+    let (mut h, p) = harness_with_prefs("ui_settings.toml", Some(toml));
+    assert!(!h.state().trace, "view.trace = false applies at start");
+    let status = h.state().status.clone().unwrap();
+    assert!(status.contains("autosave.enabled") && status.contains("see Settings"), "{status}");
+    key_cmd(&mut h, Key::Comma);
+    assert!(h.state().settings.open);
+    h.run_steps(2);
+    for s in decl::SETTINGS {
+        assert!(h.query_all_by_label(s.label).next().is_some(), "{} not shown", s.key);
+    }
+    h.get_by_label_contains("The stored value isn't used: expected true or false, found \"yes\"");
+    h.get_by_label_contains("someday.feature");
+    h.get_by_label_contains("Its operator can read every workbook shared through it");
+    shot(&mut h, "40_settings_window");
+    // a change applies now and is written to the file, keeping the rest of it
+    h.get_by_label("Trace on at start").click();
+    h.run_steps(2);
+    assert!(h.state().trace);
+    let text = std::fs::read_to_string(&p).unwrap();
+    assert_eq!(text, toml.replace("trace = false", "trace = true"));
+    // an invalid text isn't applied, and says why; a valid one is
+    let url = h.get_by(|n| n.role() == egui::accesskit::Role::TextInput && n.value().as_deref() == Some("wss://sync.automerge.org"));
+    url.focus();
+    h.run_steps(1);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.event(Event::Text("https://example.com".into()));
+    h.run_steps(2);
+    h.get_by_label_contains("Not applied: must start with wss:// or ws://");
+    let over = h.get_by_label_contains("Autosave after").rect().center();
+    h.event(Event::PointerMoved(over));
+    h.event(Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -2000.0), modifiers: Modifiers::NONE, phase: egui::TouchPhase::Move });
+    h.run_steps(3);
+    shot(&mut h, "41_settings_invalid_text");
+    assert_eq!(h.state().prefs.val(decl::SYNC_SERVER), Val::Text("wss://sync.automerge.org".into()));
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.event(Event::Text("wss://sync.example.com".into()));
+    h.run_steps(2);
+    assert_eq!(h.state().prefs.val(decl::SYNC_SERVER), Val::Text("wss://sync.example.com".into()));
+    assert!(std::fs::read_to_string(&p).unwrap().contains("[sync]\nserver_url = \"wss://sync.example.com\"\n"));
+    // reset puts the default back and takes the line out of the file
+    h.state_mut().change_setting(decl::SYNC_SERVER, None);
+    assert!(!std::fs::read_to_string(&p).unwrap().contains("server_url"));
+    // a workbook setting is an unsaved change to the workbook
+    assert!(!h.state().dirty);
+    h.state_mut().change_setting(decl::AUTOSAVE_WORKBOOK, Some(&Val::Text("never".into())));
+    h.run_steps(2);
+    assert!(h.state().dirty);
+    assert!(!std::fs::read_to_string(&p).unwrap().contains("this_workbook"), "workbook settings aren't app preferences");
+    // closing
+    h.state_mut().settings.close();
+    h.run_steps(2);
+    assert!(h.query_by_label("Trace on at start").is_none());
+}
+
+#[test]
+fn settings_window_is_its_own_viewport() {
+    let mut h = harness_viewports();
+    command(&mut h, Command::Settings);
+    h.run_steps(2);
+    assert!(h.state().settings.open);
+    h.get_by_label(crate::settings_view::TITLE);
+    assert!(!h.state().settings.has_focus(), "no OS window, so never focused");
+}
+
+#[test]
+fn settings_help_page_renders() {
+    let mut h = harness();
+    h.state_mut().help.show_page(Page::Topic("settings"));
+    h.run_steps(3);
+    h.get_by_label_contains("autosave.interval_seconds");
+    assert_eq!(h.query_all_by_label_contains("Not used yet: collaboration is coming in #18.").count(), 3);
+    shot(&mut h, "42_help_settings");
+}
+
+#[test]
+fn workbook_settings_are_saved_with_the_workbook() {
+    let mut h = harness();
+    let p = tmp_file("wb_settings.wbs.json");
+    script(&mut h, &[Some(p.clone())]);
+    // an unknown workbook setting (from a newer version, say) survives a save
+    h.state_mut().eng.wb.settings.insert("future.thing".into(), serde_json::json!([1, 2]));
+    h.state_mut().change_setting(decl::AUTOSAVE_WORKBOOK, Some(&Val::Text("always".into())));
+    command(&mut h, Command::SaveAs);
+    let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+    assert_eq!(saved["settings"], serde_json::json!({"autosave.this_workbook": "always", "future.thing": [1, 2]}));
+    // and come back on open
+    h.state_mut().new_doc();
+    assert!(h.state().eng.wb.settings.is_empty());
+    assert!(h.state_mut().open_path(p.clone()));
+    assert_eq!(decl::workbook_value(&h.state().eng.wb, decl::AUTOSAVE_WORKBOOK).0, Val::Text("always".into()));
+    assert!(!h.state().is_dirty());
+    // an invalid one is reported on open, kept, and the default used
+    let mut v = saved.clone();
+    v["settings"]["autosave.this_workbook"] = serde_json::json!("sometimes");
+    std::fs::write(&p, serde_json::to_string(&v).unwrap()).unwrap();
+    assert!(h.state_mut().open_path(p.clone()));
+    assert!(h.state().status.as_deref().unwrap().contains("autosave.this_workbook"));
+    assert_eq!(decl::workbook_value(&h.state().eng.wb, decl::AUTOSAVE_WORKBOOK).0, Val::Text("app".into()));
+    // a file from before settings existed opens
+    v.as_object_mut().unwrap().remove("settings");
+    std::fs::write(&p, serde_json::to_string(&v).unwrap()).unwrap();
+    assert!(h.state_mut().open_path(p));
+    assert!(h.state().eng.wb.settings.is_empty());
+}
+
+/// Runs frames until egui's clock (the harness's: 0.25 s a frame, no sleeping) passes `secs` more.
+fn wait(h: &mut Harness<'static, App>, secs: f64) {
+    h.run_steps((secs / 0.25).ceil() as usize);
+}
+
+fn autosave_harness(name: &str) -> (Harness<'static, App>, PathBuf) {
+    let (mut h, _) = harness_with_prefs(&format!("{name}.toml"), Some("[autosave]\nenabled = true\ninterval_seconds = 5\n"));
+    let p = tmp_file(&format!("{name}.wbs.json"));
+    h.state_mut().path = Some(p.clone());
+    (h, p)
+}
+
+#[test]
+fn autosave_saves_a_while_after_the_first_change() {
+    let (mut h, p) = autosave_harness("autosave_basic");
+    h.run_steps(2);
+    assert_eq!(h.state().autosave_note(0.0).as_deref(), Some("autosave on"));
+    let now = |h: &Harness<'static, App>| h.ctx.input(|i| i.time);
+    type_into(&mut h, "H25", "42");
+    assert!(h.state().dirty);
+    // the clock starts at the first frame that sees the change
+    let t0 = h.state().autosave.since.unwrap();
+    assert!(now(&h) - t0 <= 0.5);
+    let t = now(&h);
+    assert_eq!(h.state().autosave_note(t).as_deref(), Some(format!("autosave in {} s", (t0 + 5.0 - t).ceil()).as_str()));
+    shot(&mut h, "43_autosave_countdown");
+    // more edits don't push it back: it's counted from the first unsaved change
+    // (Enter moved the selection to H26)
+    typ(&mut h, "43");
+    key(&mut h, Key::Enter);
+    assert_eq!(source(&h, "H26"), "43");
+    assert!(now(&h) < t0 + 4.5);
+    let left = t0 + 4.5 - now(&h);
+    wait(&mut h, left);
+    assert!(!p.exists(), "not yet");
+    wait(&mut h, 1.0);
+    assert!(p.exists(), "saved 5 s after the first change");
+    assert!(!h.state().dirty);
+    assert_eq!(h.state().status.as_deref(), Some("autosaved autosave_basic.wbs.json"));
+    assert_eq!(h.state().autosave_note(0.0).as_deref(), Some("autosaved"));
+    let saved: wbs_core::model::Workbook = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+    assert_eq!(saved.sheets[0].cells.len(), h.state().eng.wb.sheets[0].cells.len());
+    // undo still works after an autosave, and is itself autosaved
+    assert!(!h.state().undo.is_empty());
+    key_cmd(&mut h, Key::Z);
+    assert!(h.state().dirty);
+    wait(&mut h, 5.5);
+    assert!(!h.state().dirty, "{:?} {:?} {}", h.state().status, h.state().autosave_note(h.ctx.input(|i| i.time)), h.state().edit.is_some());
+}
+
+#[test]
+fn autosave_waits_for_edits_and_the_save_prompt() {
+    let (mut h, p) = autosave_harness("autosave_waits");
+    type_into(&mut h, "H25", "42");
+    // a cell being edited: the save waits until it's committed
+    { let c = center(&h, "H26"); click(&mut h, c, Modifiers::NONE); }
+    typ(&mut h, "43");
+    wait(&mut h, 8.0);
+    assert!(!p.exists(), "never saves while a cell is being edited");
+    key(&mut h, Key::Enter);
+    h.run_steps(2);
+    assert!(p.exists() && !h.state().dirty, "overdue, so saved once the edit is done");
+    // the save-changes prompt is up: autosave leaves it alone
+    std::fs::remove_file(&p).unwrap();
+    type_into(&mut h, "H27", "44");
+    command(&mut h, Command::New);
+    assert_eq!(h.state().confirm, Some(files::Pending::New));
+    wait(&mut h, 8.0);
+    assert!(!p.exists() && h.state().confirm.is_some());
+    modal_button(&mut h, "Cancel");
+    h.run_steps(3);
+    assert!(p.exists(), "after Cancel the overdue autosave runs");
+}
+
+#[test]
+fn autosave_never_asks_where_and_follows_the_workbook_override() {
+    let (mut h, p) = autosave_harness("autosave_untitled");
+    // untitled: nothing to save to, and no dialog (the test dialogs panic if one opens)
+    h.state_mut().path = None;
+    type_into(&mut h, "H25", "42");
+    wait(&mut h, 8.0);
+    assert!(h.state().dirty);
+    assert_eq!(h.state().autosave_note(0.0).as_deref(), Some("autosave starts once the workbook has a file"));
+    // this workbook says never
+    h.state_mut().path = Some(p.clone());
+    h.state_mut().change_setting(decl::AUTOSAVE_WORKBOOK, Some(&Val::Text("never".into())));
+    wait(&mut h, 8.0);
+    assert!(!p.exists() && h.state().dirty);
+    assert_eq!(h.state().autosave_note(0.0).as_deref(), Some("autosave off for this workbook"));
+    // the app setting off, this workbook always
+    h.state_mut().change_setting(decl::AUTOSAVE_ENABLED, Some(&Val::Bool(false)));
+    h.state_mut().change_setting(decl::AUTOSAVE_WORKBOOK, Some(&Val::Text("always".into())));
+    wait(&mut h, 6.0);
+    assert!(p.exists() && !h.state().dirty);
+    let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+    assert_eq!(saved["settings"]["autosave.this_workbook"], "always");
+}
+
+#[test]
+fn autosave_is_off_by_default() {
+    let mut h = harness();
+    let p = tmp_file("autosave_default.wbs.json");
+    h.state_mut().path = Some(p.clone());
+    type_into(&mut h, "H25", "42");
+    wait(&mut h, 65.0);
+    assert!(!p.exists());
+    assert_eq!(h.state().autosave_note(0.0), None);
+}

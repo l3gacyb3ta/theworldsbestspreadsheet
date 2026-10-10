@@ -21,6 +21,7 @@ pub enum Command {
     ToggleTrace,
     Help,
     SearchHelp,
+    Settings,
 }
 
 impl Command {
@@ -40,6 +41,7 @@ impl Command {
             Command::ToggleTrace => "Trace Precedents & Dependents",
             Command::Help => "Help for Selection",
             Command::SearchHelp => "Search Help",
+            Command::Settings => "Settings…",
         }
     }
 
@@ -62,6 +64,7 @@ impl Command {
             Command::ToggleTrace => return None,
             Command::Help => (Modifiers::NONE, Key::F1),
             Command::SearchHelp => (cmd, Key::Slash),
+            Command::Settings => (cmd, Key::Comma),
         };
         Some(KeyboardShortcut::new(m, k))
     }
@@ -109,6 +112,9 @@ impl App {
             Command::Undo | Command::Redo | Command::FillDown | Command::Cut | Command::Copy | Command::Paste if self.help.has_focus() => {
                 self.help.forward(c)
             }
+            Command::Undo | Command::Redo | Command::FillDown | Command::Cut | Command::Copy | Command::Paste if self.settings.has_focus() => {
+                self.settings.forward(c)
+            }
             Command::Undo | Command::Redo | Command::FillDown if ctx.egui_wants_keyboard_input() => replay(self),
             Command::Undo => self.undo(),
             Command::Redo => self.redo(),
@@ -121,6 +127,7 @@ impl App {
             Command::ToggleTrace => self.trace = !self.trace,
             Command::Help => self.context_help(),
             Command::SearchHelp => self.help.focus_search(),
+            Command::Settings => self.settings.show(),
         }
     }
 
@@ -141,7 +148,7 @@ impl App {
         if self.native_menu.is_some() {
             &[Command::Help]
         } else {
-            &[Command::SaveAs, Command::Save, Command::New, Command::Open, Command::Quit, Command::Help, Command::SearchHelp]
+            &[Command::SaveAs, Command::Save, Command::New, Command::Open, Command::Quit, Command::Help, Command::SearchHelp, Command::Settings]
         }
     }
 
@@ -163,6 +170,8 @@ impl App {
                 for c in [Command::New, Command::Open, Command::Save, Command::SaveAs] {
                     item(ui, c, true, &mut picked);
                 }
+                ui.separator();
+                item(ui, Command::Settings, true, &mut picked);
                 ui.separator();
                 item(ui, Command::Quit, true, &mut picked);
             });

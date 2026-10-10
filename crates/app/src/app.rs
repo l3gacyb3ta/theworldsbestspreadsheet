@@ -2,6 +2,7 @@ mod commands;
 mod files;
 mod grid;
 mod panels;
+mod preferences;
 
 pub use commands::Command;
 #[cfg(test)]
@@ -240,6 +241,9 @@ pub struct App {
     #[cfg_attr(not(test), allow(dead_code))]
     geo: Option<Geo>,
     help: Help,
+    prefs: crate::prefs::Prefs,
+    settings: crate::settings_view::SettingsWindow,
+    autosave: preferences::Autosave,
 }
 
 impl App {
@@ -301,6 +305,9 @@ impl App {
             input_scrub: None,
             geo: None,
             help: Help::new(),
+            prefs: crate::prefs::Prefs::in_memory(),
+            settings: Default::default(),
+            autosave: Default::default(),
         };
         // the demo (or the opened file) is the clean state
         app.mark_clean();
@@ -520,7 +527,9 @@ impl eframe::App for App {
                 HelpAction::Command(c) => self.run(&ctx, c),
             }
         }
+        self.settings_ui(&ctx);
         self.document_ui(&ctx);
+        self.autosave(&ctx);
         if let Some(m) = &self.native_menu {
             m.sync(self.trace, !self.undo.is_empty(), !self.redo.is_empty());
         }
