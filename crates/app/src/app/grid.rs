@@ -669,6 +669,7 @@ impl App {
             }
             // the drag resized live; the whole drag is one undo step
             Drag::Col { col, w0, .. } => {
+                self.dirty_stale = true;
                 let s = self.sheet();
                 let (sheet, cid) = (s.id, s.cols.get(col).unwrap());
                 if s.col_widths.get(&cid).copied() != w0 {
@@ -677,6 +678,7 @@ impl App {
                 }
             }
             Drag::Row { row, h0, .. } => {
+                self.dirty_stale = true;
                 let s = self.sheet();
                 let (sheet, rid) = (s.id, s.rows.get(row).unwrap());
                 if s.row_heights.get(&rid).copied() != h0 {

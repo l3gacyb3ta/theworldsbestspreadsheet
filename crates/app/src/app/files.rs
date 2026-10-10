@@ -3,6 +3,7 @@
 
 use super::*;
 use std::collections::hash_map::DefaultHasher;
+use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use wbs_core::model::{Piece, Workbook};
@@ -68,11 +69,21 @@ pub enum Pending {
 /// order, cell sources by position, sizes and names. Unlike comparing the
 /// saved JSON, it ignores the sheet growing as you scroll and hash-map order,
 /// so undoing back to the saved state counts as clean again.
+///
+/// Each cell is hashed with FxHash (fast; it runs after every edit) and then
+/// scrambled with a full-avalanche finalizer, so the per-sheet sums stay as
+/// collision-resistant as summing SipHashes.
 pub(super) fn fingerprint(wb: &Workbook) -> u64 {
+    fn mix(mut x: u64) -> u64 {
+        // splitmix64's finalizer
+        x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
+        x ^ (x >> 31)
+    }
     fn one(x: impl Hash) -> u64 {
-        let mut h = DefaultHasher::new();
+        let mut h = FxHasher::default();
         x.hash(&mut h);
-        h.finish()
+        mix(h.finish())
     }
     let mut h = DefaultHasher::new();
     for (si, s) in wb.sheets.iter().enumerate() {
@@ -81,11 +92,9 @@ pub(super) fn fingerprint(wb: &Workbook) -> u64 {
         let mut sum = 0u64;
         for ((r, c), cell) in &s.cells {
             // cells in deleted rows and columns are kept, hidden: like deleted sheets, not part of the document's look
-            if !s.visible(*r, *c) {
-                continue;
-            }
-            let mut ch = DefaultHasher::new();
-            (si, s.row_index(*r), s.col_index(*c)).hash(&mut ch);
+            let (Some(ri), Some(ci)) = (s.row_index(*r), s.col_index(*c)) else { continue };
+            let mut ch = FxHasher::default();
+            (si, ri, ci).hash(&mut ch);
             for p in &cell.pieces {
                 match p {
                     Piece::Text(t) => (0u8, t).hash(&mut ch),
@@ -93,7 +102,7 @@ pub(super) fn fingerprint(wb: &Workbook) -> u64 {
                     Piece::Range(a, b) => (2u8, a, b).hash(&mut ch),
                 }
             }
-            sum = sum.wrapping_add(ch.finish());
+            sum = sum.wrapping_add(mix(ch.finish()));
         }
         for (r, v) in &s.row_heights {
             sum = sum.wrapping_add(one((1u8, si, s.row_index(*r), v.to_bits())));
@@ -134,6 +143,7 @@ impl App {
     pub(super) fn mark_clean(&mut self) {
         self.saved_fp = fingerprint(&self.eng.wb);
         self.dirty = false;
+        self.dirty_rev = self.eng.revision();
     }
 
     /// Replace the document, dropping everything that pointed into the old one.
@@ -297,9 +307,13 @@ impl App {
                 None => {}
             }
         }
-        if ctx.input(|i| !i.events.is_empty()) || self.dirty_stale {
+        // hashing the workbook is O(cells): only after an edit, or a change made without one,
+        // and not on every step of a scrub or drag (its end is the next frame's edit check)
+        let dragging = !matches!(self.drag, Drag::None) || self.bar_scrub.is_some() || self.input_scrub.is_some();
+        if self.dirty_stale || (self.eng.revision() != self.dirty_rev && !dragging) {
             self.dirty = self.is_dirty();
             self.dirty_stale = false;
+            self.dirty_rev = self.eng.revision();
         }
         let title = format!("{}{} — {APP_NAME}", if self.dirty { "• " } else { "" }, self.display_name());
         if title != self.title {

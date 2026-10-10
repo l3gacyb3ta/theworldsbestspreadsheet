@@ -163,6 +163,8 @@ pub struct Engine {
     /// The last recalc's dirty set and evaluation order, reused while the same
     /// cells change and the graph doesn't (scrubbing, goal-seek).
     plan: Option<Plan>,
+    /// Bumped by every applied edit: a cheap "might the document have changed?".
+    revision: u64,
 }
 
 /// A recalc plan: valid for `seeds` while `graph_gen` hasn't moved.
@@ -255,6 +257,7 @@ impl Engine {
             last_eval_count: 0,
             graph_gen: 0,
             plan: None,
+            revision: 0,
         };
         e.wb.after_load();
         e.rebuild();
@@ -668,8 +671,14 @@ impl Engine {
         self.apply(Edit::Cells(vec![(k, cell)]))
     }
 
+    /// Counts applied edits. Changes to `wb` made without an edit don't count.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// Applies an edit, recalculates, and returns its inverse.
     pub fn apply(&mut self, e: Edit) -> Edit {
+        self.revision += 1;
         let mut touched = Vec::new();
         let mut structural = false;
         let inv = self.apply_raw(e, &mut touched, &mut structural);

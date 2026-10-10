@@ -6,6 +6,8 @@ mod preferences;
 
 pub use commands::Command;
 #[cfg(test)]
+mod perf;
+#[cfg(test)]
 mod tests;
 
 use crate::chart_view::{PointHit, YAxis};
@@ -212,9 +214,11 @@ pub struct App {
     dialogs: Box<dyn files::Dialogs>,
     /// `files::fingerprint` of the workbook as last opened/saved.
     saved_fp: u64,
-    /// Cached `is_dirty()` for the title; refreshed on input.
+    /// Cached `is_dirty()` for the title; refreshed after an edit, or when `dirty_stale` says the workbook was changed some other way.
     dirty: bool,
     dirty_stale: bool,
+    /// `eng.revision()` when `dirty` was last refreshed.
+    dirty_rev: u64,
     title: String,
     /// The save-changes prompt is up, for this action.
     confirm: Option<files::Pending>,
@@ -290,6 +294,7 @@ impl App {
             saved_fp: 0,
             dirty: false,
             dirty_stale: false,
+            dirty_rev: 0,
             title: String::new(),
             confirm: None,
             close_ok: false,

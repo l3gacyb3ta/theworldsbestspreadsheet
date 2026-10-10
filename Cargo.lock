@@ -3946,6 +3946,7 @@ dependencies = [
  "egui_kittest",
  "muda",
  "rfd",
+ "rustc-hash 2.1.3",
  "serde_json",
  "toml_edit",
  "wbs-core",

@@ -174,6 +174,8 @@ fn scrub_input_resizes_spill() {
     let from = center(&h, "B5");
     drag(&mut h, from, from - Vec2::new(40.0, 0.0), Modifiers::ALT);
     assert_eq!(source(&h, "B5"), "14");
+    // the dirty check waits for the scrub to end, then catches up
+    assert!(h.state().dirty);
     assert_eq!(shown(&h, "A23"), "14");
     assert_eq!(shown(&h, "A24"), "");
     shot(&mut h, "05_scrubbed");
