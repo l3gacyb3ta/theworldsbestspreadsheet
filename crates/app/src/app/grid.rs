@@ -57,6 +57,7 @@ impl App {
                     Value::Unit(_) | Value::Dim(_) | Value::Word(_) => self.eng.wb.cell_text(k),
                     _ => value.display_at(dr, dc),
                 };
+                self.fonts.note(&text);
                 Some((text, color, right))
             }
         }

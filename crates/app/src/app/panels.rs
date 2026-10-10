@@ -36,6 +36,13 @@ enum TabAct {
 impl App {
     /// Grid keyboard: only when no text field has focus.
     pub(super) fn keys(&mut self, ctx: &egui::Context) {
+        ctx.input(|i| {
+            for e in &i.events {
+                if let Event::Text(t) | Event::Paste(t) | Event::Ime(egui::ImeEvent::Commit(t) | egui::ImeEvent::Preedit { text: t, .. }) = e {
+                    self.fonts.note(t);
+                }
+            }
+        });
         self.ime_events(ctx);
         let (events, mods) = ctx.input(|i| (i.events.clone(), i.modifiers));
         let focused = ctx.memory(|m| m.focused());
@@ -508,6 +515,7 @@ impl App {
             self.completion_keys(&ctx);
         }
         let ed = self.edit.as_ref().unwrap();
+        self.fonts.note(&ed.text);
         let refs = syntax::analyze(&ed.text, &self.eng.wb, ed.key.sheet);
         // underline the error while the text is still what produced it
         let orig = ed.orig.clone();
@@ -628,6 +636,7 @@ impl App {
             }
             ui.add_sized([110.0, 22.0], egui::Label::new(egui::RichText::new(addr).monospace().strong()).truncate());
             let text_now = self.edit.as_ref().map(|e| e.text.clone()).unwrap_or_else(|| self.eng.wb.cell_text(k));
+            self.fonts.note(&text_now);
             let kind = classify(&text_now);
             let badge = match kind {
                 Kind::Empty => "",

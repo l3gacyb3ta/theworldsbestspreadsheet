@@ -14,10 +14,7 @@ fn harness_dt(dt: f32) -> Harness<'static, App> {
         .with_size([1440.0, 900.0])
         .with_step_dt(dt)
         .wgpu()
-        .build_eframe(|cc| {
-            crate::fonts::install(&cc.egui_ctx);
-            App::new(PathBuf::from("/nonexistent/ui-test.wbs.json"))
-        });
+        .build_eframe(|_| App::new(PathBuf::from("/nonexistent/ui-test.wbs.json")));
     h.run_steps(3);
     h
 }
@@ -937,7 +934,8 @@ fn edit_commands_reach_the_grid_and_the_editor() {
 
 fn preedit(h: &mut Harness<'static, App>, s: &str) {
     h.event(Event::Ime(egui::ImeEvent::Preedit { text: s.into(), active_range_chars: Some(0..s.chars().count()) }));
-    h.run_steps(1);
+    // two: fallback fonts loaded by this text are used from the next frame
+    h.run_steps(2);
 }
 
 /// What winit sends on macOS when Enter (or a candidate click) ends a composition.
@@ -1053,6 +1051,56 @@ fn emoji_and_ime_commits_land() {
         assert_eq!(source(&h, &format!("E{}", 24 + i)), *r);
     }
     shot(&mut h, "ime_03_scripts");
+    assert!(h.state().fonts.loaded());
+}
+
+/// Swaps in fallback fonts that count how often they're read (and come from this machine, if it has them).
+fn counted_fonts(h: &mut Harness<'static, App>) -> std::rc::Rc<std::cell::Cell<usize>> {
+    let n = std::rc::Rc::new(std::cell::Cell::new(0));
+    let m = n.clone();
+    h.state_mut().fonts = crate::fonts::Fallbacks::from_source(move || {
+        m.set(m.get() + 1);
+        crate::fonts::system()
+    });
+    n
+}
+
+#[test]
+fn fallback_fonts_load_once_text_needs_them() {
+    let mut h = harness();
+    let n = counted_fonts(&mut h);
+    // the demo and Latin, accented, symbols and emoji are covered by egui's own fonts
+    type_into(&mut h, "H25", "café naïve ✓ ★ 😀 Привет");
+    {
+        let p = center(&h, "H25");
+        click(&mut h, p, Modifiers::NONE);
+    }
+    h.run_steps(2);
+    assert_eq!(n.get(), 0);
+    assert!(!h.state().fonts.loaded());
+    // a cell that appears with Japanese in it (as from a file or a paste)
+    let k = cell_key(&h, "H27");
+    h.state_mut().eng.set_text(k, "日本");
+    h.run_steps(2);
+    assert_eq!(n.get(), 1);
+    assert!(h.state().fonts.loaded());
+    type_into(&mut h, "H28", "한국어 مرحبا");
+    assert_eq!(n.get(), 1, "read once");
+    shot(&mut h, "ime_05_fonts_loaded");
+}
+
+#[test]
+fn an_ime_commit_loads_fallback_fonts() {
+    let mut h = harness();
+    let n = counted_fonts(&mut h);
+    {
+        let p = center(&h, "H25");
+        click(&mut h, p, Modifiers::NONE);
+    }
+    h.event(Event::Ime(egui::ImeEvent::Commit("日本".into())));
+    h.run_steps(1);
+    assert_eq!(n.get(), 1);
+    assert_eq!(edit_text(&h).as_deref(), Some("日本"));
 }
 
 // ---- sheet tabs ----------------------------------------------------------------

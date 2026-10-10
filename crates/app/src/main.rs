@@ -20,7 +20,6 @@ fn main() -> eframe::Result {
         "wbs",
         options,
         Box::new(move |cc| {
-            fonts::install(&cc.egui_ctx);
             // the file named on the command line, else the last one used, else ./sheet.wbs.json
             let last = cc.storage.and_then(|s| s.get_string(app::LAST_FILE_KEY)).map(PathBuf::from).filter(|p| p.exists());
             let path = arg.or(last).unwrap_or_else(|| PathBuf::from("sheet.wbs.json"));

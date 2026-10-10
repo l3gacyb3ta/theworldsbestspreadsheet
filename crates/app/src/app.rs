@@ -223,6 +223,8 @@ pub struct App {
     queued: Vec<Command>,
     /// Synthetic input for the next frame (menu commands replayed as keys).
     inject: Vec<Event>,
+    /// System fonts for CJK, Arabic etc., loaded once such text appears.
+    fonts: crate::fonts::Fallbacks,
     native_menu: Option<crate::menus::NativeMenu>,
     name_buf: String,
     name_for: Option<CellKey>,
@@ -293,6 +295,7 @@ impl App {
             close_ok: false,
             queued: Vec::new(),
             inject: Vec::new(),
+            fonts: Default::default(),
             native_menu: None,
             name_buf: String::new(),
             name_for: None,
@@ -535,6 +538,7 @@ impl eframe::App for App {
         self.settings_ui(&ctx);
         self.document_ui(&ctx);
         self.autosave(&ctx);
+        self.fonts.load_if_wanted(&ctx);
         if let Some(m) = &self.native_menu {
             m.sync(self.trace, !self.undo.is_empty(), !self.redo.is_empty());
         }
