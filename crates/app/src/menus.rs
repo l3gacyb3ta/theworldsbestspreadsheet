@@ -87,6 +87,7 @@ mod mac {
             K::V => Code::KeyV,
             K::D => Code::KeyD,
             K::Slash => Code::Slash,
+            K::Comma => Code::Comma,
             _ => return None,
         };
         Some(Accelerator::new(m, code))
@@ -107,7 +108,7 @@ mod mac {
             let (new, open, save, save_as, quit) = (item(Command::New), item(Command::Open), item(Command::Save), item(Command::SaveAs), item(Command::Quit));
             let (undo, redo, cut, copy, paste, fill) =
                 (item(Command::Undo), item(Command::Redo), item(Command::Cut), item(Command::Copy), item(Command::Paste), item(Command::FillDown));
-            let (help, search) = (item(Command::Help), item(Command::SearchHelp));
+            let (help, search, settings) = (item(Command::Help), item(Command::SearchHelp), item(Command::Settings));
             let trace = CheckMenuItem::new(Command::ToggleTrace.label(), true, true, None);
             ids.push((trace.id().clone(), Command::ToggleTrace));
 
@@ -122,6 +123,8 @@ mod mac {
                 true,
                 &[
                     &PredefinedMenuItem::about(None, Some(about)),
+                    &sep(),
+                    &settings,
                     &sep(),
                     &PredefinedMenuItem::services(None),
                     &sep(),

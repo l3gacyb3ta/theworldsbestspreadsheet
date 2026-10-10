@@ -3,6 +3,8 @@ mod chart_view;
 mod demo;
 mod help_view;
 mod menus;
+mod prefs;
+mod settings_view;
 mod syntax;
 
 use std::path::PathBuf;
@@ -21,7 +23,8 @@ fn main() -> eframe::Result {
             let last = cc.storage.and_then(|s| s.get_string(app::LAST_FILE_KEY)).map(PathBuf::from).filter(|p| p.exists());
             let path = arg.or(last).unwrap_or_else(|| PathBuf::from("sheet.wbs.json"));
             let help = cc.storage.and_then(|s| s.get_string(app::HELP_WINDOW_KEY));
-            Ok(Box::new(app::App::new(path).with_help_geometry(help).with_welcome().with_native_menu(&cc.egui_ctx)))
+            let prefs = prefs::Prefs::default_path().map(prefs::Prefs::load).unwrap_or_else(prefs::Prefs::in_memory);
+            Ok(Box::new(app::App::new(path).with_prefs(prefs).with_help_geometry(help).with_welcome().with_native_menu(&cc.egui_ctx)))
         }),
     )
 }

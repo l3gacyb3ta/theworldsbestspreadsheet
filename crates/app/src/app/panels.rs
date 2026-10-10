@@ -716,6 +716,9 @@ impl App {
                 let t = egui::RichText::new(m);
                 ui.label(if is_err { t.color(Color32::from_rgb(0xdc, 0x26, 0x26)) } else { t.weak() });
             }
+            if let Some(note) = self.autosave_note(ui.input(|i| i.time)) {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.label(egui::RichText::new(note).weak().small()));
+            }
         });
     }
 

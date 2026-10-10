@@ -365,11 +365,14 @@ pub struct Workbook {
     /// any edit made to them since. Nothing outside the edit code looks here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deleted_sheets: Vec<Sheet>,
+    /// Per-workbook settings as stored (see `settings`): unknown keys and invalid values are kept as they are.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub settings: BTreeMap<String, serde_json::Value>,
 }
 
 impl Workbook {
     pub fn empty() -> Workbook {
-        Workbook { sheets: Vec::new(), names: BTreeMap::new(), deleted_sheets: Vec::new() }
+        Workbook { sheets: Vec::new(), names: BTreeMap::new(), deleted_sheets: Vec::new(), settings: BTreeMap::new() }
     }
     pub fn sheet(&self, id: SheetId) -> Option<&Sheet> {
         self.sheets.iter().find(|s| s.id == id)
