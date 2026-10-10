@@ -666,7 +666,7 @@ impl Engine {
         let cell = if text.trim().is_empty() {
             None
         } else {
-            Some(Cell { pieces: self.wb.parse_text(text, k.sheet) })
+            Some(Cell::new(self.wb.parse_text(text, k.sheet)))
         };
         self.apply(Edit::Cells(vec![(k, cell)]))
     }
@@ -758,7 +758,7 @@ impl Engine {
                 let mut restore = Vec::new();
                 for (k, cell, bounds) in before {
                     let s = self.wb.sheet(sheet).unwrap();
-                    let mut pieces = cell.pieces.clone();
+                    let mut pieces = cell.pieces.to_vec();
                     for (i, b) in bounds {
                         if let (Piece::Range(a, z), Some((r0, c0, r1, c1))) = (&mut pieces[i], b) {
                             let (ka, kz) = (s.key(r0, c0).unwrap(), s.key(r1, c1).unwrap());
@@ -768,9 +768,9 @@ impl Engine {
                             z.col = kz.col;
                         }
                     }
-                    if pieces != cell.pieces {
+                    if pieces[..] != cell.pieces[..] {
                         let ks = self.wb.sheet_mut(k.sheet).unwrap();
-                        ks.cells.insert((k.row, k.col), Cell { pieces });
+                        ks.cells.insert((k.row, k.col), Cell::new(pieces));
                         restore.push((k, Some(cell)));
                     }
                 }
@@ -1038,8 +1038,14 @@ impl Engine {
 
     /// A reference into a deleted sheet renders as `#ref!`; say which kind of deletion it was.
     fn dead_sheet_ref(&self, k: CellKey) -> Option<CompileError> {
+        let pieces = &self.wb.cell(k)?.pieces;
+        let dead = |p: &Piece| matches!(p, Piece::Ref(r) | Piece::Range(r, _) if r.sheet.is_some_and(|s| self.wb.sheet(s).is_none()));
+        // the common case, without rendering anything
+        if !pieces.iter().any(dead) {
+            return None;
+        }
         let mut at = 0;
-        for p in &self.wb.cell(k)?.pieces {
+        for p in pieces.iter() {
             let len = self.wb.render(std::slice::from_ref(p), k.sheet).len();
             let sheet = match p {
                 Piece::Ref(r) | Piece::Range(r, _) => r.sheet,

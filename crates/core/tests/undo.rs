@@ -42,7 +42,7 @@ fn text(e: &mut Engine, sheet: SheetId, r: &str) -> String {
 }
 
 fn put_text(k: CellKey, t: &str) -> Edit {
-    Edit::Cells(vec![(k, Some(Cell { pieces: vec![Piece::Text(t.into())] }))])
+    Edit::Cells(vec![(k, Some(Cell::new(vec![Piece::Text(t.into())])))])
 }
 
 /// Everything the user sees, by position: tab order, each visible cell's text and value, sizes, names.

@@ -800,7 +800,7 @@ fn save_as_then_save() {
     assert!(!h.state().dirty);
     assert!(q.borrow().is_empty());
     let saved: wbs_core::model::Workbook = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-    assert!(saved.sheets[0].cells.values().any(|c| c.pieces == vec![wbs_core::model::Piece::Text("43".into())]));
+    assert!(saved.sheets[0].cells.values().any(|c| c.pieces[..] == [wbs_core::model::Piece::Text("43".into())]));
 }
 
 #[test]
@@ -1752,14 +1752,15 @@ fn autosave_saves_at_the_deadline_and_wakes_for_it() {
     let delay = |h: &Harness<'static, App>| h.output().viewport_output[&egui::ViewportId::ROOT].repaint_delay;
     type_into(&mut h, "H25", "42");
     let deadline = h.state().autosave.since.unwrap() + 5.0;
-    while !p.exists() {
-        assert!(now(&h) < deadline, "not saved at the deadline ({} s)", now(&h));
+    // the save starts at the deadline and lands in the next frame (it's written by another thread)
+    while h.state().dirty {
+        assert!(now(&h) < deadline + 0.25, "not saved at the deadline ({} s)", now(&h));
         // with no input, a frame only runs when asked for: every frame asks for one no later than the deadline
         assert!(delay(&h).as_secs_f64() <= deadline - now(&h), "repaint in {:?} at {} s, deadline {deadline} s", delay(&h), now(&h));
         h.run_steps(1);
     }
-    assert!(now(&h) < deadline + 0.25, "saved within a frame of the deadline");
-    assert!(!h.state().dirty);
+    assert!(now(&h) < deadline + 0.5, "saved within a frame of the deadline");
+    assert!(p.exists());
     // the status bar was drawn before the save in that frame: the app asks for another to show the result
     assert_eq!(delay(&h), std::time::Duration::ZERO);
     h.run_steps(1);

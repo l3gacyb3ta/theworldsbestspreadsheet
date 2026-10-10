@@ -95,7 +95,7 @@ pub(super) fn fingerprint(wb: &Workbook) -> u64 {
             let (Some(ri), Some(ci)) = (s.row_index(*r), s.col_index(*c)) else { continue };
             let mut ch = FxHasher::default();
             (si, ri, ci).hash(&mut ch);
-            for p in &cell.pieces {
+            for p in cell.pieces.iter() {
                 match p {
                     Piece::Text(t) => (0u8, t).hash(&mut ch),
                     Piece::Ref(a) => (1u8, a).hash(&mut ch),
@@ -119,6 +119,55 @@ pub(super) fn fingerprint(wb: &Workbook) -> u64 {
         (k, v.to_string()).hash(&mut h);
     }
     h.finish()
+}
+
+fn write_workbook(wb: &Workbook, path: &Path) -> Result<(), String> {
+    let s = serde_json::to_string_pretty(wb).map_err(|e| e.to_string())?;
+    std::fs::write(path, s).map_err(|e| e.to_string())
+}
+
+/// A workbook snapshot being written by another thread. Dropping it waits for the write,
+/// so quitting, opening or saving again never races a half-written file.
+pub(super) struct BackgroundSave {
+    /// `Engine::revision()` when the snapshot was taken.
+    pub(super) revision: u64,
+    rx: std::sync::mpsc::Receiver<Result<u64, String>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl BackgroundSave {
+    pub(super) fn start(ctx: &egui::Context, wb: Workbook, path: PathBuf, revision: u64) -> BackgroundSave {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        let thread = std::thread::spawn(move || {
+            // the snapshot's fingerprint, for the dirty check: computed here, off the UI thread
+            let res = write_workbook(&wb, &path).map(|()| fingerprint(&wb));
+            let _ = tx.send(res);
+            ctx.request_repaint();
+        });
+        BackgroundSave { revision, rx, thread: Some(thread) }
+    }
+
+    /// The fingerprint of what was written, once the write is done. (Tests wait for it, so
+    /// a save lands in the frame after it starts, however the threads are scheduled.)
+    pub(super) fn result(&mut self) -> Option<Result<u64, String>> {
+        if cfg!(test) {
+            return Some(self.rx.recv().unwrap_or_else(|_| Err("the save thread stopped".into())));
+        }
+        match self.rx.try_recv() {
+            Ok(r) => Some(r),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Err("the save thread stopped".into())),
+        }
+    }
+}
+
+impl Drop for BackgroundSave {
+    fn drop(&mut self) {
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
 }
 
 fn read_workbook(path: &Path) -> Result<Engine, String> {
@@ -223,8 +272,9 @@ impl App {
     }
 
     pub(super) fn write_to(&mut self, path: PathBuf) -> bool {
-        let res = serde_json::to_string_pretty(&self.eng.wb).map_err(|e| e.to_string()).and_then(|s| std::fs::write(&path, s).map_err(|e| e.to_string()));
-        match res {
+        // an autosave still writing finishes first, so it can't land after this
+        self.autosave.pending = None;
+        match write_workbook(&self.eng.wb, &path) {
             Ok(()) => {
                 self.status = Some(format!("saved {}", path.display()));
                 self.path = Some(path);

@@ -80,10 +80,10 @@ pub fn units_sheet() -> Sheet {
     let mut s = Sheet::new("units", UNITS.len().max(100), 6);
     for (i, (decl, note)) in UNITS.iter().enumerate() {
         let k = s.key(i, 0).unwrap();
-        s.cells.insert((k.row, k.col), crate::model::Cell { pieces: vec![crate::model::Piece::Text(decl.to_string())] });
+        s.cells.insert((k.row, k.col), crate::model::Cell::new(vec![crate::model::Piece::Text(decl.to_string())]));
         if !note.is_empty() {
             let k = s.key(i, 1).unwrap();
-            s.cells.insert((k.row, k.col), crate::model::Cell { pieces: vec![crate::model::Piece::Text(note.to_string())] });
+            s.cells.insert((k.row, k.col), crate::model::Cell::new(vec![crate::model::Piece::Text(note.to_string())]));
         }
     }
     s.col_widths.insert(s.cols.get(0).unwrap(), 230.0);

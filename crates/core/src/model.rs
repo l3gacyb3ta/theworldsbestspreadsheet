@@ -8,6 +8,7 @@ use crate::lex::{self, Tok};
 use serde::{Deserialize, Serialize};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct StoredRef {
@@ -29,7 +30,14 @@ pub enum Piece {
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct Cell {
-    pub pieces: Vec<Piece>,
+    /// Shared: copying a cell (undo, snapshots for saving) doesn't copy its pieces.
+    pub pieces: Arc<[Piece]>,
+}
+
+impl Cell {
+    pub fn new(pieces: Vec<Piece>) -> Cell {
+        Cell { pieces: pieces.into() }
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
