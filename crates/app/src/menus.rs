@@ -108,6 +108,7 @@ mod mac {
             let (new, open, save, save_as, quit) = (item(Command::New), item(Command::Open), item(Command::Save), item(Command::SaveAs), item(Command::Quit));
             let (undo, redo, cut, copy, paste, fill) =
                 (item(Command::Undo), item(Command::Redo), item(Command::Cut), item(Command::Copy), item(Command::Paste), item(Command::FillDown));
+            let copy_values = item(Command::CopyValues);
             let (help, search, settings) = (item(Command::Help), item(Command::SearchHelp), item(Command::Settings));
             let trace = CheckMenuItem::new(Command::ToggleTrace.label(), true, true, None);
             ids.push((trace.id().clone(), Command::ToggleTrace));
@@ -138,7 +139,7 @@ mod mac {
             )
             .unwrap();
             let file = Submenu::with_items("File", true, &[&new, &open, &sep(), &save, &save_as]).unwrap();
-            let edit = Submenu::with_items("Edit", true, &[&undo, &redo, &sep(), &cut, &copy, &paste, &sep(), &fill]).unwrap();
+            let edit = Submenu::with_items("Edit", true, &[&undo, &redo, &sep(), &cut, &copy, &copy_values, &paste, &sep(), &fill]).unwrap();
             let view = Submenu::with_items("View", true, &[&trace]).unwrap();
             let window = Submenu::with_items(
                 "Window",

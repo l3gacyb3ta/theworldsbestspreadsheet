@@ -16,6 +16,7 @@ pub enum Command {
     Redo,
     Cut,
     Copy,
+    CopyValues,
     Paste,
     FillDown,
     ToggleTrace,
@@ -36,6 +37,7 @@ impl Command {
             Command::Redo => "Redo",
             Command::Cut => "Cut",
             Command::Copy => "Copy",
+            Command::CopyValues => "Copy Values",
             Command::Paste => "Paste",
             Command::FillDown => "Fill Down",
             Command::ToggleTrace => "Trace Precedents & Dependents",
@@ -59,6 +61,7 @@ impl Command {
             Command::Redo => (cmd_shift, Key::Z),
             Command::Cut => (cmd, Key::X),
             Command::Copy => (cmd, Key::C),
+            Command::CopyValues => (cmd_shift, Key::C),
             Command::Paste => (cmd, Key::V),
             Command::FillDown => (cmd, Key::D),
             Command::ToggleTrace => return None,
@@ -109,6 +112,10 @@ impl App {
             }
             Command::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             // the native menu works whichever window is in front: edits go to the help window's fields
+            // a text field has no values to copy: ⇧⌘C there copies its selection
+            Command::CopyValues if self.help.has_focus() => self.help.forward(Command::Copy),
+            Command::CopyValues if self.settings.has_focus() => self.settings.forward(Command::Copy),
+            Command::CopyValues if ctx.egui_wants_keyboard_input() => ctx.send_viewport_cmd(egui::ViewportCommand::RequestCopy),
             Command::Undo | Command::Redo | Command::FillDown | Command::Cut | Command::Copy | Command::Paste if self.help.has_focus() => {
                 self.help.forward(c)
             }
@@ -123,6 +130,7 @@ impl App {
             // focused text field) the usual Copy/Cut/Paste events.
             Command::Cut => ctx.send_viewport_cmd(egui::ViewportCommand::RequestCut),
             Command::Copy => ctx.send_viewport_cmd(egui::ViewportCommand::RequestCopy),
+            Command::CopyValues => self.copy_values(ctx),
             Command::Paste => ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste),
             Command::ToggleTrace => self.trace = !self.trace,
             Command::Help => self.context_help(),
@@ -179,7 +187,7 @@ impl App {
                 item(ui, Command::Undo, !self.undo.is_empty(), &mut picked);
                 item(ui, Command::Redo, !self.redo.is_empty(), &mut picked);
                 ui.separator();
-                for c in [Command::Cut, Command::Copy, Command::Paste] {
+                for c in [Command::Cut, Command::Copy, Command::CopyValues, Command::Paste] {
                     item(ui, c, true, &mut picked);
                 }
                 ui.separator();

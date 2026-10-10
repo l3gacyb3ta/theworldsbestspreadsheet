@@ -5,7 +5,8 @@ use crate::engine::{Edit, Engine, Shown};
 use crate::ids::*;
 use crate::lex::{self, Tok};
 use crate::model::{classify, number_literal, Cell, Kind, Piece, StoredRef, Workbook};
-use crate::value::{fmt_date, Value};
+use crate::units::Quant;
+use crate::value::{fmt_date, fmt_quantity, Value};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::ops::Range;
 
@@ -203,6 +204,72 @@ pub fn copy(e: &Engine, r: Rect) -> Clip {
         lines.push(line.join("\t"));
     }
     Clip { rows: r.rows(), cols: r.cols(), cells, text: lines.join("\n") }
+}
+
+/// ⇧⌘C: the values the cells show, tab/newline separated, each written so that typing (or pasting) it
+/// back gives the same value: `5300 [m]`, `50 [%]`, `20 [°C]`, `2026-01-31`, text. See `value_literal`.
+pub fn copy_values(e: &Engine, r: Rect) -> String {
+    let s = e.wb.sheet(r.sheet).unwrap();
+    let lines: Vec<String> = (r.r0..=r.r1)
+        .map(|row| (r.c0..=r.c1).map(|col| s.key(row, col).map(|k| value_literal(e, k)).unwrap_or_default()).collect::<Vec<_>>().join("\t"))
+        .collect();
+    lines.join("\n")
+}
+
+/// The value a cell shows as a re-typeable literal. A spilled cell gives its element; a number its full
+/// precision in its display unit; text is quoted with `'` when it would otherwise read as a number,
+/// program or declaration (tabs and newlines become spaces). An error gives its short code (`#err`),
+/// which pastes back as text; charts, unit/dim/word declarations and empty cells give nothing.
+pub fn value_literal(e: &Engine, k: CellKey) -> String {
+    let (value, dr, dc) = match e.shown(k) {
+        Shown::Empty => return String::new(),
+        Shown::Error(err) => return err.short().to_string(),
+        Shown::Value { value, dr, dc, .. } => (value, dr, dc),
+    };
+    let ix = |shape: &[usize]| match shape {
+        [] => Some(0),
+        [_] => Some(dr),
+        [_, c] => Some(dr * c + dc),
+        _ => None,
+    };
+    match value {
+        Value::Num(n) => ix(&n.shape).and_then(|i| n.data.get(i)).map(|x| quantity_literal(*x, &n.q)).unwrap_or_default(),
+        Value::Text(t) => match ix(&t.shape).and_then(|i| t.data.get(i)) {
+            Some(s) => {
+                let s = s.replace(['\t', '\n', '\r'], " ");
+                if classify(&s) == Kind::Text && !s.starts_with(['\'', ' ']) {
+                    s
+                } else {
+                    format!("'{s}")
+                }
+            }
+            None => String::new(),
+        },
+        Value::Chart(_) | Value::Unit(_) | Value::Dim(_) | Value::Word(_) => String::new(),
+    }
+}
+
+/// `5300 [m]` for 5300 m: the shortest number that converts back to exactly `canonical` in the display
+/// unit (all 17 digits if that's what it takes); dates as ISO dates.
+fn quantity_literal(canonical: f64, q: &Quant) -> String {
+    let shown = q.disp.to_display(canonical);
+    if !shown.is_finite() {
+        return fmt_quantity(canonical, q);
+    }
+    if q.disp.is_date() && q.absolute.is_some() {
+        return fmt_date(shown);
+    }
+    let best = (0..17)
+        .filter_map(|p| format!("{shown:.p$e}").parse::<f64>().ok())
+        .find(|x| q.disp.to_canonical(*x) == canonical)
+        .unwrap_or(shown);
+    let ax = best.abs();
+    let n = if ax == 0.0 || (1e-6..1e15).contains(&ax) { format!("{best}") } else { format!("{best:e}") };
+    if q.disp.is_none() {
+        n
+    } else {
+        format!("{n} [{}]", q.disp)
+    }
 }
 
 /// Paste a clip with its top-left at `at`; formulas move relative refs.
@@ -718,5 +785,101 @@ mod tests {
         assert_eq!(text(&e, s, "B1"), "=D3");
         assert_eq!(val(&e, s, "B1"), "2");
         assert_eq!(text(&e, s, "B2"), "=D1 sum");
+    }
+
+    /// A cell's value exactly: number bits and unit, or text.
+    #[derive(Debug, PartialEq)]
+    enum V {
+        Num(f64, Quant),
+        Text(String),
+        Err(&'static str),
+        Other,
+        Empty,
+    }
+
+    fn exact(e: &Engine, k: CellKey) -> V {
+        match e.shown(k) {
+            Shown::Value { value: Value::Num(n), dr, dc, .. } => {
+                let i = if n.shape.len() == 2 { dr * n.shape[1] + dc } else { dr };
+                V::Num(n.data[i], n.q.clone())
+            }
+            Shown::Value { value: Value::Text(t), dr, .. } => V::Text(t.data[dr].to_string()),
+            Shown::Value { .. } => V::Other,
+            Shown::Error(err) => V::Err(err.short()),
+            Shown::Empty => V::Empty,
+        }
+    }
+
+    #[test]
+    fn copied_values_paste_back_as_the_same_values() {
+        let (mut e, s) = setup();
+        let rows = [
+            ["5300 [m]", "=A1 3 /", "50 [%]", "=C1 3 /", "=1 3e9 /", "=1e20 [m]", "=0.1 0.2 +", "=5.3 [km] 3 *"],
+            ["20 [°C]", "=A2 5.5 [Δ°C] +", "2026-01-31", "=C2 30 [day] +", "=212 [°F] to[°C]", "=-0.25 [m/s^2]", "=1 [kg*m/s^2] 3 /", ""],
+            ["hello", "'5", "'=A1", "'  padded", "'dim x", "=\"2026-01-31\"", "'it's", "=1 [m] 1 [s] +"],
+            ["1", "2", "=A4:B5 10 *", "", "=A4:A5 1 [km] *", "", "", ""],
+            ["3", "4", "", "", "", "", "", ""],
+        ];
+        for (r, row) in rows.iter().enumerate() {
+            for (c, t) in row.iter().enumerate() {
+                e.set_text(k(&e, s, r, c), t);
+            }
+        }
+        let clip = copy_values(&e, Rect::span(s, (0, 0), (4, 7)));
+        let lines: Vec<&str> = clip.lines().collect();
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[0].split('\t').count(), 8);
+        let at = |r: usize, c: usize| lines[r].split('\t').nth(c).unwrap().to_string();
+        // re-typeable literals, not the display (`5,300 m`)
+        assert_eq!(at(0, 0), "5300 [m]");
+        assert_eq!(at(0, 2), "50 [%]");
+        assert_eq!(at(0, 5), "1e20 [m]");
+        assert_eq!(at(0, 7), "15.9 [km]");
+        assert_eq!(at(1, 0), "20 [°C]");
+        assert_eq!(at(1, 1), "25.5 [°C]");
+        assert_eq!(at(1, 2), "2026-01-31");
+        assert_eq!(at(1, 3), "2026-03-02");
+        // shown as 100 °C, but the conversion left it a hair over: the copy keeps every digit, so it pastes back exactly
+        assert_eq!(at(1, 4), "100.00000000000006 [°C]");
+        assert_eq!(at(1, 5), "-0.25 [m/s^2]");
+        // text is quoted only where it would read as something else
+        assert_eq!(at(2, 0), "hello");
+        assert_eq!(at(2, 1), "'5");
+        assert_eq!(at(2, 2), "'=A1");
+        assert_eq!(at(2, 3), "'  padded");
+        assert_eq!(at(2, 4), "'dim x");
+        assert_eq!(at(2, 5), "'2026-01-31");
+        assert_eq!(at(2, 6), "it's");
+        // an error copies its short code; spilled cells their element
+        assert_eq!(at(2, 7), "#err");
+        assert_eq!((at(3, 2), at(3, 3), at(4, 2), at(4, 3)), ("10".into(), "20".into(), "30".into(), "40".into()));
+        assert_eq!((at(3, 4), at(4, 4)), ("1 [km]".into(), "3 [km]".into()));
+        // pasting back reproduces every value exactly, units and full precision included
+        let ed = paste_text(&mut e, &clip, s, (10, 0));
+        e.apply(ed);
+        for r in 0..5 {
+            for c in 0..8 {
+                let (a, b) = (exact(&e, k(&e, s, r, c)), exact(&e, k(&e, s, r + 10, c)));
+                match a {
+                    V::Err(code) => assert_eq!(b, V::Text(code.into())),
+                    a => assert_eq!(a, b, "{} pasted back as {:?}", at(r, c), b),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn charts_and_declarations_copy_as_nothing() {
+        let (mut e, s) = setup();
+        e.set_text(k(&e, s, 0, 0), "1");
+        e.set_text(k(&e, s, 1, 0), "2");
+        e.set_text(k(&e, s, 0, 1), "=A1:A2 A1:A2 line");
+        e.set_text(k(&e, s, 0, 20), "[furlong] = 201.168 [m]");
+        e.set_text(k(&e, s, 1, 20), "dim money");
+        e.set_text(k(&e, s, 2, 20), ": twice ( x -- 2x ) 2 * ;");
+        assert!(matches!(exact(&e, k(&e, s, 0, 1)), V::Other));
+        assert!(matches!(e.shown(k(&e, s, 3, 3)), Shown::Value { value: Value::Chart(_), .. }), "C4 is under the chart");
+        assert_eq!(copy_values(&e, Rect::span(s, (0, 0), (1, 2))), "1\t\t\n2\t\t");
+        assert_eq!(copy_values(&e, Rect::span(s, (0, 20), (2, 20))), "\n\n");
     }
 }

@@ -55,6 +55,8 @@ impl App {
                     self.start_edit(ctx, r, c, Some(t), false);
                     return;
                 }
+                // the integration turns ⇧⌘C into Copy too (on macOS the menu's key equivalent gets it first)
+                Event::Copy if mods.shift => self.copy_values(ctx),
                 Event::Copy => self.copy(ctx),
                 Event::Cut => self.cut(ctx),
                 Event::Paste(s) => self.paste(ctx, &s),
@@ -331,6 +333,16 @@ impl App {
         ctx.copy_text(clip.text.clone());
         self.status = Some(format!("copied {}×{}", clip.rows, clip.cols));
         self.clip = Some(clip);
+    }
+
+    /// ⇧⌘C: the values the selection shows, as literals that paste back (here or elsewhere) as the same values.
+    pub(super) fn copy_values(&mut self, ctx: &egui::Context) {
+        let sel = self.sel();
+        ctx.copy_text(ops::copy_values(&self.eng, sel));
+        // a later ⌘V pastes this text, not the cells copied before it
+        self.clip = None;
+        self.cut = None;
+        self.status = Some(format!("copied the values of {}×{}", sel.rows(), sel.cols()));
     }
 
     /// ⌘X marks the selection; the next ⌘V moves it, unless the document changed in between.
