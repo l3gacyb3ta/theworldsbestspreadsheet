@@ -3,6 +3,7 @@
 
 pub mod a1;
 pub mod chart;
+pub mod dims;
 pub mod engine;
 pub mod eval;
 pub mod help;

@@ -4,10 +4,11 @@
 //! recomputed, in dependency order. Spill regions are part of the graph:
 //! a reference into a spilled cell depends on the spill's source.
 
-use crate::eval::{run_program, run_traced, Env, TraceStep};
+use crate::dims::{self, Halt, SVal, StaticEnv, StaticTrace};
+use crate::eval::{run_program, run_traced, Env, EvalErr, TraceStep};
 use crate::ids::*;
 use crate::model::{classify, Cell, Kind, NameDef, Piece, Sheet, StoredRef, Workbook};
-use crate::parse::{declares, CompileError, Compiled, Compiler, Declares, Dep, Symbols};
+use crate::parse::{declares, CompileError, Compiled, Compiler, Declares, Dep, OpKind, Symbols};
 use crate::units::{Dim, Quant, UnitInfo};
 use crate::value::{Num, Prov, Text, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -56,6 +57,19 @@ struct Node {
     kind: Kind,
     compiled: Result<Arc<Compiled>, CompileError>,
     deps: Vec<Dep>,
+}
+
+/// A node's result from the static dimension pass (`dims`).
+struct Static {
+    /// What the cell holds (for a unit declaration: its defining quantity).
+    val: SVal,
+    err: Option<EvalErr>,
+}
+
+impl Static {
+    fn any() -> Static {
+        Static { val: SVal::Any, err: None }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -107,6 +121,7 @@ pub struct Engine {
     pub wb: Workbook,
     nodes: HashMap<CellKey, Node>,
     results: HashMap<CellKey, CellResult>,
+    statics: HashMap<CellKey, Static>,
     /// Anchor → region it actually spills into.
     spills: HashMap<CellKey, Region>,
     /// Anchor → region it wants (even when blocked).
@@ -143,12 +158,56 @@ impl<'a> Env for View<'a> {
     }
 }
 
+impl<'a> StaticEnv for View<'a> {
+    fn cell(&self, k: CellKey) -> Option<SVal> {
+        let e = self.0;
+        e.wb.sheet(k.sheet)?;
+        if e.nodes.contains_key(&k) {
+            return Some(e.static_ref(k));
+        }
+        match e.cover.get(&k) {
+            Some(a) => e.static_element(*a),
+            None => Some(SVal::Any),
+        }
+    }
+    fn range(&self, sheet: SheetId, a: &StoredRef, b: &StoredRef, gaps: bool) -> Result<SVal, Halt> {
+        let e = self.0;
+        let s = e.wb.sheet(sheet).ok_or(Halt::Stop)?;
+        let (r0, c0, r1, c1) = s.range_bounds(a, b).ok_or(Halt::Stop)?;
+        let mut cells = Vec::with_capacity((r1 - r0 + 1) * (c1 - c0 + 1));
+        for r in r0..=r1 {
+            for c in c0..=c1 {
+                let k = s.key(r, c).unwrap();
+                if gaps && !e.nodes.contains_key(&k) && matches!(e.shown(k), Shown::Empty) {
+                    continue;
+                }
+                let src = if e.nodes.contains_key(&k) { Some(k) } else { e.cover.get(&k).copied() };
+                cells.push((k, src.map_or(Some(SVal::Any), |a| e.static_element(a))));
+            }
+        }
+        dims::range_type(&cells, &|k| e.wb.cell_label(k, None))
+    }
+    fn unit(&self, name: &str) -> Option<(Option<Dim>, bool)> {
+        let e = self.0;
+        let k = e.syms.units.get(name)?;
+        match &**e.nodes.get(k)?.compiled.as_ref().ok()? {
+            Compiled::Base { dim, .. } => Some((Some(Dim::base(dim)), false)),
+            Compiled::UnitDef { offset, .. } => Some((e.statics.get(k).and_then(|s| s.val.dim().cloned()), offset.is_some())),
+            _ => None,
+        }
+    }
+    fn word(&self, k: CellKey) -> Option<Arc<Compiled>> {
+        Env::word(self, k)
+    }
+}
+
 impl Engine {
     pub fn new(wb: Workbook) -> Engine {
         let mut e = Engine {
             wb,
             nodes: HashMap::new(),
             results: HashMap::new(),
+            statics: HashMap::new(),
             spills: HashMap::new(),
             desired: HashMap::new(),
             cover: HashMap::new(),
@@ -307,6 +366,95 @@ impl Engine {
     /// Step-by-step evaluation of a cell's program.
     pub fn trace_cell(&self, k: CellKey) -> Scratch {
         self.eval_scratch(&self.wb.cell_text(k), k.sheet)
+    }
+
+    /// The static pass over `text` as if it were in a cell on `home`: the
+    /// inferred stack after each token, without evaluating anything.
+    pub fn static_scratch(&self, text: &str, home: SheetId) -> StaticTrace {
+        let mut c = Compiler::new(&self.wb, &self.syms, home);
+        match c.compile(text) {
+            Ok(Compiled::Program(ops)) => dims::analyze_traced(&View(self), &ops),
+            _ => StaticTrace::default(),
+        }
+    }
+
+    // ---- static dimensions -------------------------------------------------
+
+    /// What a cell's value statically is — its dimension and whether it is
+    /// absolute — known even when the value is an error or its inputs are
+    /// empty. A spilled-into cell reports its source; a unit declaration, the
+    /// quantity that defines it.
+    pub fn static_value(&self, k: CellKey) -> Option<&SVal> {
+        let k = if self.nodes.contains_key(&k) { k } else { *self.cover.get(&k)? };
+        self.statics.get(&k).map(|s| &s.val)
+    }
+
+    /// The dimension a cell's value statically has, if known.
+    pub fn static_dim(&self, k: CellKey) -> Option<&Dim> {
+        self.static_value(k)?.dim()
+    }
+
+    /// The unit error the static pass found in a cell, if any.
+    pub fn static_error(&self, k: CellKey) -> Option<&EvalErr> {
+        self.statics.get(&k)?.err.as_ref()
+    }
+
+    /// What a reference to node `k` pushes.
+    fn static_ref(&self, k: CellKey) -> SVal {
+        match self.nodes.get(&k).map(|n| n.compiled.as_ref().map(|c| &**c)) {
+            Some(Ok(Compiled::UnitDef { .. } | Compiled::Base { .. })) => SVal::Other("unit"),
+            Some(Ok(Compiled::Dim(_))) => SVal::Other("dimension"),
+            Some(Ok(Compiled::WordDef { .. })) => SVal::Other("word"),
+            Some(Ok(_)) => self.statics.get(&k).map_or(SVal::Any, |s| s.val.forget()),
+            _ => SVal::Any,
+        }
+    }
+
+    /// One element of node `a`'s value, as `scalar_at` reads it; `None` where that certainly fails.
+    fn static_element(&self, a: CellKey) -> Option<SVal> {
+        match self.static_ref(a) {
+            SVal::Chart | SVal::Other(_) => None,
+            v => Some(v),
+        }
+    }
+
+    fn compute_static(&self, k: CellKey) -> Static {
+        let Some(Ok(c)) = self.nodes.get(&k).map(|n| &n.compiled) else { return Static::any() };
+        let env = View(self);
+        let from = |r: Result<SVal, EvalErr>| match r {
+            Ok(val) => Static { val, err: None },
+            Err(e) => Static { val: SVal::Any, err: Some(e) },
+        };
+        match &**c {
+            Compiled::Program(ops) => from(dims::analyze(&env, ops)),
+            Compiled::Text(_) => Static { val: SVal::Text, err: None },
+            // a duplicate definition fails before its body runs
+            Compiled::UnitDef { name, body, .. } if self.syms.units.get(&**name) == Some(&k) => from(match dims::analyze(&env, body) {
+                Ok(v @ (SVal::Num(_) | SVal::Any)) => Ok(v),
+                Ok(_) => Err(EvalErr { msg: "a unit is defined by a number with units".into(), span: None }),
+                Err(e) => Err(e),
+            }),
+            Compiled::Base { dim, .. } => Static { val: SVal::num(Some(Dim::base(dim)), Some(false)), err: None },
+            _ => Static::any(),
+        }
+    }
+
+    /// Whether an edit leaves a cell's static result as it was: a number
+    /// literal whose value changed but not its unit (scrubbing).
+    fn same_statics(&self, k: CellKey, old: &Node, new: &Node) -> bool {
+        if old.kind != Kind::Number || new.kind != Kind::Number || old.deps != new.deps {
+            return false;
+        }
+        if self.statics.get(&k).is_none_or(|s| s.err.is_some()) {
+            return false;
+        }
+        match (old.compiled.as_deref(), new.compiled.as_deref()) {
+            (Ok(Compiled::Program(a)), Ok(Compiled::Program(b))) => {
+                a.len() == b.len()
+                    && a.iter().zip(b).all(|(x, y)| matches!((&x.kind, &y.kind), (OpKind::Num(_), OpKind::Num(_))) || x.kind == y.kind)
+            }
+            _ => false,
+        }
     }
 
     /// Every unit with its defining cell and current definition, sorted by name.
@@ -801,6 +949,7 @@ impl Engine {
         self.rdeps.clear();
         self.range_deps.clear();
         self.results.clear();
+        self.statics.clear();
         self.spills.clear();
         self.desired.clear();
         self.cover.clear();
@@ -810,7 +959,7 @@ impl Engine {
             self.index_deps(*k);
         }
         let all: Vec<CellKey> = self.nodes.keys().copied().collect();
-        self.recalc(all.into_iter().collect());
+        self.recalc(all.into_iter().collect(), None);
     }
 
     fn cells_changed(&mut self, keys: &[CellKey]) {
@@ -824,15 +973,20 @@ impl Engine {
             return;
         }
         let mut seeds = Vec::new();
+        let mut static_seeds = Vec::new();
         for k in keys {
             let k = *k;
             self.unindex_deps(k);
-            self.nodes.remove(&k);
+            let old = self.nodes.remove(&k);
             let text = self.wb.cell_text(k);
             if !text.trim().is_empty() {
                 let n = self.compile_node(k, &text);
                 self.nodes.insert(k, n);
                 self.index_deps(k);
+            }
+            // scrubbing a number never changes a dimension: nothing downstream needs the static pass again
+            if !matches!((&old, self.nodes.get(&k)), (Some(o), Some(n)) if self.same_statics(k, o, n)) {
+                static_seeds.push(k);
             }
             seeds.push(k);
             // A cell typed into (or cleared from) a spill region affects the spiller.
@@ -845,7 +999,8 @@ impl Engine {
             }
         }
         let dirty = self.closure(seeds);
-        self.recalc(dirty);
+        let static_dirty = if static_seeds.is_empty() { HashSet::new() } else { self.closure(static_seeds) };
+        self.recalc(dirty, Some(static_dirty));
     }
 
     fn dependents_of_position(&self, p: CellKey) -> Vec<CellKey> {
@@ -935,7 +1090,9 @@ impl Engine {
         out
     }
 
-    fn recalc(&mut self, mut dirty: HashSet<CellKey>) {
+    /// Recomputes `dirty` in dependency order. The static pass reruns on
+    /// `static_dirty` (all of `dirty` when `None`) and on nodes it hasn't seen.
+    fn recalc(&mut self, mut dirty: HashSet<CellKey>, mut static_dirty: Option<HashSet<CellKey>>) {
         self.last_eval_count = 0;
         self.cycles.retain(|cyc| !cyc.iter().any(|k| dirty.contains(k)));
         for _pass in 0..8 {
@@ -944,6 +1101,7 @@ impl Engine {
             let mut changed_positions: Vec<CellKey> = Vec::new();
             for k in &gone {
                 self.results.remove(k);
+                self.statics.remove(k);
                 changed_positions.extend(self.set_desired(*k, None));
                 if let Some(reg) = self.spills.remove(k) {
                     changed_positions.extend(self.uncover(&reg));
@@ -963,11 +1121,16 @@ impl Engine {
                             kind: ErrKind::Cycle(path),
                         }),
                     );
+                    self.statics.insert(k, Static::any());
                     changed_positions.extend(self.set_desired(k, None));
                     if let Some(reg) = self.spills.remove(&k) {
                         changed_positions.extend(self.uncover(&reg));
                     }
                     continue;
+                }
+                if static_dirty.as_ref().is_none_or(|s| s.contains(&k)) || !self.statics.contains_key(&k) {
+                    let s = self.compute_static(k);
+                    self.statics.insert(k, s);
                 }
                 self.last_eval_count += 1;
                 let res = self.evaluate(k);
@@ -990,6 +1153,8 @@ impl Engine {
                 break;
             }
             dirty = self.closure(next);
+            // spill coverage changed: what references and ranges read has too
+            static_dirty = None;
         }
     }
 
@@ -1120,6 +1285,10 @@ impl Engine {
             Ok(c) => c.clone(),
             Err(e) => return Err(CellError { msg: e.msg.clone(), span: e.span.clone(), kind: ErrKind::Local }),
         };
+        // A unit error found statically is this cell's, whatever its inputs hold.
+        if let Some(e) = self.static_error(k) {
+            return Err(local(e.msg.clone(), e.span.clone()));
+        }
         // An error in a referenced cell is reported as upstream, not here.
         if let Some(up) = self.first_upstream_error(k) {
             let label = self.wb.cell_label(up, Some(k.sheet));

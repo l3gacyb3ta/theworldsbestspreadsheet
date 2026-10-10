@@ -61,9 +61,17 @@ is an ordinary, editable `units` sheet; exchange rates are inputs you can scrub.
   a range shrinks the range instead of breaking it, and undo revives the ids.
 - **Sorting** moves rows by id, so single references follow their cells; ranges
   over the sorted block keep covering the same block.
-- **Dimensions are checked during evaluation**, not by a separate static pass. Since
-  no dimension depends on a magnitude (`^` requires a fixed fractional exponent),
-  the error lands on the same cell; downstream cells show `#upstream`.
+- **Dimensions are propagated statically** (SPEC §4, `crates/core/src/dims.rs`): an
+  abstract interpretation of each program tracks every stack slot as a number of
+  known/unknown dimension and absoluteness, text or a chart, through references,
+  ranges, units and words, over the dependency graph in recalc order. A unit
+  error is reported on its cell even while an input is empty or erroring. Each
+  rule mirrors the interpreter, which keeps its own checks as the backstop: a
+  static error is the error evaluation gives once the inputs are there (unless a
+  value-dependent check — a shape, an index — fails first). What stays dynamic:
+  an empty input's dimension, and `^` with an exponent read from a cell. Editing
+  a number literal without changing its unit skips the pass. `if` requires both
+  numeric branches to share a dimension so its result's is static.
 - **Dimensionless display units (`%`) are absorbed** by a quantity with a
   dimension: `4 [%] 100 [USD] *` shows `4 USD`, not `400 USD*%`. Identical-factor
   cancellation is otherwise the only simplification.
