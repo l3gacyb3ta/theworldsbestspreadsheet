@@ -3,6 +3,7 @@ mod chart_view;
 mod demo;
 mod fonts;
 mod help_view;
+mod icon;
 mod menus;
 mod prefs;
 mod settings_view;
@@ -17,7 +18,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 fn main() -> eframe::Result {
     let arg = std::env::args().nth(1).map(PathBuf::from);
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default().with_inner_size([1440.0, 900.0]).with_title("the world's best spreadsheet"),
+        viewport: eframe::egui::ViewportBuilder::default().with_inner_size([1440.0, 900.0]).with_title("the world's best spreadsheet").with_icon(icon::icon()),
         ..Default::default()
     };
     eframe::run_native(

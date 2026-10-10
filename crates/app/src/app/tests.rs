@@ -365,6 +365,32 @@ fn formula_extension_offer() {
     assert_eq!(source(&h, "F29"), "");
 }
 
+#[test]
+fn double_click_fill_handle_lines_up_with_a_spill() {
+    // 60 fps, so two clicks land inside egui's double-click window
+    let mut h = harness_dt(1.0 / 60.0);
+    // a recurrence beside the demo's spilled profit column: no dragging out every row
+    for (at, text) in [("E10", "100"), ("E11", "=E10 0.9 *")] {
+        let p = center(&h, at);
+        click(&mut h, p, Modifiers::NONE);
+        typ(&mut h, text);
+        key(&mut h, Key::Enter);
+    }
+    h.run_steps(60);
+    { let p = center(&h, "E11"); click(&mut h, p, Modifiers::NONE); }
+    h.run_steps(60);
+    let handle = h.state().geo.as_ref().unwrap().cell(10, 4).right_bottom() - Vec2::splat(1.0);
+    for _ in 0..2 {
+        click(&mut h, handle, Modifiers::NONE);
+    }
+    h.run_steps(2);
+    assert_eq!(source(&h, "E33"), "=E32 0.9 *");
+    assert_eq!(source(&h, "E34"), "");
+    assert_eq!(h.state().cursor, (32, 4));
+    undo(&mut h);
+    assert_eq!(source(&h, "E12"), "");
+}
+
 // ---- help system -------------------------------------------------------------
 
 #[test]
@@ -662,6 +688,17 @@ fn help_pages_render() {
     h.state_mut().help.show_page(Page::Topic("units"));
     h.run_steps(3);
     shot(&mut h, "17_help_units_topic");
+    // tables: the second column wraps beside the first instead of squeezing into a sliver
+    h.state_mut().help.show_page(Page::Topic("cells"));
+    h.run_steps(3);
+    shot(&mut h, "17_help_table_cells");
+    let (starts, kind) = (h.get_by_label("starts with").rect(), h.get_by_label("kind").rect());
+    assert!((kind.top() - starts.top()).abs() < 2.0 && kind.left() > starts.right(), "header cells side by side: {starts:?} {kind:?}");
+    let forced = h.get_by_label("forced ").rect();
+    assert!(forced.left() > starts.left() + 40.0 && forced.width() < 200.0, "{forced:?}");
+    h.state_mut().help.show_page(Page::Topic("keys"));
+    h.run_steps(3);
+    shot(&mut h, "17_help_table_keys");
 }
 
 // ---- files: dirty tracking, New / Open / Save, the save-changes prompt ----
@@ -1392,7 +1429,7 @@ fn wide_numbers_never_look_like_other_numbers() {
     h.event(Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -500.0), modifiers: Modifiers::NONE, phase: egui::TouchPhase::Move });
     h.run_steps(20);
     // H38 has an empty G38 to its left, so it runs into it; so does H40, next to a label that stops at F40;
-    // H41's neighbours are taken by a longer label, so it shows ###
+    // H41's neighbours are taken by a longer label, so it rounds to fit (### only if even 1e11 mm wouldn't)
     let wide = "=123456 [km] to[mm]";
     for (at, text) in [("H38", wide), ("E40", "'a label that runs on"), ("H40", wide), ("E41", "'a label that runs on and on, right up to column H"), ("H41", wide)] {
         let p = center(&h, at);
@@ -1404,7 +1441,7 @@ fn wide_numbers_never_look_like_other_numbers() {
     h.hover_at(center(&h, "C45"));
     h.run_steps(2);
     shot(&mut h, "22_wide_numbers");
-    // hovering ### shows the value
+    // hovering a shortened number shows the whole value
     h.hover_at(center(&h, "H41"));
     h.run_steps(2);
     shot(&mut h, "23_wide_number_hover");
@@ -1616,9 +1653,9 @@ fn settings_window_shows_every_setting_and_applies_changes() {
     for s in decl::SETTINGS {
         assert!(h.query_all_by_label(s.label).next().is_some(), "{} not shown", s.key);
     }
-    h.get_by_label_contains("The stored value isn't used: expected true or false, found \"yes\"");
+    h.get_by_label_contains("Stored value ignored (expected true or false, found \"yes\")");
     h.get_by_label_contains("someday.feature");
-    h.get_by_label_contains("Its operator can read every workbook shared through it");
+    h.get_by_label_contains("Its operator can read them");
     shot(&mut h, "40_settings_window");
     // a change applies now and is written to the file, keeping the rest of it
     h.get_by_label("Trace on at start").click();

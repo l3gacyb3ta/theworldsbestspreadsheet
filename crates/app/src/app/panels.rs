@@ -626,10 +626,12 @@ impl App {
                     self.help.show();
                 }
             }
-            ui.separator();
             let file = self.path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "Untitled".into());
             let file = if self.dirty { format!("{file} (edited)") } else { file };
-            ui.label(egui::RichText::new(format!("recalc {:.2} ms · {file}", self.last_recalc_ms)).weak().small());
+            let status = format!("recalc {:.2} ms · {file}", self.last_recalc_ms);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add(egui::Label::new(egui::RichText::new(status).weak().small()).truncate());
+            });
         });
     }
 
