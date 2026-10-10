@@ -1850,3 +1850,92 @@ fn autosave_is_on_by_default() {
     assert!(p.exists(), "a workbook with a file is autosaved without asking");
     assert_eq!(h.state().autosave_note(0.0).as_deref(), Some("autosaved"));
 }
+
+#[test]
+fn scrubbing_stops_at_an_inputs_range() {
+    let mut h = harness();
+    h.state_mut().eng.set_range("growth", "3.5 [%]", "10 [%]").unwrap();
+    h.run_steps(2);
+    let from = center(&h, "B4");
+    // 40 px left is 10 ticks of 0.1 %: past the min
+    drag_with_shot(&mut h, from, from - Vec2::new(40.0, 0.0), Modifiers::ALT, "50_scrub_stopped_at_min", &|h| {
+        assert_eq!(source(h, "B4"), "3.5 [%]");
+        assert_eq!(h.state().pinned.as_deref(), Some("min 3.5 [%]"));
+    });
+    assert_eq!(source(&h, "B4"), "3.5 [%]");
+    assert!(h.state().pinned.is_none());
+    // and the max, from the other side
+    let from = center(&h, "B4");
+    drag(&mut h, from, from + Vec2::new(400.0, 0.0), Modifiers::ALT);
+    assert_eq!(source(&h, "B4"), "10.0 [%]");
+    // each scrub is one undo step
+    key_cmd(&mut h, Key::Z);
+    assert_eq!(source(&h, "B4"), "3.5 [%]");
+    key_cmd(&mut h, Key::Z);
+    assert_eq!(source(&h, "B4"), "4.0 [%]");
+}
+
+#[test]
+fn inspector_sets_an_inputs_range() {
+    let mut h = harness();
+    { let p = center(&h, "B4"); click(&mut h, p, Modifiers::NONE); }
+    let field = |h: &Harness<'static, App>, hint: &str| {
+        let n = h.get_by(|n| n.role() == egui::accesskit::Role::TextInput && n.placeholder() == Some(hint));
+        n.focus();
+    };
+    // a bound in the wrong dimension is refused, and says why
+    field(&h, "min, e.g. 0 [%]");
+    h.run_steps(1);
+    typ(&mut h, "0 [m]");
+    key(&mut h, Key::Enter);
+    h.get_by_label("range not set: min 0 [m] is length, but growth is dimensionless");
+    assert_eq!(h.state().eng.wb.names["growth"].min, None);
+    shot(&mut h, "51_range_refused");
+    // in the input's unit, it's set (one undo step)
+    h.get_by(|n| n.role() == egui::accesskit::Role::TextInput && n.value().as_deref() == Some("0 [m]")).focus();
+    h.run_steps(1);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    typ(&mut h, "0 [%]");
+    key(&mut h, Key::Enter);
+    field(&h, "max");
+    h.run_steps(1);
+    typ(&mut h, "12 [%]");
+    key(&mut h, Key::Enter);
+    let def = h.state().eng.wb.names["growth"].clone();
+    assert_eq!((def.min.as_deref(), def.max.as_deref()), (Some("0 [%]"), Some("12 [%]")));
+    assert!(h.query_by_label_contains("range not set").is_none());
+    // a typed value outside it is an error on the input, kept as typed and explained
+    type_into(&mut h, "B4", "-1 [%]");
+    assert_eq!(shown(&h, "B4"), "ERR growth must be ≥ 0 [%]");
+    assert_eq!(source(&h, "B4"), "-1 [%]");
+    assert!(shown(&h, "B10").starts_with("ERR"), "{}", shown(&h, "B10"));
+    { let p = center(&h, "B4"); click(&mut h, p, Modifiers::NONE); }
+    h.run_steps(2);
+    h.get_by_label("Outside the input's range");
+    shot(&mut h, "52_outside_the_range");
+    // undo: the value, then the max, then the min
+    key_cmd(&mut h, Key::Z);
+    key_cmd(&mut h, Key::Z);
+    assert_eq!(h.state().eng.wb.names["growth"].max, None);
+    key_cmd(&mut h, Key::Z);
+    assert_eq!(h.state().eng.wb.names["growth"].min, None);
+}
+
+#[test]
+fn bounded_inputs_are_sliders() {
+    let mut h = harness();
+    let sliders = |h: &Harness<'static, App>| h.query_all_by(|n| n.role() == egui::accesskit::Role::Slider).count();
+    assert_eq!(sliders(&h), 0);
+    h.state_mut().eng.set_range("growth", "0 [%]", "10 [%]").unwrap();
+    // one end only: still a drag value
+    h.state_mut().eng.set_range("months", "1", "").unwrap();
+    h.run_steps(3);
+    assert_eq!(sliders(&h), 1);
+    shot(&mut h, "53_input_slider");
+    // dragging the slider past its end stops there
+    let r = h.get_by(|n| n.role() == egui::accesskit::Role::Slider).rect();
+    let from = r.left_center() + Vec2::new(r.height(), 0.0);
+    drag(&mut h, from, r.right_center() + Vec2::new(300.0, 0.0), Modifiers::NONE);
+    assert_eq!(source(&h, "B4"), "10.0 [%]");
+    assert!(h.state().pinned.is_none());
+}
