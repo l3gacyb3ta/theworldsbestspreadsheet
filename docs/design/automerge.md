@@ -132,7 +132,10 @@ sheet has 160 new rows and Bob's cell is no longer at row 260 on anyone's screen
 Proposal: row *k* past the materialised rows has the deterministic id
 `mix(seed, "row", k)` and the position key `t` + base-36 *k* (fixed width). The
 document only stores rows that need storing ("materialised"): rows that were inserted,
-sorted, deleted, resized, hold a cell, or are referenced. Materialising row *k* writes
+sorted or deleted, or that rows were inserted in front of. (As built in PR 2: holding a
+cell, being referenced or resized doesn't materialise a row, because `mix` is a
+bijection, so a virtual id gives back its *k* and finds its row without a stored key.)
+Materialising row *k* writes
 rows `0..=k` with their canonical keys; two peers doing it at once write identical
 values, so it is idempotent (spike `materialising_the_same_virtual_row_is_idempotent`).
 Inserted and sorted rows get keys between materialised neighbours, so every

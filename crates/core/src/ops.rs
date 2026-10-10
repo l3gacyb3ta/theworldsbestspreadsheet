@@ -4,7 +4,7 @@
 use crate::engine::{Edit, Engine, Shown};
 use crate::ids::*;
 use crate::lex::{self, Tok};
-use crate::model::{classify, number_literal, Cell, Kind, Piece, StoredRef, Workbook};
+use crate::model::{classify, number_literal, Cell, Kind, Piece, StoredRef, Workbook, MAX_INDEX};
 use crate::value::{fmt_date, Value};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::ops::Range;
@@ -121,7 +121,7 @@ pub fn fill(e: &mut Engine, src: Rect, dst: Rect) -> Edit {
         } else {
             (src.c0..=src.c1).map(|c| (lane, c)).collect()
         };
-        let keys: Vec<CellKey> = src_pos.iter().map(|(r, c)| e.wb.sheet_mut(src.sheet).unwrap().key_grow(*r, *c)).collect();
+        let Some(keys) = src_pos.iter().map(|(r, c)| e.wb.sheet(src.sheet).unwrap().key(*r, *c)).collect::<Option<Vec<CellKey>>>() else { continue };
         let texts: Vec<String> = keys.iter().map(|k| e.wb.cell_text(*k)).collect();
         let series = series_of(&texts);
         let n = keys.len() as i64;
@@ -132,7 +132,7 @@ pub fn fill(e: &mut Engine, src: Rect, dst: Rect) -> Edit {
         };
         for (tr, tc) in targets {
             let i = if vertical { tr as i64 - src.r0 as i64 } else { tc as i64 - src.c0 as i64 };
-            let tk = e.wb.sheet_mut(dst.sheet).unwrap().key_grow(tr, tc);
+            let Some(tk) = e.wb.sheet(dst.sheet).unwrap().key(tr, tc) else { continue };
             if let Some((first, step, ref tmpl, ref lit)) = series {
                 let v = first + step * i as f64;
                 let text = replace_span(tmpl, &lit.span, &format_lit(v, lit.decimals, lit.is_date));
@@ -210,7 +210,7 @@ pub fn paste(e: &mut Engine, clip: &Clip, sheet: SheetId, at: (usize, usize)) ->
     let mut out = Vec::new();
     for i in 0..clip.rows {
         for j in 0..clip.cols {
-            let tk = e.wb.sheet_mut(sheet).unwrap().key_grow(at.0 + i, at.1 + j);
+            let Some(tk) = e.wb.sheet(sheet).unwrap().key(at.0 + i, at.1 + j) else { continue };
             let cell = clip.cells[i * clip.cols + j].as_ref().map(|(sk, c)| {
                 let text = e.wb.render(&c.pieces, sk.sheet);
                 if classify(&text).has_refs() {
@@ -230,7 +230,7 @@ pub fn paste_text(e: &mut Engine, text: &str, sheet: SheetId, at: (usize, usize)
     let mut out = Vec::new();
     for (i, line) in text.lines().enumerate() {
         for (j, field) in line.split('\t').enumerate() {
-            let tk = e.wb.sheet_mut(sheet).unwrap().key_grow(at.0 + i, at.1 + j);
+            let Some(tk) = e.wb.sheet(sheet).unwrap().key(at.0 + i, at.1 + j) else { continue };
             let cell = if field.trim().is_empty() { None } else { Some(Cell { pieces: e.wb.parse_text(field, sheet) }) };
             out.push((tk, cell));
         }
@@ -262,8 +262,10 @@ pub fn clear(e: &Engine, r: Rect) -> Edit {
 pub fn move_cells(e: &mut Engine, src: Rect, sheet: SheetId, at: (usize, usize)) -> Result<Edit, String> {
     let (dr, dc) = (at.0 as i64 - src.r0 as i64, at.1 as i64 - src.c0 as i64);
     e.wb.sheet(sheet).ok_or("no such sheet")?;
-    e.wb.sheet_mut(src.sheet).ok_or("no such sheet")?.ensure_size(src.r1 + 1, src.c1 + 1);
-    let s = e.wb.sheet(src.sheet).unwrap();
+    let s = e.wb.sheet(src.sheet).ok_or("no such sheet")?;
+    if src.r1.max(at.0 + src.rows()) >= MAX_INDEX || src.c1.max(at.1 + src.cols()) >= MAX_INDEX {
+        return Err("that is past the last row".into());
+    }
     // source position -> destination position: the block, plus the spills of sources in it
     let mut spans: Vec<(usize, usize, usize, usize)> = vec![(src.r0, src.c0, src.rows(), src.cols())];
     for r in src.r0..=src.r1 {
@@ -286,8 +288,6 @@ pub fn move_cells(e: &mut Engine, src: Rect, sheet: SheetId, at: (usize, usize))
     let mut moved: HashMap<CellKey, CellKey> = HashMap::default();
     let mut block = Vec::new();
     for (r0, c0, nr, nc) in spans {
-        let dst = e.wb.sheet_mut(sheet).unwrap();
-        dst.ensure_size((r0 as i64 + dr) as usize + nr, (c0 as i64 + dc) as usize + nc);
         for r in r0..r0 + nr {
             for c in c0..c0 + nc {
                 let sk = e.wb.sheet(src.sheet).unwrap().key(r, c).unwrap();
@@ -437,6 +437,13 @@ pub fn sort_rows(e: &Engine, r: Rect, col: usize, ascending: bool) -> Edit {
             (key, k.row)
         })
         .collect();
+    // empty rows at the end stay where they are anyway: leave them out, so sorting a whole column
+    // doesn't materialise every virtual row in it
+    let used: HashSet<RowId> = s.cells.keys().map(|(r, _)| *r).collect();
+    while rows.len() > 1 && rows.last().is_some_and(|(k, id)| matches!(k, SortKey::Empty) && !used.contains(id)) {
+        rows.pop();
+    }
+    let r = Rect { r1: r.r0 + rows.len() - 1, ..r };
     rows.sort_by(|a, b| {
         let o = match (&a.0, &b.0) {
             (SortKey::Empty, SortKey::Empty) => std::cmp::Ordering::Equal,
@@ -466,11 +473,11 @@ pub fn extension_offer(e: &Engine, k: CellKey) -> Option<Rect> {
     }
     let mut best = None;
     for nc in [c.checked_sub(1), Some(c + 1)].into_iter().flatten() {
-        if nc >= s.cols.len() || !filled(r, nc) || !filled(r + 1, nc) {
+        if !filled(r, nc) || !filled(r + 1, nc) {
             continue;
         }
         let mut end = r + 1;
-        while end + 1 < s.rows.len() && filled(end + 1, nc) && !filled(end + 1, c) {
+        while filled(end + 1, nc) && !filled(end + 1, c) {
             end += 1;
         }
         if best.map(|b: usize| end > b).unwrap_or(true) {

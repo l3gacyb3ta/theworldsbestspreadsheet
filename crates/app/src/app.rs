@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use wbs_core::a1;
 use wbs_core::engine::{Edit, Engine, ErrKind, Shown};
 use wbs_core::ids::{CellKey, SheetId};
-use wbs_core::model::{classify, Cell, Kind, Sheet};
+use wbs_core::model::{classify, Cell, Kind, Sheet, MAX_INDEX};
 use wbs_core::ops::{self, Clip, Lit, Rect as CRect};
 use wbs_core::parse::BUILTINS;
 use wbs_core::value::{Prov, Value};
@@ -337,9 +337,19 @@ impl App {
     fn sid(&self) -> SheetId {
         self.sheet().id
     }
-    fn key(&mut self, r: usize, c: usize) -> CellKey {
-        let ix = self.sheet_ix;
-        self.eng.wb.sheets[ix].key_grow(r, c)
+    /// Any cell, stored or not: rows past the stored ones are virtual, with ids of their own.
+    fn key(&self, r: usize, c: usize) -> CellKey {
+        self.sheet().key(r, c).expect("selection within MAX_INDEX")
+    }
+    /// Rows and columns the grid lays out at least: the default size, the stored rows and the
+    /// content, and the selection with a margin (the grid adds room to scroll into). None of it is
+    /// in the document, so moving around and scrolling never change it.
+    fn extent(&self) -> (usize, usize) {
+        let s = self.sheet();
+        let (ur, uc) = s.used_extent();
+        let r = [200, s.rows.len(), ur, self.cursor.0.max(self.anchor.0) + 30].into_iter().max().unwrap();
+        let c = [26, s.cols.len(), uc, self.cursor.1.max(self.anchor.1) + 6].into_iter().max().unwrap();
+        (r.min(MAX_INDEX), c.min(MAX_INDEX))
     }
     fn sel(&self) -> CRect {
         CRect::span(self.sid(), self.anchor, self.cursor)
@@ -379,7 +389,7 @@ impl App {
         let prev = self.sid();
         let follow = match &e {
             Edit::InsertSheet { sheet, .. } => sheet.id,
-            Edit::RestoreSheet { sheet, .. } | Edit::MoveSheet { sheet, .. } | Edit::RenameSheet { sheet, .. } => *sheet,
+            Edit::RestoreSheet { sheet, .. } | Edit::MoveSheet { sheet, .. } | Edit::SheetPos { sheet, .. } | Edit::RenameSheet { sheet, .. } => *sheet,
             _ => prev,
         };
         let inv = self.eng.apply(e);
@@ -403,12 +413,11 @@ impl App {
     }
 
     fn select(&mut self, r: usize, c: usize, extend: bool) {
+        let (r, c) = (r.min(MAX_INDEX - 1), c.min(MAX_INDEX - 1));
         self.cursor = (r, c);
         if !extend {
             self.anchor = (r, c);
         }
-        let ix = self.sheet_ix;
-        self.eng.wb.sheets[ix].ensure_size(r + 30, c + 6);
     }
 
     fn move_sel(&mut self, dr: i64, dc: i64, extend: bool) {

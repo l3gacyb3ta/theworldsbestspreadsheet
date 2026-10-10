@@ -15,7 +15,7 @@ The sheet should be predictable, not clever. It never silently guesses, rewrites
 - References are stored as **relative offsets** from the formula's own cell (R1C1-relative) unless marked absolute (`$A$1` style or a named input). This is what makes fill-drag and formula extension work.
 - Inserting, deleting, moving, or sorting rows/columns must never break or rewrite references.
 - Named cells / named inputs are first class (`growth`, `rates.eur`), usable anywhere a reference is.
-- Design the document model so it can later live in Automerge (row/column order as list CRDTs, cells as map entries keyed by id). Collaboration is not v0, but nothing in the model should assume positional addressing or a single writer.
+- Design the document model so it can later live in Automerge (row/column order as a map from id to position key — a list CRDT with a move, see `docs/design/automerge.md` §2.2 — cells as map entries keyed by id). Collaboration is not v0, but nothing in the model should assume positional addressing or a single writer.
 
 ## 2. language
 

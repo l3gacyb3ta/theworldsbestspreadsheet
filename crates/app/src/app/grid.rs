@@ -7,35 +7,26 @@ use std::collections::HashSet;
 use wbs_core::solve::Goal;
 
 impl App {
-    fn geometry(&mut self, area: Rect) -> Geo {
-        let ix = self.sheet_ix;
+    fn geometry(&self, area: Rect) -> Geo {
         let cells = Rect::from_min_max(area.min + Vec2::new(HDR_W, HDR_H), area.max);
-        // grow the sheet so there is always room to scroll into
-        loop {
-            let s = &self.eng.wb.sheets[ix];
-            let h: f32 = s.rows.ids().iter().map(|r| s.row_heights.get(r).copied().unwrap_or(DEF_H)).sum();
-            let w: f32 = s.cols.ids().iter().map(|c| s.col_widths.get(c).copied().unwrap_or(DEF_W)).sum();
-            let need_r = h < self.scroll.y + cells.height() + 400.0;
-            let need_c = w < self.scroll.x + cells.width() + 300.0;
-            if !need_r && !need_c {
-                break;
-            }
-            let (nr, nc) = (s.rows.len() + if need_r { 100 } else { 0 }, s.cols.len() + if need_c { 10 } else { 0 });
-            self.eng.wb.sheets[ix].ensure_size(nr, nc);
-        }
-        let s = &self.eng.wb.sheets[ix];
-        let mut col_x = Vec::with_capacity(s.cols.len() + 1);
+        let s = self.sheet();
+        let (nr, nc) = self.extent();
+        // the extent, and always room to scroll into: rows past the stored ones are virtual, so
+        // this lays out as many as it likes without touching the document
+        let mut col_x = Vec::with_capacity(nc + 1);
         let mut acc = 0.0;
         col_x.push(0.0);
-        for c in s.cols.ids() {
-            acc += s.col_widths.get(c).copied().unwrap_or(DEF_W);
+        while col_x.len() <= nc || acc < self.scroll.x + cells.width() + 300.0 {
+            let Some(c) = s.cols.get(col_x.len() - 1) else { break };
+            acc += s.col_widths.get(&c).copied().unwrap_or(DEF_W);
             col_x.push(acc);
         }
-        let mut row_y = Vec::with_capacity(s.rows.len() + 1);
+        let mut row_y = Vec::with_capacity(nr + 1);
         acc = 0.0;
         row_y.push(0.0);
-        for r in s.rows.ids() {
-            acc += s.row_heights.get(r).copied().unwrap_or(DEF_H);
+        while row_y.len() <= nr || acc < self.scroll.y + cells.height() + 400.0 {
+            let Some(r) = s.rows.get(row_y.len() - 1) else { break };
+            acc += s.row_heights.get(&r).copied().unwrap_or(DEF_H);
             row_y.push(acc);
         }
         Geo { cells, col_x, row_y, scroll: self.scroll }
@@ -414,7 +405,8 @@ impl App {
                 return;
             }
             self.commit();
-            let last = self.sheet().rows.len() - 1;
+            // a whole column: down to the last row laid out
+            let last = g.row_y.len() - 2;
             if mods.shift {
                 self.anchor.0 = 0;
                 self.cursor = (last, c);
@@ -433,7 +425,7 @@ impl App {
             }
             self.commit();
             let r = g.row_at(pos.y);
-            let last = self.sheet().cols.len() - 1;
+            let last = g.col_x.len() - 2;
             if mods.shift {
                 self.anchor.1 = 0;
                 self.cursor = (r, last);
@@ -446,7 +438,7 @@ impl App {
         if !in_cells {
             if pos.x < g.cells.left() && pos.y < g.cells.top() && area.contains(pos) {
                 self.commit();
-                let end = (self.sheet().rows.len() - 1, self.sheet().cols.len() - 1);
+                let end = (g.row_y.len() - 2, g.col_x.len() - 2);
                 self.anchor = (0, 0);
                 self.cursor = end;
             }
