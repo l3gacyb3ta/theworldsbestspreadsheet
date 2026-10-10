@@ -604,9 +604,10 @@ impl App {
             Drag::Scrub { key, text, lit, x0, .. } => {
                 let fast = if mods.shift { 10.0 } else { 1.0 };
                 let steps = ((pos.x - *x0) / 4.0).round() as f64 * fast;
-                let new = ops::replace_span(text, &lit.span, &ops::scrub(lit, steps));
-                let key = *key;
+                let (key, text, lit) = (*key, text.clone(), lit.clone());
                 ctx.set_cursor_icon(CursorIcon::ResizeHorizontal);
+                let num = self.pin(ctx, key, ops::scrub_value(&lit, steps), lit.decimals, lit.is_date, false);
+                let new = ops::replace_span(&text, &lit.span, &num);
                 if new != self.eng.wb.cell_text(key) {
                     let t = std::time::Instant::now();
                     self.eng.set_text(key, &new);
@@ -627,8 +628,9 @@ impl App {
                 } else {
                     lit.decimals
                 };
-                let new = ops::replace_span(text, &lit.span, &ops::format_lit(v, decimals, false));
-                let key = *key;
+                let (key, text, span) = (*key, text.clone(), lit.span.clone());
+                let num = self.pin(ctx, key, v, decimals, false, true);
+                let new = ops::replace_span(&text, &span, &num);
                 if new != self.eng.wb.cell_text(key) {
                     let t = std::time::Instant::now();
                     self.eng.set_text(key, &new);
@@ -663,6 +665,7 @@ impl App {
             }
             Drag::Goal(g) => self.goal_end(*g),
             Drag::Scrub { key, orig, .. } | Drag::Point { key, orig, .. } => {
+                self.pinned = None;
                 if self.eng.wb.cell(key) != orig.as_ref() {
                     self.undo.push(Edit::Cells(vec![(key, orig)]));
                     self.redo.clear();

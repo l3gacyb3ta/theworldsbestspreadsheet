@@ -241,6 +241,11 @@ pub struct App {
     native_menu: Option<crate::menus::NativeMenu>,
     name_buf: String,
     name_for: Option<CellKey>,
+    /// The inspector's min / max fields, for the input and stored range they were filled from, and
+    /// why the last range typed there was refused.
+    range_buf: (String, String),
+    range_for: Option<(CellKey, (String, String))>,
+    range_err: Option<String>,
     chart_hits: Vec<(PointHit, YAxis)>,
     /// The input a computed cell's chart points goal-seek, when switched from the default (click the point).
     goal_inputs: std::collections::HashMap<CellKey, CellKey>,
@@ -258,6 +263,8 @@ pub struct App {
     bar_galley: Option<(std::sync::Arc<egui::Galley>, Pos2)>,
     bar_scrub: Option<(CellKey, Option<Cell>, String, Lit, f32)>,
     input_scrub: Option<(CellKey, Option<Cell>)>,
+    /// The end of an input's range the scrub or drag under way is stopped at (`min 0 [1/s]`).
+    pinned: Option<String>,
     /// Last frame's grid geometry (used by UI tests to aim at cells).
     #[cfg_attr(not(test), allow(dead_code))]
     geo: Option<Geo>,
@@ -314,6 +321,9 @@ impl App {
             native_menu: None,
             name_buf: String::new(),
             name_for: None,
+            range_buf: Default::default(),
+            range_for: None,
+            range_err: None,
             chart_hits: Vec::new(),
             goal_inputs: Default::default(),
             goal_note: None,
@@ -327,6 +337,7 @@ impl App {
             bar_galley: None,
             bar_scrub: None,
             input_scrub: None,
+            pinned: None,
             geo: None,
             help: Help::new(),
             prefs: crate::prefs::Prefs::in_memory(),
@@ -535,6 +546,28 @@ impl App {
         ed.ref_span = Some(span.start..end);
         ed.cursor = ed.text[..end].chars().count() + 1;
         self.focus_req = Some((ctx.cumulative_pass_nr() + 1, ed.cursor));
+    }
+
+    /// Scrubbing or dragging `k`'s literal to `v`, written with `decimals`: stopped at the input's range
+    /// like a slider's end, with the end shown at the pointer and a cursor that only points back
+    /// (`vertical`: a chart drag).
+    fn pin(&mut self, ctx: &egui::Context, k: CellKey, v: f64, decimals: usize, is_date: bool, vertical: bool) -> String {
+        let r = self.eng.input_range(k).unwrap_or_default();
+        let (v, pin) = r.pin(v);
+        if let Some(p) = &pin {
+            let at_min = p.starts_with("min");
+            ctx.set_cursor_icon(match (vertical, at_min) {
+                (false, true) => CursorIcon::ResizeEast,
+                (false, false) => CursorIcon::ResizeWest,
+                (true, true) => CursorIcon::ResizeNorth,
+                (true, false) => CursorIcon::ResizeSouth,
+            });
+            if let Some(pos) = ctx.pointer_latest_pos() {
+                crate::chart_view::tooltip(ctx, pos, p);
+            }
+        }
+        self.pinned = pin;
+        r.format(v, decimals, is_date)
     }
 }
 

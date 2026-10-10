@@ -6,7 +6,7 @@ use wbs_core::bounds::InputRange;
 use wbs_core::engine::{Engine, ErrKind, Shown};
 use wbs_core::ids::CellKey;
 use wbs_core::model::Workbook;
-use wbs_core::ops::{cell_literal, scrub_within};
+use wbs_core::ops::{cell_literal, scrub_value};
 use wbs_core::solve::Goal;
 use wbs_core::stdlib::default_workbook;
 
@@ -113,12 +113,17 @@ fn scrubbing_stops_at_the_range() {
     let k = key(&e, "B1");
     let r = e.input_range(k).unwrap();
     let lit = cell_literal(&e.wb.cell_text(k)).unwrap();
-    assert_eq!(scrub_within(&lit, -2.0, Some(&r)), ("0.1".into(), None));
-    assert_eq!(scrub_within(&lit, -5.0, Some(&r)), ("0.0".into(), Some("min 0 [1/s]".into())));
+    let scrub = |steps: f64| {
+        let (v, pin) = r.pin(scrub_value(&lit, steps));
+        (r.format(v, lit.decimals, false), pin)
+    };
+    assert_eq!(scrub(-2.0), ("0.1".into(), None));
+    assert_eq!(scrub(-5.0), ("0.0".into(), Some("min 0 [1/s]".into())));
     // an end with more decimals than the literal is written with them
-    assert_eq!(scrub_within(&lit, 3.0, Some(&r)), ("0.45".into(), Some("max 0.45 [1/s]".into())));
-    assert_eq!(scrub_within(&lit, 1.0, Some(&r)), ("0.4".into(), None));
-    assert_eq!(scrub_within(&lit, -5.0, None), ("-0.2".into(), None));
+    assert_eq!(scrub(3.0), ("0.45".into(), Some("max 0.45 [1/s]".into())));
+    assert_eq!(scrub(1.0), ("0.4".into(), None));
+    // no range: the plain scrub
+    assert_eq!(InputRange::default().pin(scrub_value(&lit, -5.0)).0, -0.2);
 }
 
 #[test]

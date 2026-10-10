@@ -1,7 +1,6 @@
 //! Editing operations built on the engine: fill, copy/paste, sort, scrub
 //! helpers, formula extension. Each returns an `Edit` to apply (and undo).
 
-use crate::bounds::InputRange;
 use crate::engine::{Edit, Engine, Shown};
 use crate::ids::*;
 use crate::lex::{self, Tok};
@@ -100,17 +99,13 @@ pub fn replace_span(text: &str, span: &Range<usize>, with: &str) -> String {
 
 /// One step of scrubbing: `steps` ticks of the literal's last digit.
 pub fn scrub(lit: &Lit, steps: f64) -> String {
-    let unit = if lit.is_date { 1.0 } else { 10f64.powi(-(lit.decimals as i32)) };
-    let v = lit.value + steps * unit;
-    format_lit(v, lit.decimals, lit.is_date)
+    format_lit(scrub_value(lit, steps), lit.decimals, lit.is_date)
 }
 
-/// `scrub` that stops at an input's range, with the end it stopped at (`min 0 [1/s]`).
-pub fn scrub_within(lit: &Lit, steps: f64, range: Option<&InputRange>) -> (String, Option<String>) {
-    let Some(range) = range else { return (scrub(lit, steps), None) };
+/// The number `scrub` writes (an input's range stops it: `InputRange::pin`).
+pub fn scrub_value(lit: &Lit, steps: f64) -> f64 {
     let unit = if lit.is_date { 1.0 } else { 10f64.powi(-(lit.decimals as i32)) };
-    let (v, pin) = range.pin(lit.value + steps * unit);
-    (range.format(v, lit.decimals, lit.is_date), pin)
+    lit.value + steps * unit
 }
 
 fn cell_of(e: &Engine, k: CellKey) -> Option<Cell> {
