@@ -893,8 +893,10 @@ impl Engine {
                         return Err(format!("{name} already names {}", self.wb.cell_label(d.cell, None)));
                     }
                 }
+                // renaming or toggling "input" keeps the range
+                let (min, max) = names.values().find(|d| d.cell == cell).map(|d| (d.min.clone(), d.max.clone())).unwrap_or_default();
                 names.retain(|_, d| d.cell != cell);
-                names.insert(name.to_string(), NameDef { cell, input });
+                names.insert(name.to_string(), NameDef { cell, input, min, max });
             }
         }
         let edits = Edit::names(&self.wb.names, &names);
@@ -1280,6 +1282,7 @@ impl Engine {
                 }
                 self.last_eval_count += 1;
                 let res = self.evaluate(k);
+                let res = self.check_range(k, res);
                 let (mut res, changed) = self.place_spill(k, res);
                 changed_positions.extend(changed);
                 // Stamp the provenance a reference to this cell carries once, here, so
@@ -1515,7 +1518,7 @@ impl Engine {
     }
 }
 
-fn local(msg: String, span: Option<Range<usize>>) -> CellError {
+pub(crate) fn local(msg: String, span: Option<Range<usize>>) -> CellError {
     CellError { msg, span, kind: ErrKind::Local }
 }
 

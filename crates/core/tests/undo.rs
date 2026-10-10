@@ -113,7 +113,7 @@ fn ops() -> Vec<(&'static str, Build)> {
         ("move cells", |e| ops::move_cells(e, Rect::span(sid(e, "Sheet1"), (2, 1), (3, 1)), sid(e, "Sheet1"), (10, 6)).unwrap()),
         ("name", |e| {
             let cell = key(e, sid(e, "Sheet1"), "B5");
-            Edit::Name { name: "mid".into(), def: Some(NameDef { cell, input: false }) }
+            Edit::Name { name: "mid".into(), def: Some(NameDef::new(cell, false)) }
         }),
         ("unname", |_| Edit::Name { name: "top".into(), def: None }),
         ("row height", |e| {

@@ -29,9 +29,22 @@ pub struct Opts {
     pub whole: bool,
     /// Cap on evaluations of `f`, bracketing and narrowing together.
     pub max_evals: usize,
+    /// The input's range: nothing outside `lo..=hi` is tried (infinite when unbounded).
+    pub lo: f64,
+    pub hi: f64,
 }
 
 impl Opts {
+    /// The same search kept within `lo..=hi`; whole-number searches use the whole numbers inside.
+    pub fn within(mut self, lo: Option<f64>, hi: Option<f64>) -> Opts {
+        self.lo = lo.unwrap_or(f64::NEG_INFINITY);
+        self.hi = hi.unwrap_or(f64::INFINITY);
+        if self.whole {
+            (self.lo, self.hi) = (self.lo.ceil(), self.hi.floor());
+        }
+        self
+    }
+
     /// The search for a literal now at `x0`, written with `decimals` places: up to 1024× its size either way
     /// (from zero: up to 10⁶ of its last decimal place; a date: ±65,536 days).
     pub fn for_literal(x0: f64, decimals: usize, is_date: bool, tol: f64) -> Opts {
@@ -43,7 +56,7 @@ impl Opts {
         } else {
             (10f64.powi(-(decimals as i32)), 20)
         };
-        Opts { step: if whole { step.max(1.0) } else { step }, doublings, tol, whole, max_evals: 120 }
+        Opts { step: if whole { step.max(1.0) } else { step }, doublings, tol, whole, max_evals: 120, lo: f64::NEG_INFINITY, hi: f64::INFINITY }
     }
 }
 
@@ -59,7 +72,8 @@ pub struct Root {
 pub enum Fail {
     /// No two tried inputs straddle the target. Over inputs `lo..=hi` the value stayed in `ymin..=ymax`;
     /// `err` is the first input where the value was an error (the search stops there on that side).
-    OutOfReach { lo: f64, hi: f64, ymin: f64, ymax: f64, err: Option<(f64, String)> },
+    /// `at_lo` / `at_hi`: the search ran into the input's lower / upper bound.
+    OutOfReach { lo: f64, hi: f64, ymin: f64, ymax: f64, err: Option<(f64, String)>, at_lo: bool, at_hi: bool },
     /// The value jumps over the target at `x`: from `left` just below it to `right` just above.
     Jump { x: f64, left: f64, right: f64 },
     /// The value is an error at `x`, inside a bracket (or at the start).
@@ -101,6 +115,8 @@ fn side(y: f64, target: f64) -> bool {
 pub fn solve(f: &mut dyn FnMut(f64) -> Result<f64, String>, x0: f64, target: f64, o: &Opts) -> Result<Root, Fail> {
     let mut fx = Counted { f, n: 0, max: o.max_evals };
     let x0 = if o.whole { x0.round() } else { x0 };
+    let x0 = x0.max(o.lo).min(o.hi);
+    let (mut at_lo, mut at_hi) = (false, false);
     let y0 = fx.need(x0)?;
     if (y0 - target).abs() <= o.tol {
         return Ok(Root { x: x0, y: y0, evals: fx.n });
@@ -115,6 +131,13 @@ pub fn solve(f: &mut dyn FnMut(f64) -> Result<f64, String>, x0: f64, target: f64
             let mut x = x0 + dir * o.step * 2f64.powi(k as i32);
             if o.whole {
                 x = x.round();
+            }
+            // the last step on a side stops at the bound
+            let clamped = x < o.lo || x > o.hi;
+            if clamped {
+                x = x.max(o.lo).min(o.hi);
+                if dir > 0.0 { at_hi = true } else { at_lo = true }
+                paths[d] = None;
             }
             if x == px {
                 continue;
@@ -133,7 +156,7 @@ pub fn solve(f: &mut dyn FnMut(f64) -> Result<f64, String>, x0: f64, target: f64
                         let (a, b) = if px < x { ((px, py), (x, y)) } else { ((x, y), (px, py)) };
                         return if o.whole { bisect_whole(&mut fx, a, b, target, o.tol) } else { brent(&mut fx, a, b, target, o.tol) };
                     }
-                    paths[d] = Some((x, y));
+                    paths[d] = if clamped { None } else { Some((x, y)) };
                 }
             }
         }
@@ -141,7 +164,7 @@ pub fn solve(f: &mut dyn FnMut(f64) -> Result<f64, String>, x0: f64, target: f64
             break;
         }
     }
-    Err(Fail::OutOfReach { lo, hi, ymin, ymax, err })
+    Err(Fail::OutOfReach { lo, hi, ymin, ymax, err, at_lo, at_hi })
 }
 
 /// Bisection over whole numbers; ends at the whole number nearer the target.
@@ -284,7 +307,9 @@ impl Engine {
         };
         let tlabel = self.wb.cell_label(self.element_cell(g.target, g.index), home);
         let decimals = if lit.is_date { 0 } else { g.decimals.unwrap_or(lit.decimals) };
-        let opts = Opts::for_literal(lit.value, decimals, lit.is_date, g.tol);
+        let range = self.display_range(g.input).unwrap_or_default();
+        let (min_text, max_text) = self.range_text(g.input);
+        let opts = Opts::for_literal(lit.value, decimals, lit.is_date, g.tol).within(range.min, range.max);
         let orig = self.wb.cell(g.input).cloned();
         // a trial value can make a spill grow the sheet; put the sheet sizes back too
         let axes: Vec<_> = self.wb.sheets.iter().map(|s| (s.id, s.rows.clone(), s.cols.clone())).collect();
@@ -320,14 +345,23 @@ impl Engine {
                 let value = if lit.is_date { r.x } else { num.parse().unwrap_or(r.x) };
                 Ok(Solved { text: replace_span(&text, &lit.span, &num), value, evals: r.evals })
             }
-            Err(Fail::OutOfReach { lo, hi, ymin, ymax, err }) => {
+            Err(Fail::OutOfReach { lo, hi, ymin, ymax, err, at_lo, at_hi }) => {
+                // name the bounds the search ran into
+                let min = min_text.as_deref().filter(|_| at_lo);
+                let max = max_text.as_deref().filter(|_| at_hi);
+                let within = match (min, max) {
+                    (Some(a), Some(b)) => format!(" within {a} ≤ {name} ≤ {b}"),
+                    (Some(a), None) => format!(" within {name} ≥ {a}"),
+                    (None, Some(b)) => format!(" within {name} ≤ {b}"),
+                    (None, None) => String::new(),
+                };
                 let why = if ymin == ymax {
                     format!("{tlabel} stays at {} for {name} from {} to {}", out(ymin), input(lo), input(hi))
                 } else {
                     format!("with {name} from {} to {}, {tlabel} only reaches {} to {}", input(lo), input(hi), out(ymin), out(ymax))
                 };
                 let stop = err.map(|(x, m)| format!(" (at {name} = {} it's an error: {m})", input(x))).unwrap_or_default();
-                Err(format!("out of reach: {why}{stop}"))
+                Err(format!("out of reach{within}: {why}{stop}"))
             }
             Err(Fail::Jump { x, left, right }) => {
                 Err(format!("{tlabel} jumps from {} to {} at {name} = {}, skipping {}", out(left), out(right), input(x), out(g.want)))
