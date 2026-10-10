@@ -1922,6 +1922,25 @@ fn inspector_sets_an_inputs_range() {
 }
 
 #[test]
+fn chart_point_drag_stops_at_an_inputs_range() {
+    let mut h = harness();
+    let k = cell_key(&h, "B47");
+    h.state_mut().eng.set_name("q4", Some(k), true).unwrap();
+    h.state_mut().eng.set_range("q4", "", "190 [widget]").unwrap();
+    let p = center(&h, "E20");
+    h.hover_at(p);
+    h.run_steps(1);
+    h.event(Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -700.0), modifiers: Modifiers::NONE, phase: egui::TouchPhase::Move });
+    h.run_steps(20);
+    let hit = h.state().chart_hits.iter().find(|(p, a)| h.state().hit_label(p, a).starts_with("Q4")).map(|(p, _)| p.pos).expect("Q4 bar");
+    drag_with_shot(&mut h, hit, hit - Vec2::new(0.0, 200.0), Modifiers::NONE, "54_bar_stopped_at_max", &|h| {
+        assert_eq!(source(h, "B47"), "190 [widget]");
+        assert_eq!(h.state().pinned.as_deref(), Some("max 190 [widget]"));
+    });
+    assert_eq!(source(&h, "B47"), "190 [widget]");
+}
+
+#[test]
 fn bounded_inputs_are_sliders() {
     let mut h = harness();
     let sliders = |h: &Harness<'static, App>| h.query_all_by(|n| n.role() == egui::accesskit::Role::Slider).count();
