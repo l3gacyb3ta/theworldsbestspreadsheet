@@ -137,14 +137,14 @@ pub fn fill(e: &mut Engine, src: Rect, dst: Rect) -> Edit {
             if let Some((first, step, ref tmpl, ref lit)) = series {
                 let v = first + step * i as f64;
                 let text = replace_span(tmpl, &lit.span, &format_lit(v, lit.decimals, lit.is_date));
-                out.push((tk, Some(Cell { pieces: vec![Piece::Text(text)] })));
+                out.push((tk, Some(Cell::new(vec![Piece::Text(text)]))));
                 continue;
             }
             let j = i.rem_euclid(n) as usize;
             let sk = keys[j];
             let cell = cell_of(e, sk).map(|c| {
                 if classify(&texts[j]).has_refs() {
-                    Cell { pieces: e.wb.shift_pieces(&c.pieces, sk, tk) }
+                    Cell::new(e.wb.shift_pieces(&c.pieces, sk, tk))
                 } else {
                     c
                 }
@@ -278,7 +278,7 @@ pub fn paste(e: &mut Engine, clip: &Clip, sheet: SheetId, at: (usize, usize)) ->
             let cell = clip.cells[i * clip.cols + j].as_ref().map(|(sk, c)| {
                 let text = e.wb.render(&c.pieces, sk.sheet);
                 if classify(&text).has_refs() {
-                    Cell { pieces: e.wb.shift_pieces(&c.pieces, *sk, tk) }
+                    Cell::new(e.wb.shift_pieces(&c.pieces, *sk, tk))
                 } else {
                     c.clone()
                 }
@@ -295,7 +295,7 @@ pub fn paste_text(e: &mut Engine, text: &str, sheet: SheetId, at: (usize, usize)
     for (i, line) in text.lines().enumerate() {
         for (j, field) in line.split('\t').enumerate() {
             let Some(tk) = e.wb.sheet(sheet).unwrap().key(at.0 + i, at.1 + j) else { continue };
-            let cell = if field.trim().is_empty() { None } else { Some(Cell { pieces: e.wb.parse_text(field, sheet) }) };
+            let cell = if field.trim().is_empty() { None } else { Some(Cell::new(e.wb.parse_text(field, sheet))) };
             out.push((tk, cell));
         }
     }
@@ -370,7 +370,7 @@ pub fn move_cells(e: &mut Engine, src: Rect, sheet: SheetId, at: (usize, usize))
         out.insert(*sk, None);
     }
     for (sk, dk) in &block {
-        out.insert(*dk, wb.cell(*sk).map(|c| Cell { pieces: m.pieces(&c.pieces, src.sheet, sheet) }));
+        out.insert(*dk, wb.cell(*sk).map(|c| Cell::new(m.pieces(&c.pieces, src.sheet, sheet))));
     }
     let touched: HashSet<CellKey> = block.iter().flat_map(|(s, d)| [*s, *d]).collect();
     for s in &wb.sheets {
@@ -380,8 +380,8 @@ pub fn move_cells(e: &mut Engine, src: Rect, sheet: SheetId, at: (usize, usize))
                 continue;
             }
             let pieces = m.pieces(&cell.pieces, s.id, s.id);
-            if pieces != cell.pieces {
-                out.insert(k, Some(Cell { pieces }));
+            if pieces[..] != cell.pieces[..] {
+                out.insert(k, Some(Cell::new(pieces)));
             }
         }
     }

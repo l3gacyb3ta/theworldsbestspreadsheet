@@ -174,6 +174,8 @@ fn scrub_input_resizes_spill() {
     let from = center(&h, "B5");
     drag(&mut h, from, from - Vec2::new(40.0, 0.0), Modifiers::ALT);
     assert_eq!(source(&h, "B5"), "14");
+    // the dirty check waits for the scrub to end, then catches up
+    assert!(h.state().dirty);
     assert_eq!(shown(&h, "A23"), "14");
     assert_eq!(shown(&h, "A24"), "");
     shot(&mut h, "05_scrubbed");
@@ -196,7 +198,7 @@ fn drag_bar_writes_literal() {
         .state()
         .chart_hits
         .iter()
-        .find(|(p, _)| matches!(p.prov, Prov::Literal(_)) && p.label.starts_with("Q4"))
+        .find(|(p, a)| matches!(p.prov, Prov::Literal(_)) && h.state().hit_label(p, a).starts_with("Q4"))
         .map(|(p, _)| p.pos)
         .expect("Q4 bar is draggable");
     drag(&mut h, hit, hit - Vec2::new(0.0, 40.0), Modifiers::NONE);
@@ -210,7 +212,7 @@ fn drag_bar_writes_literal() {
     let k = h.state().eng.wb.sheets[0].key(45, 1).unwrap();
     h.state_mut().eng.set_text(k, "135.00 [widget]");
     h.run_steps(2);
-    let hit = h.state().chart_hits.iter().find(|(p, _)| p.label.starts_with("Q3")).map(|(p, _)| p.pos).unwrap();
+    let hit = h.state().chart_hits.iter().find(|(p, a)| h.state().hit_label(p, a).starts_with("Q3")).map(|(p, _)| p.pos).unwrap();
     drag(&mut h, hit, hit - Vec2::new(0.0, 23.0), Modifiers::NONE);
     let src = source(&h, "B46");
     assert!(src != "135.00 [widget]" && src.ends_with("[widget]"), "{src}");
@@ -843,7 +845,7 @@ fn save_as_then_save() {
     assert!(!h.state().dirty);
     assert!(q.borrow().is_empty());
     let saved: wbs_core::model::Workbook = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-    assert!(saved.sheets[0].cells.values().any(|c| c.pieces == vec![wbs_core::model::Piece::Text("43".into())]));
+    assert!(saved.sheets[0].cells.values().any(|c| c.pieces[..] == [wbs_core::model::Piece::Text("43".into())]));
 }
 
 #[test]
@@ -1795,14 +1797,15 @@ fn autosave_saves_at_the_deadline_and_wakes_for_it() {
     let delay = |h: &Harness<'static, App>| h.output().viewport_output[&egui::ViewportId::ROOT].repaint_delay;
     type_into(&mut h, "H25", "42");
     let deadline = h.state().autosave.since.unwrap() + 5.0;
-    while !p.exists() {
-        assert!(now(&h) < deadline, "not saved at the deadline ({} s)", now(&h));
+    // the save starts at the deadline and lands in the next frame (it's written by another thread)
+    while h.state().dirty {
+        assert!(now(&h) < deadline + 0.25, "not saved at the deadline ({} s)", now(&h));
         // with no input, a frame only runs when asked for: every frame asks for one no later than the deadline
         assert!(delay(&h).as_secs_f64() <= deadline - now(&h), "repaint in {:?} at {} s, deadline {deadline} s", delay(&h), now(&h));
         h.run_steps(1);
     }
-    assert!(now(&h) < deadline + 0.25, "saved within a frame of the deadline");
-    assert!(!h.state().dirty);
+    assert!(now(&h) < deadline + 0.5, "saved within a frame of the deadline");
+    assert!(p.exists());
     // the status bar was drawn before the save in that frame: the app asks for another to show the result
     assert_eq!(delay(&h), std::time::Duration::ZERO);
     h.run_steps(1);

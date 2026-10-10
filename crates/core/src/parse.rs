@@ -79,7 +79,16 @@ pub fn builtin(name: &str) -> Option<Builtin> {
     BUILTINS.iter().find(|(n, _, _)| *n == name).map(|(_, b, _)| *b)
 }
 pub fn builtin_name(b: Builtin) -> &'static str {
-    BUILTINS.iter().find(|(_, x, _)| *x == b).map(|(n, _, _)| *n).unwrap()
+    // indexed by discriminant, built once: the interpreter asks on every builtin it runs
+    static NAMES: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    let names = NAMES.get_or_init(|| {
+        let mut v = vec![""; BUILTINS.len()];
+        for (n, x, _) in BUILTINS {
+            v[*x as usize] = n;
+        }
+        v
+    });
+    names[b as usize]
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -88,21 +97,32 @@ pub enum Callee {
     User(Arc<str>, CellKey),
 }
 
+/// One op. The rarer, bigger ones are boxed: a recalc streams through every cell's
+/// ops, so their size is memory traffic (48 bytes an op, from 112).
 #[derive(Clone, Debug, PartialEq)]
 pub enum OpKind {
     Num(f64),
     Str(Arc<str>),
     Ref(CellKey),
-    /// `gaps` (written `A1:B5?`): skip empty cells and read the rest as a list.
-    Range { sheet: SheetId, a: StoredRef, b: StoredRef, gaps: bool },
+    Range(Box<RangeOp>),
     /// Multiply TOS by a unit. `deps` are the declaring cells, by name.
     Unit(UnitExpr),
     To(UnitExpr),
     Builtin(Builtin),
-    Call(Arc<str>, CellKey),
+    /// A word: its name and defining cell.
+    Call(Box<(Arc<str>, CellKey)>),
     Local(usize),
-    Reduce(Callee),
-    Scan(Callee),
+    Reduce(Box<Callee>),
+    Scan(Box<Callee>),
+}
+
+/// `gaps` (written `A1:B5?`): skip empty cells and read the rest as a list.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RangeOp {
+    pub sheet: SheetId,
+    pub a: StoredRef,
+    pub b: StoredRef,
+    pub gaps: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -376,11 +396,11 @@ impl<'a> Compiler<'a> {
                     let sa = self.stored(sid, explicit, a, &span)?;
                     let sb = self.stored(sid, None, b, &span)?;
                     self.deps.push(Dep::Range { sheet: sid, a: sa, b: sb });
-                    OpKind::Range { sheet: sid, a: sa, b: sb, gaps: *gaps }
+                    OpKind::Range(Box::new(RangeOp { sheet: sid, a: sa, b: sb, gaps: *gaps }))
                 }
                 Tok::DeadRef => return err("reference to a deleted cell", span),
-                Tok::Reduce(w) => OpKind::Reduce(self.callee(w, &span)?),
-                Tok::Scan(w) => OpKind::Scan(self.callee(w, &span)?),
+                Tok::Reduce(w) => OpKind::Reduce(Box::new(self.callee(w, &span)?)),
+                Tok::Scan(w) => OpKind::Scan(Box::new(self.callee(w, &span)?)),
                 Tok::Bad(m) => return err(m.clone(), span),
                 Tok::Comment(_) => continue,
                 Tok::Word(w) => {
@@ -390,7 +410,7 @@ impl<'a> Compiler<'a> {
                         OpKind::Builtin(b)
                     } else if let Some(k) = self.syms.words.get(w.as_str()) {
                         self.deps.push(Dep::Cell(*k));
-                        OpKind::Call(w.as_str().into(), *k)
+                        OpKind::Call(Box::new((w.as_str().into(), *k)))
                     } else if let Some(nd) = self.wb.names.get(w.as_str()) {
                         self.deps.push(Dep::Cell(nd.cell));
                         OpKind::Ref(nd.cell)

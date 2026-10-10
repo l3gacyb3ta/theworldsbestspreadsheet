@@ -7,7 +7,7 @@ use crate::model::StoredRef;
 use crate::parse::{Builtin, Callee, Compiled, Op, OpKind};
 use crate::rational::Rational;
 use crate::units::{self, Dim, DispUnit, Quant, UnitExpr, UnitInfo};
-use crate::value::{broadcast2, Num, Text, Value};
+use crate::value::{broadcast2, Num, Provs, Text, Value};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -37,15 +37,22 @@ pub struct Interp<'e> {
 
 pub(crate) const MAX_DEPTH: usize = 64;
 
+thread_local! {
+    /// Stacks to reuse: a recalc runs a program per cell, and each would allocate (and grow) its own.
+    static STACKS: std::cell::RefCell<Vec<Vec<Value>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 pub fn run_program(env: &dyn Env, ops: &[Op]) -> Result<Value, EvalErr> {
     let mut it = Interp { env, depth: 0 };
-    let mut stack = Vec::new();
-    it.run(ops, &mut stack, &[])?;
-    match stack.len() {
+    let mut stack = STACKS.with(|s| s.borrow_mut().pop()).unwrap_or_default();
+    let res = it.run(ops, &mut stack, &[]).and_then(|()| match stack.len() {
         1 => Ok(stack.pop().unwrap()),
         0 => Err(EvalErr { msg: "nothing left on the stack".into(), span: None }),
         n => Err(EvalErr { msg: format!("{} values left on stack", n), span: None }),
-    }
+    });
+    stack.clear();
+    STACKS.with(|s| s.borrow_mut().push(stack));
+    res
 }
 
 /// The stack after one top-level token (word calls are not stepped into).
@@ -115,12 +122,42 @@ fn same_dims(a: &Quant, b: &Quant, what: &str) -> R<()> {
 }
 
 fn map(n: &Num, q: Quant, f: impl Fn(f64) -> f64) -> Num {
+    if n.shape.is_empty() {
+        return Num::scalar(f(n.data[0]), q);
+    }
     Num::with_shape(n.shape.clone(), n.data.iter().map(|x| f(*x)).collect(), q)
 }
 
 fn zip(a: &Num, b: &Num, q: Quant, f: impl Fn(f64, f64) -> f64) -> R<Num> {
+    // two scalars: the common case, without building a shape or a vector
+    if a.shape.is_empty() && b.shape.is_empty() {
+        return Ok(Num::scalar(f(a.data[0], b.data[0]), q));
+    }
     let (shape, data) = broadcast2(a, b, f)?;
     Ok(Num::with_shape(shape, data, q))
+}
+
+/// `+ - * /` on the two scalars on top of the stack, written into the lower one, when
+/// the result's units are simply the lower one's: same dimension for `+ -` (neither
+/// absolute), plain numbers for `* /`. The general path gives the same result; this
+/// one skips building a new value (most of a numeric model's work).
+fn arith_in_place(b: Builtin, st: &mut [Value]) -> bool {
+    let [.., Value::Num(x), Value::Num(y)] = st else { return false };
+    if !x.shape.is_empty() || !y.shape.is_empty() || x.q.absolute.is_some() || y.q.absolute.is_some() {
+        return false;
+    }
+    let plain = |q: &Quant| q.dim.is_none() && q.disp.is_none() && q.disp.factor == 1.0 && q.disp.offset == 0.0;
+    let (a, c) = (x.data[0], y.data[0]);
+    let v = match b {
+        Builtin::Add if x.q.dim == y.q.dim => a + c,
+        Builtin::Sub if x.q.dim == y.q.dim => a - c,
+        Builtin::Mul if plain(&x.q) && plain(&y.q) => a * c,
+        Builtin::Div if plain(&x.q) && plain(&y.q) => a / c,
+        _ => return false,
+    };
+    x.data = crate::value::Data::One(v);
+    x.prov = Provs::None;
+    true
 }
 
 fn bool_q() -> Quant {
@@ -213,7 +250,7 @@ impl<'e> Interp<'e> {
             OpKind::Num(x) => stack.push(Value::Num(Num::plain(*x))),
             OpKind::Str(s) => stack.push(Value::Text(Text { shape: vec![], data: Arc::new(vec![s.clone()]) })),
             OpKind::Ref(k) => stack.push(self.env.cell_value(*k)?),
-            OpKind::Range { sheet, a, b, gaps } => stack.push(self.env.range_value(*sheet, a, b, *gaps)?),
+            OpKind::Range(r) => stack.push(self.env.range_value(r.sheet, &r.a, &r.b, r.gaps)?),
             OpKind::Unit(u) => {
                 let n = pop_num(stack, "a unit")?;
                 stack.push(Value::Num(self.apply_unit(n, u)?));
@@ -224,7 +261,7 @@ impl<'e> Interp<'e> {
             }
             OpKind::Local(i) => stack.push(locals[*i].clone()),
             OpKind::Builtin(b) => self.builtin(*b, stack)?,
-            OpKind::Call(name, k) => self.call(name, *k, stack, &op.span)?,
+            OpKind::Call(c) => self.call(&c.0, c.1, stack, &op.span)?,
             OpKind::Reduce(c) => {
                 let v = pop(stack, "reduce")?;
                 stack.push(self.reduce(c, v, &op.span)?);
@@ -354,12 +391,16 @@ impl<'e> Interp<'e> {
             _ => {}
         }
         n.q.disp = r.disp;
-        n.prov = None;
+        n.prov = Provs::None;
         Ok(n)
     }
 
     fn builtin(&mut self, b: Builtin, st: &mut Vec<Value>) -> Result<(), Step> {
         use Builtin::*;
+        if matches!(b, Add | Sub | Mul | Div) && arith_in_place(b, st) {
+            st.pop();
+            return Ok(());
+        }
         let name = crate::parse::builtin_name(b);
         match b {
             Dup => {
@@ -683,7 +724,7 @@ fn from_rows_or_empty(rows: Vec<Value>, like: &Value) -> R<Value> {
     from_rows(rows, "array")
 }
 
-fn broadcast3(c: &Num, t: &Num, e: &Num) -> R<(Vec<usize>, Vec<f64>)> {
+fn broadcast3(c: &Num, t: &Num, e: &Num) -> R<(crate::value::Shape, Vec<f64>)> {
     // pick per element: broadcast cond against each branch
     let (s1, tv) = broadcast2(c, t, |c, t| if c != 0.0 { t } else { f64::NAN })?;
     let tmp = Num::with_shape(s1.clone(), tv, Quant::none());
@@ -728,7 +769,7 @@ fn transpose(v: Value) -> R<Value> {
         }
         Value::Num(n) if n.rank() == 1 => {
             let k = n.len();
-            Ok(Value::Num(Num { shape: vec![1, k], data: n.data.clone(), q: n.q.clone(), prov: None }))
+            Ok(Value::Num(Num { shape: vec![1, k].into(), data: n.data.clone(), q: n.q.clone(), prov: Provs::None }))
         }
         Value::Text(t) if t.shape.len() == 2 => {
             let (r, c) = (t.shape[0], t.shape[1]);
