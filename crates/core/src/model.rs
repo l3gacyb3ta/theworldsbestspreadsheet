@@ -554,6 +554,17 @@ impl Sheet {
 pub struct NameDef {
     pub cell: CellKey,
     pub input: bool,
+    /// An input's range, as written (a number in the input's unit: `0 [1/s]`); see `bounds`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<String>,
+}
+
+impl NameDef {
+    pub fn new(cell: CellKey, input: bool) -> NameDef {
+        NameDef { cell, input, min: None, max: None }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

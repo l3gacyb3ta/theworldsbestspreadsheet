@@ -2,6 +2,7 @@
 //! dependency graph. No UI code lives here.
 
 pub mod a1;
+pub mod bounds;
 pub mod chart;
 pub mod dims;
 pub mod engine;
