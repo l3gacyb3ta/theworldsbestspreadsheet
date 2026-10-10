@@ -29,9 +29,22 @@ pub struct Opts {
     pub whole: bool,
     /// Cap on evaluations of `f`, bracketing and narrowing together.
     pub max_evals: usize,
+    /// The input's range: nothing outside `lo..=hi` is tried.
+    pub lo: f64,
+    pub hi: f64,
 }
 
 impl Opts {
+    /// The same search kept inside `lo..=hi` (the whole numbers inside, for a whole-number search).
+    pub fn within(mut self, lo: Option<f64>, hi: Option<f64>) -> Opts {
+        self.lo = lo.unwrap_or(f64::NEG_INFINITY);
+        self.hi = hi.unwrap_or(f64::INFINITY);
+        if self.whole {
+            (self.lo, self.hi) = (self.lo.ceil(), self.hi.floor());
+        }
+        self
+    }
+
     /// The search for a literal now at `x0`, written with `decimals` places: up to 1024× its size either way
     /// (from zero: up to 10⁶ of its last decimal place; a date: ±65,536 days).
     pub fn for_literal(x0: f64, decimals: usize, is_date: bool, tol: f64) -> Opts {
@@ -43,7 +56,7 @@ impl Opts {
         } else {
             (10f64.powi(-(decimals as i32)), 20)
         };
-        Opts { step: if whole { step.max(1.0) } else { step }, doublings, tol, whole, max_evals: 120 }
+        Opts { step: if whole { step.max(1.0) } else { step }, doublings, tol, whole, max_evals: 120, lo: f64::NEG_INFINITY, hi: f64::INFINITY }
     }
 }
 
@@ -59,7 +72,8 @@ pub struct Root {
 pub enum Fail {
     /// No two tried inputs straddle the target. Over inputs `lo..=hi` the value stayed in `ymin..=ymax`;
     /// `err` is the first input where the value was an error (the search stops there on that side).
-    OutOfReach { lo: f64, hi: f64, ymin: f64, ymax: f64, err: Option<(f64, String)> },
+    /// `bounded`: the search stopped at the range's (lower, upper) end.
+    OutOfReach { lo: f64, hi: f64, ymin: f64, ymax: f64, err: Option<(f64, String)>, bounded: (bool, bool) },
     /// The value jumps over the target at `x`: from `left` just below it to `right` just above.
     Jump { x: f64, left: f64, right: f64 },
     /// The value is an error at `x`, inside a bracket (or at the start).
@@ -101,13 +115,16 @@ fn side(y: f64, target: f64) -> bool {
 pub fn solve(f: &mut dyn FnMut(f64) -> Result<f64, String>, x0: f64, target: f64, o: &Opts) -> Result<Root, Fail> {
     let mut fx = Counted { f, n: 0, max: o.max_evals };
     let x0 = if o.whole { x0.round() } else { x0 };
+    // a start outside the range (a typed value that's an error) starts at its end
+    let x0 = x0.max(o.lo).min(o.hi);
     let y0 = fx.need(x0)?;
     if (y0 - target).abs() <= o.tol {
         return Ok(Root { x: x0, y: y0, evals: fx.n });
     }
     let (mut lo, mut hi, mut ymin, mut ymax) = (x0, x0, y0, y0);
     let mut err = None;
-    // the last point tried going up, and going down; None once a side hits an error
+    let mut bounded = [false, false];
+    // the last point tried going up, and going down; None once a side hits an error or the range's end
     let mut paths = [Some((x0, y0)), Some((x0, y0))];
     for k in 0..=o.doublings {
         for (d, dir) in [1.0, -1.0].into_iter().enumerate() {
@@ -116,7 +133,16 @@ pub fn solve(f: &mut dyn FnMut(f64) -> Result<f64, String>, x0: f64, target: f64
             if o.whole {
                 x = x.round();
             }
+            // the last step on a side stops at the range's end
+            let end = if d == 0 { o.hi } else { o.lo };
+            if (x - end) * dir >= 0.0 {
+                x = end;
+                bounded[d] = true;
+            }
             if x == px {
+                if bounded[d] {
+                    paths[d] = None;
+                }
                 continue;
             }
             match fx.at(x)? {
@@ -141,7 +167,7 @@ pub fn solve(f: &mut dyn FnMut(f64) -> Result<f64, String>, x0: f64, target: f64
             break;
         }
     }
-    Err(Fail::OutOfReach { lo, hi, ymin, ymax, err })
+    Err(Fail::OutOfReach { lo, hi, ymin, ymax, err, bounded: (bounded[1], bounded[0]) })
 }
 
 /// Bisection over whole numbers; ends at the whole number nearer the target.
@@ -278,13 +304,18 @@ impl Engine {
         let name = self.short_name(g.input, g.target.sheet);
         let text = self.wb.cell_text(g.input);
         let lit = cell_literal(&text).ok_or_else(|| format!("{name} isn't a number"))?;
+        // (outside its range, say)
+        if let Some(Err(e)) = self.result(g.input) {
+            return Err(format!("{name} has an error: {}", e.msg));
+        }
         let q: Quant = match self.result(g.target) {
             Some(Ok(Value::Num(n))) => n.q.clone(),
             _ => return Err(format!("{} isn't a number", self.wb.cell_label(g.target, home))),
         };
         let tlabel = self.wb.cell_label(self.element_cell(g.target, g.index), home);
         let decimals = if lit.is_date { 0 } else { g.decimals.unwrap_or(lit.decimals) };
-        let opts = Opts::for_literal(lit.value, decimals, lit.is_date, g.tol);
+        let range = self.input_range(g.input).unwrap_or_default();
+        let opts = Opts::for_literal(lit.value, decimals, lit.is_date, g.tol).within(range.min.as_ref().map(|m| m.0), range.max.as_ref().map(|m| m.0));
         // trials only write the input cell (a spill past the stored rows reaches virtual ones)
         let orig = self.wb.cell(g.input).cloned();
         let res = {
@@ -310,18 +341,25 @@ impl Engine {
         let out = |y: f64| fmt_quantity(y, &q);
         match res {
             Ok(r) => {
-                let num = format_lit(r.x, decimals, lit.is_date);
+                // rounding to the decimals stays inside the range
+                let num = range.format(r.x, decimals, lit.is_date);
                 let value = if lit.is_date { r.x } else { num.parse().unwrap_or(r.x) };
                 Ok(Solved { text: replace_span(&text, &lit.span, &num), value, evals: r.evals })
             }
-            Err(Fail::OutOfReach { lo, hi, ymin, ymax, err }) => {
+            Err(Fail::OutOfReach { lo, hi, ymin, ymax, err, bounded }) => {
+                let within = match (range.min.as_ref().filter(|_| bounded.0), range.max.as_ref().filter(|_| bounded.1)) {
+                    (Some((_, a)), Some((_, b))) => format!(" within {a} ≤ {name} ≤ {b}"),
+                    (Some((_, a)), None) => format!(" within {name} ≥ {a}"),
+                    (None, Some((_, b))) => format!(" within {name} ≤ {b}"),
+                    (None, None) => String::new(),
+                };
                 let why = if ymin == ymax {
                     format!("{tlabel} stays at {} for {name} from {} to {}", out(ymin), input(lo), input(hi))
                 } else {
                     format!("with {name} from {} to {}, {tlabel} only reaches {} to {}", input(lo), input(hi), out(ymin), out(ymax))
                 };
                 let stop = err.map(|(x, m)| format!(" (at {name} = {} it's an error: {m})", input(x))).unwrap_or_default();
-                Err(format!("out of reach: {why}{stop}"))
+                Err(format!("out of reach{within}: {why}{stop}"))
             }
             Err(Fail::Jump { x, left, right }) => {
                 Err(format!("{tlabel} jumps from {} to {} at {name} = {}, skipping {}", out(left), out(right), input(x), out(g.want)))
@@ -449,6 +487,29 @@ mod tests {
         // canonical metres, target 1.5 km = 1500 m, input in km
         let r = run(|km| Ok(km * 1000.0), 1.0, 1500.0, &Opts::for_literal(1.0, 1, false, 0.5)).unwrap();
         assert!((r.x - 1.5).abs() < 1e-3, "{r:?}");
+    }
+
+    #[test]
+    fn nothing_outside_the_range_is_tried() {
+        let tried = std::cell::RefCell::new(vec![]);
+        let f = |x: f64| {
+            tried.borrow_mut().push(x);
+            Ok(x * x)
+        };
+        // from -0.5, the nearer root is -2; x ≥ -1 leaves 2
+        let r = run(f, -0.5, 4.0, &opts(-0.5, 2).within(Some(-1.0), None)).unwrap();
+        assert!((r.x - 2.0).abs() < 1e-9, "{r:?}");
+        assert!(tried.borrow().iter().all(|x| *x >= -1.0), "{tried:?}");
+        // out of reach, and which end stopped it
+        tried.borrow_mut().clear();
+        match run(f, 0.5, 9.0, &opts(0.5, 2).within(Some(0.0), Some(2.0))) {
+            Err(Fail::OutOfReach { lo, hi, bounded, .. }) => assert_eq!((lo, hi, bounded), (0.0, 2.0, (true, true))),
+            other => panic!("{other:?}"),
+        }
+        assert!(tried.borrow().iter().all(|x| (0.0..=2.0).contains(x)), "{tried:?}");
+        // whole numbers: the whole numbers inside
+        let o = opts(3.0, 0).within(Some(0.5), Some(7.5));
+        assert_eq!((o.lo, o.hi), (1.0, 7.0));
     }
 
     #[test]

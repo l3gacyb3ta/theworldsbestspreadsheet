@@ -546,6 +546,13 @@ pub struct ErrorHelp {
 
 pub const ERRORS: &[ErrorHelp] = &[
     ErrorHelp {
+        patterns: &["must be ≥", "must be ≤", "'s range:"],
+        title: "Outside the input's range",
+        why: "This input has a range (min and max in the inspector), and the value typed here is outside it — or the range itself doesn't fit the input. The value is kept as typed, never clamped; cells that read it show #upstream.",
+        fix: "Type a value inside the range, or change the range in the inspector. Scrubbing, chart dragging and goal-seek stop at the range's ends by themselves.",
+        topic: "modeling",
+    },
+    ErrorHelp {
         patterns: &["values left on stack"],
         title: "Values left on the stack",
         why: "A program must leave exactly one value — the cell's value. Extra values usually mean a missing operator.",
@@ -979,6 +986,15 @@ mod tests {
                 _ => panic!("{prog} should fail"),
             };
             assert!(explain_error(&msg).is_some(), "no explanation for `{prog}` → {msg}");
+        }
+        // an input outside its range, and a range that no longer fits its input
+        e.set_text(k, "1");
+        e.set_name("damping", Some(k), true).unwrap();
+        e.set_range("damping", "0", "").unwrap();
+        for text in ["-1", "1 [m]"] {
+            e.set_text(k, text);
+            let crate::engine::Shown::Error(err) = e.shown(k) else { panic!("{text} should fail") };
+            assert!(explain_error(&err.msg).is_some_and(|h| h.title.contains("range")), "{text} → {}", err.msg);
         }
     }
 
