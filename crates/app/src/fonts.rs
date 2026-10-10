@@ -49,10 +49,11 @@ pub fn system() -> Vec<FontData> {
 }
 
 /// Characters egui's built-in fonts have no glyphs for, that a system font is likely to: CJK, kana, Hangul, Arabic,
-/// Hebrew, Indic, Thai.
+/// Hebrew, Indic, Thai, and the arrows in key names (⇧, ↑).
 pub fn needs_fallback(c: char) -> bool {
     matches!(c as u32,
-        0x0590..=0x08FF        // Hebrew, Arabic, Syriac, Thaana…
+        0x2190..=0x21FF        // arrows: ⇧ ↑ ↓ ← →
+        | 0x0590..=0x08FF      // Hebrew, Arabic, Syriac, Thaana…
         | 0x0900..=0x0E7F      // Indic scripts, Sinhala, Thai
         | 0x1100..=0x11FF      // Hangul Jamo
         | 0x2E80..=0x9FFF      // CJK radicals, punctuation, kana, Hangul compatibility, CJK ideographs
