@@ -119,7 +119,8 @@ enum Drag {
     Row { row: usize, y0: f32, h0: Option<f32> },
     Scrub { key: CellKey, orig: Option<Cell>, text: String, lit: Lit, x0: f32 },
     /// Dragging a chart point backed by literal cells: `y` follows the pointer's y, `x` its x (scatter and path points).
-    Point { y: Option<PointCell>, x: Option<PointCell>, axis: YAxis },
+    /// With both, Alt locks it to the axis moved along most since the press.
+    Point { y: Option<PointCell>, x: Option<PointCell>, axis: YAxis, press: Pos2 },
     Goal(Box<GoalDrag>),
 }
 

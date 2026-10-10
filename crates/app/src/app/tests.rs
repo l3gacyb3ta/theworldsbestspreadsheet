@@ -274,6 +274,82 @@ fn scatter_point_drags_diagonally_in_one_undo_step() {
     assert_eq!((source(&h, "A2"), source(&h, "B2")), ("2.0".to_string(), "20 [m]".to_string()));
 }
 
+/// Presses at `from`, moves through `steps` (offsets from `from`, each with the modifiers held there; `check`
+/// runs after each), and lets go at the last.
+fn drag_steps(h: &mut Harness<'static, App>, from: Pos2, steps: &[(Vec2, Modifiers)], check: &dyn Fn(&mut Harness<'static, App>, usize)) {
+    h.event(Event::PointerMoved(from));
+    h.run_steps(1);
+    press(h, from, true, steps[0].1);
+    for (i, (d, mods)) in steps.iter().enumerate() {
+        h.event(Event::ModifiersChanged(*mods));
+        h.event(Event::PointerMoved(from + *d));
+        h.run_steps(1);
+        check(h, i);
+    }
+    let (d, mods) = *steps.last().unwrap();
+    press(h, from + d, false, mods);
+    h.event(Event::ModifiersChanged(Modifiers::NONE));
+    h.run_steps(2);
+}
+
+fn undo_cells(h: &Harness<'static, App>) -> usize {
+    match h.state().undo.last() {
+        Some(Edit::Cells(c)) => c.len(),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn alt_locks_a_2d_drag_to_one_axis() {
+    let mut h = sheet_with(&[XY.as_slice(), &[("D1", "=A1:A3 B1:B3 scatter")]].concat());
+    let (p, _) = point_at(&h, "A2", "B2");
+    // held from the press (which drags the point, not a scrub): mostly sideways, so x only
+    let steps: Vec<(Vec2, Modifiers)> = (1..=6).map(|i| (Vec2::new(10.0, -3.0) * i as f32, Modifiers::ALT)).collect();
+    drag_steps(&mut h, p, &steps, &|h, i| {
+        assert!(matches!(h.state().drag, Drag::Point { .. }));
+        assert_eq!(h.output().platform_output.cursor_icon, CursorIcon::ResizeHorizontal, "step {i}");
+        if i == 3 {
+            shot(h, "59_scatter_alt_locked");
+        }
+    });
+    assert!(num(&h, "A2") > 2.0, "{}", source(&h, "A2"));
+    assert_eq!(source(&h, "B2"), "20 [m]", "the locked axis' cell is untouched");
+    assert_eq!((h.state().undo.len(), undo_cells(&h)), (1, 1), "one undo step, with only the cell that changed");
+}
+
+#[test]
+fn alt_locks_to_the_axis_moved_most_and_releasing_it_frees_the_drag() {
+    let mut h = sheet_with(&[XY.as_slice(), &[("D1", "=A1:A3 B1:B3 scatter")]].concat());
+    let (p, _) = point_at(&h, "A2", "B2");
+    let (free, alt) = (Modifiers::NONE, Modifiers::ALT);
+    // sideways first (x leads), then up past it (y leads), then Alt: locked to y, x back exactly where it started
+    let steps = [(Vec2::new(50.0, -10.0), free), (Vec2::new(50.0, -70.0), free), (Vec2::new(50.0, -70.0), alt), (Vec2::new(55.0, -80.0), alt), (Vec2::new(60.0, -80.0), free)];
+    drag_steps(&mut h, p, &steps, &|h, i| match i {
+        0 => assert!(num(h, "A2") > 2.0, "free: x moves"),
+        2 | 3 => {
+            assert_eq!(source(h, "A2"), "2.0", "locked to y: x is exactly its start (step {i})");
+            assert!(num(h, "B2") > 20.0);
+            assert_eq!(h.output().platform_output.cursor_icon, CursorIcon::ResizeVertical);
+        }
+        4 => assert!(num(h, "A2") > 2.0, "Alt released: x follows again"),
+        _ => {}
+    });
+    assert_eq!((h.state().undo.len(), undo_cells(&h)), (1, 2));
+}
+
+#[test]
+fn shift_alt_is_a_fine_locked_drag() {
+    let mut h = sheet_with(&[XY.as_slice(), &[("D1", "=A1:A3 B1:B3 scatter")]].concat());
+    let (p, _) = point_at(&h, "A2", "B2");
+    let both = Modifiers::ALT | Modifiers::SHIFT;
+    let steps: Vec<(Vec2, Modifiers)> = (1..=6).map(|i| (Vec2::new(2.0, -7.0) * i as f32, both)).collect();
+    drag_steps(&mut h, p, &steps, &|_, _| {});
+    let b2 = source(&h, "B2");
+    assert!(num(&h, "B2") > 20.0 && b2.contains('.') && b2.ends_with(" [m]"), "finer than whole metres: {b2}");
+    assert_eq!(source(&h, "A2"), "2.0");
+    assert_eq!(undo_cells(&h), 1);
+}
+
 #[test]
 fn path_point_drags_in_2d() {
     // a closed shape: joined in the order given, back to the start

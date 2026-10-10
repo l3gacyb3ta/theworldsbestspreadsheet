@@ -36,6 +36,8 @@ If a point's y value comes straight from a number cell (through a range, a refer
 
 **Scatter and path points move in 2D; line points move only up and down.** On a `scatter` or `path`, the pointer's x writes the x value's cell and its y writes the y value's cell, each the same way (own decimals and unit; dates move in whole days, °C stays °C). A diagonal drag that writes two cells is one undo step. The chart's axes stay put until you let go.
 
+**Alt locks the drag to one axis**, the one you've moved along most since you pressed, as in a drawing program: the other cell stays exactly as it was (and isn't part of the undo step). Release Alt and the point moves freely again; press it with Alt already held and it's locked from the start (a press on a chart point drags it, it doesn't scrub the cell beneath). Alt and Shift together give fine steps along one axis. The tooltip says `locked to x — release Alt to move freely` while it's on.
+
 - **Only one axis from a cell**: if only x (or only y) comes straight from a number cell, only that axis moves; the cursor and the tooltip say which (`drag sideways to edit A3 — y is computed in C3, so only x moves`).
 - **Computed points**: a computed value is never solved for in 2D (that would be solving for two inputs at once). If x comes from a cell, the point moves sideways only, writing it. If neither does, a computed y goal-seeks as on a line (below), up and down only, and the tooltip says x stays.
 

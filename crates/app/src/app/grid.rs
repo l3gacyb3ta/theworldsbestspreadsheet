@@ -148,7 +148,11 @@ impl App {
                             chart_view::tooltip_lines(
                                 ctx,
                                 pos,
-                                &[Tip::Value(label.clone()), Tip::Action(format!("drag to edit {} (x) and {} (y)", self.label(xk), self.label(k)))],
+                                &[
+                                    Tip::Value(label.clone()),
+                                    Tip::Action(format!("drag to edit {} (x) and {} (y)", self.label(xk), self.label(k))),
+                                    Tip::Note("hold Alt to lock to one axis, Shift for finer steps".to_string()),
+                                ],
                             );
                         }
                         (p, Some(xk)) => {
@@ -547,7 +551,8 @@ impl App {
                 let x = if hit.two_d { self.point_cell(hit.xprov).filter(|x| y.as_ref().is_none_or(|y| y.key != x.key)) } else { None };
                 if x.is_some() || y.is_some() {
                     let axis = axis.clone();
-                    self.drag = Drag::Point { y, x, axis };
+                    // (a press with Alt held drags the point, locked to one axis, rather than scrubbing the cell under it)
+                    self.drag = Drag::Point { y, x, axis, press: pos };
                     return;
                 }
                 if let Prov::Derived(target, index) = hit.prov {
@@ -693,23 +698,39 @@ impl App {
                 }
             }
             Drag::Goal(_) => {}
-            Drag::Point { y, x, axis } => {
-                ctx.set_cursor_icon(match (x.is_some(), y.is_some()) {
+            Drag::Point { y, x, axis, press } => {
+                // Alt locks a 2D drag to the axis moved along most since the press (neither, until one leads);
+                // the other cell stays exactly as it was
+                let (mut move_x, mut move_y) = (x.is_some(), y.is_some());
+                let locked = mods.alt && move_x && move_y;
+                if locked {
+                    let d = pos - *press;
+                    (move_x, move_y) = (d.x.abs() > d.y.abs(), d.y.abs() > d.x.abs());
+                    let to = if move_x { "x" } else if move_y { "y" } else { "one axis" };
+                    chart_view::tooltip_lines(ctx, pos, &[Tip::Note(format!("locked to {to} — release Alt to move freely"))]);
+                }
+                ctx.set_cursor_icon(match (move_x, move_y) {
                     (true, true) => CursorIcon::Move,
                     (true, false) => CursorIcon::ResizeHorizontal,
-                    _ => CursorIcon::ResizeVertical,
+                    (false, true) => CursorIcon::ResizeVertical,
+                    (false, false) => CursorIcon::Move,
                 });
                 let mut writes = Vec::new();
                 if let Some(c) = y {
-                    writes.push((c.key, point_text(c, &axis.disp, axis.from_screen(pos.y), axis.y1 - axis.y0, mods.shift)));
+                    let new = if move_y { point_text(c, &axis.disp, axis.from_screen(pos.y), axis.y1 - axis.y0, mods.shift) } else { c.text.clone() };
+                    writes.push((c, new));
                 }
                 if let (Some(c), Some(xdisp)) = (x, &axis.xdisp) {
-                    writes.push((c.key, point_text(c, xdisp, axis.x_from_screen(pos.x), axis.x1 - axis.x0, mods.shift)));
+                    let new = if move_x { point_text(c, xdisp, axis.x_from_screen(pos.x), axis.x1 - axis.x0, mods.shift) } else { c.text.clone() };
+                    writes.push((c, new));
                 }
-                writes.retain(|(k, new)| *new != self.eng.wb.cell_text(*k));
+                writes.retain(|(c, new)| *new != self.eng.wb.cell_text(c.key));
                 if !writes.is_empty() {
-                    // both cells of a 2D drag in one edit: one recalc
-                    let cells = writes.into_iter().map(|(k, new)| (k, Some(Cell::new(self.eng.wb.parse_text(&new, k.sheet))))).collect();
+                    // both cells of a 2D drag in one edit: one recalc; a cell back at its press text gets its original cell back
+                    let cells = writes
+                        .into_iter()
+                        .map(|(c, new)| (c.key, if new == c.text { c.orig.clone() } else { Some(Cell::new(self.eng.wb.parse_text(&new, c.key.sheet))) }))
+                        .collect();
                     let t = std::time::Instant::now();
                     self.eng.apply(Edit::Cells(cells));
                     self.last_recalc_ms = t.elapsed().as_secs_f64() * 1000.0;
