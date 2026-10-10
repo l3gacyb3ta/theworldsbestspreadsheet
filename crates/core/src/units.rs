@@ -10,8 +10,9 @@ use std::sync::Arc;
 /// Name → exponent terms, shared: every value carries a dimension and a display
 /// unit, so cloning them must not allocate. None (dimensionless, no unit), the
 /// common case, is no pointer at all, so copying it touches no reference count.
+/// (A thin pointer: values carry two of these, and their size is copying cost.)
 #[derive(Clone, Default)]
-pub struct Terms(Option<Arc<[(Arc<str>, Rational)]>>);
+pub struct Terms(Option<Arc<Vec<(Arc<str>, Rational)>>>);
 
 impl Terms {
     fn ptr_eq(a: &Terms, b: &Terms) -> bool {
@@ -26,13 +27,13 @@ impl Terms {
 impl std::ops::Deref for Terms {
     type Target = [(Arc<str>, Rational)];
     fn deref(&self) -> &Self::Target {
-        self.0.as_deref().unwrap_or(&[])
+        self.0.as_deref().map_or(&[], |v| v.as_slice())
     }
 }
 
 impl From<Vec<(Arc<str>, Rational)>> for Terms {
     fn from(v: Vec<(Arc<str>, Rational)>) -> Terms {
-        Terms(if v.is_empty() { None } else { Some(v.into()) })
+        Terms(if v.is_empty() { None } else { Some(Arc::new(v)) })
     }
 }
 

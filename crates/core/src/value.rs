@@ -24,8 +24,9 @@ pub enum Provs {
     None,
     /// A cell's whole value: element `i` is `Literal(k)` for a number literal, else `Derived(k, i)`.
     Cell(CellKey, bool),
-    /// A single element.
-    One(Prov),
+    /// A single element: `Literal(cell)` or `Derived(cell, index)` (an index past
+    /// u32 isn't a spreadsheet's; it's kept this small so values stay small).
+    One { cell: CellKey, index: u32, literal: bool },
     List(Arc<[Prov]>),
 }
 
@@ -39,8 +40,18 @@ impl Provs {
             Provs::None => Prov::None,
             Provs::Cell(k, true) => Prov::Literal(*k),
             Provs::Cell(k, false) => Prov::Derived(*k, i),
-            Provs::One(p) => if i == 0 { *p } else { Prov::None },
+            Provs::One { cell, literal: true, .. } if i == 0 => Prov::Literal(*cell),
+            Provs::One { cell, index, .. } if i == 0 => Prov::Derived(*cell, *index as usize),
+            Provs::One { .. } => Prov::None,
             Provs::List(l) => l.get(i).copied().unwrap_or(Prov::None),
+        }
+    }
+    /// One element's provenance.
+    pub fn one(p: Prov) -> Provs {
+        match p {
+            Prov::None => Provs::None,
+            Prov::Literal(cell) => Provs::One { cell, index: 0, literal: true },
+            Prov::Derived(cell, i) => Provs::One { cell, index: i.min(u32::MAX as usize) as u32, literal: false },
         }
     }
     /// The first `n` elements' provenance (`None` when there's none).
@@ -55,7 +66,6 @@ impl PartialEq for Provs {
             (Provs::None, Provs::None) => true,
             (Provs::None, _) | (_, Provs::None) => false,
             (Provs::Cell(a, x), Provs::Cell(b, y)) => a == b && x == y,
-            (Provs::One(a), Provs::One(b)) => a == b,
             (Provs::List(a), Provs::List(b)) => a == b,
             // mixed representations: element by element, as far as either says anything
             _ => {
@@ -66,6 +76,66 @@ impl PartialEq for Provs {
                 (0..n(self).max(n(o))).all(|i| self.get(i) == o.get(i))
             }
         }
+    }
+}
+
+/// An array's shape. Ranks 0-2 (nearly every value) are stored inline, so copying,
+/// comparing and dropping one doesn't touch the heap.
+#[derive(Clone)]
+pub enum Shape {
+    Small { rank: u8, dims: [usize; 2] },
+    Big(Box<[usize]>),
+}
+
+impl Shape {
+    pub const SCALAR: Shape = Shape::Small { rank: 0, dims: [0, 0] };
+    pub fn as_slice(&self) -> &[usize] {
+        self
+    }
+}
+
+impl Default for Shape {
+    fn default() -> Shape {
+        Shape::SCALAR
+    }
+}
+
+impl std::ops::Deref for Shape {
+    type Target = [usize];
+    fn deref(&self) -> &[usize] {
+        match self {
+            Shape::Small { rank, dims } => &dims[..*rank as usize],
+            Shape::Big(v) => v,
+        }
+    }
+}
+
+impl From<&[usize]> for Shape {
+    fn from(s: &[usize]) -> Shape {
+        match *s {
+            [] => Shape::SCALAR,
+            [a] => Shape::Small { rank: 1, dims: [a, 0] },
+            [a, b] => Shape::Small { rank: 2, dims: [a, b] },
+            _ => Shape::Big(s.into()),
+        }
+    }
+}
+
+impl From<Vec<usize>> for Shape {
+    fn from(v: Vec<usize>) -> Shape {
+        Shape::from(v.as_slice())
+    }
+}
+
+impl PartialEq for Shape {
+    fn eq(&self, o: &Shape) -> bool {
+        **self == **o
+    }
+}
+
+impl std::fmt::Debug for Shape {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        (**self).fmt(f)
     }
 }
 
@@ -100,7 +170,7 @@ impl From<Vec<f64>> for Data {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Num {
-    pub shape: Vec<usize>,
+    pub shape: Shape,
     pub data: Data,
     pub q: Quant,
     pub prov: Provs,
@@ -108,15 +178,16 @@ pub struct Num {
 
 impl Num {
     pub fn scalar(x: f64, q: Quant) -> Num {
-        Num { shape: vec![], data: Data::One(x), q, prov: Provs::None }
+        Num { shape: Shape::SCALAR, data: Data::One(x), q, prov: Provs::None }
     }
     pub fn plain(x: f64) -> Num {
         Num::scalar(x, Quant::none())
     }
     pub fn vector(v: Vec<f64>, q: Quant) -> Num {
-        Num { shape: vec![v.len()], data: v.into(), q, prov: Provs::None }
+        Num { shape: Shape::Small { rank: 1, dims: [v.len(), 0] }, data: v.into(), q, prov: Provs::None }
     }
-    pub fn with_shape(shape: Vec<usize>, v: Vec<f64>, q: Quant) -> Num {
+    pub fn with_shape(shape: impl Into<Shape>, v: Vec<f64>, q: Quant) -> Num {
+        let shape = shape.into();
         debug_assert_eq!(shape.iter().product::<usize>(), v.len());
         Num { shape, data: v.into(), q, prov: Provs::None }
     }
@@ -374,7 +445,7 @@ pub fn fmt_quantity(canonical: f64, q: &Quant) -> String {
 }
 
 /// Leading-axis broadcasting: shapes agree if one is a prefix of the other.
-pub fn broadcast2(a: &Num, b: &Num, f: impl Fn(f64, f64) -> f64) -> Result<(Vec<usize>, Vec<f64>), String> {
+pub fn broadcast2(a: &Num, b: &Num, f: impl Fn(f64, f64) -> f64) -> Result<(Shape, Vec<f64>), String> {
     let (la, lb) = (a.data.len(), b.data.len());
     if a.shape == b.shape {
         return Ok((a.shape.clone(), a.data.iter().zip(b.data.iter()).map(|(x, y)| f(*x, *y)).collect()));

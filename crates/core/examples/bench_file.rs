@@ -3,6 +3,7 @@ use wbs_core::engine::Engine;
 use wbs_core::model::Workbook;
 fn ms(t: Instant) -> f64 { t.elapsed().as_secs_f64() * 1000.0 }
 fn main() {
+    println!("size_of Shape {} Data {} DispUnit {} Dim {}", std::mem::size_of::<wbs_core::value::Shape>(), std::mem::size_of::<wbs_core::value::Data>(), std::mem::size_of::<wbs_core::units::DispUnit>(), std::mem::size_of::<wbs_core::units::Dim>());
     println!("size_of Value {} Num {} Quant {} Provs {} CellResult {} Op {}", std::mem::size_of::<wbs_core::value::Value>(), std::mem::size_of::<wbs_core::value::Num>(), std::mem::size_of::<wbs_core::units::Quant>(), std::mem::size_of::<wbs_core::value::Provs>(), std::mem::size_of::<Result<wbs_core::value::Value, wbs_core::engine::CellError>>(), std::mem::size_of::<wbs_core::parse::Op>());
     let p = std::env::args().nth(1).unwrap();
     let t = Instant::now();
@@ -14,15 +15,16 @@ fn main() {
     let t = Instant::now();
     let mut e = Engine::new(wb);
     println!("engine new {:.1} ms ({} evaluated)", ms(t), e.last_eval_count);
+    let quick = std::env::var("QUICK").is_ok();
     let t = Instant::now();
     let snap = e.wb.clone();
     println!("clone workbook {:.1} ms", ms(t));
     drop(snap);
     let t = Instant::now();
-    let out = serde_json::to_string(&e.wb).unwrap();
+    let out = if quick { String::new() } else { serde_json::to_string(&e.wb).unwrap() };
     println!("save serialize compact {:.1} ms ({} bytes)", ms(t), out.len());
     let t = Instant::now();
-    let out = serde_json::to_string_pretty(&e.wb).unwrap();
+    let out = if quick { String::new() } else { serde_json::to_string_pretty(&e.wb).unwrap() };
     println!("save serialize {:.1} ms ({} bytes)", ms(t), out.len());
     let names: Vec<_> = e.wb.names.iter().filter(|(_, d)| e.wb.sheet(d.cell.sheet).is_some()).map(|(n, d)| (n.clone(), d.cell)).collect();
     let only = std::env::args().nth(2);

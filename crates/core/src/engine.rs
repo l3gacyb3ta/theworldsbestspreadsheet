@@ -550,15 +550,18 @@ impl Engine {
     /// The single element shown at a position (for ranges and spilled cells).
     fn scalar_at(&self, k: CellKey) -> Result<Value, String> {
         let label = || self.wb.cell_label(k, None);
-        let (v, dr, dc, anchor) = match self.shown(k) {
-            Shown::Empty => {
-                if self.nodes.contains_key(&k) {
-                    return Err(format!("{} isn't computed (cycle?)", label()));
-                }
-                return Err(format!("{} is empty", label()));
-            }
-            Shown::Error(_) => return Err(format!("{} has an error", label())),
-            Shown::Value { value, dr, dc, anchor } => (value, dr, dc, anchor),
+        // one lookup for a cell with content (a range reads thousands of these)
+        let (v, dr, dc, anchor, literal) = match self.nodes.get(&k) {
+            Some(n) => match &n.result {
+                Some(Ok(v)) => (v, 0, 0, k, n.kind == Kind::Number),
+                Some(Err(_)) => return Err(format!("{} has an error", label())),
+                None => return Err(format!("{} isn't computed (cycle?)", label())),
+            },
+            None => match self.shown(k) {
+                Shown::Empty => return Err(format!("{} is empty", label())),
+                Shown::Error(_) => return Err(format!("{} has an error", label())),
+                Shown::Value { value, dr, dc, anchor } => (value, dr, dc, anchor, false),
+            },
         };
         match v {
             Value::Num(n) => {
@@ -569,9 +572,9 @@ impl Engine {
                     _ => return Err(format!("{} holds a rank {} array", label(), n.rank())),
                 };
                 let x = *n.data.get(i).ok_or_else(|| format!("{} is an empty array", label()))?;
-                let prov = if anchor == k && self.kind(k) == Kind::Number { Prov::Literal(k) } else { Prov::Derived(anchor, i) };
+                let prov = if literal { Prov::Literal(k) } else { Prov::Derived(anchor, i) };
                 let mut s = Num::scalar(x, n.q.clone());
-                s.prov = Provs::One(prov);
+                s.prov = Provs::one(prov);
                 Ok(Value::Num(s))
             }
             Value::Text(t) => {

@@ -79,7 +79,16 @@ pub fn builtin(name: &str) -> Option<Builtin> {
     BUILTINS.iter().find(|(n, _, _)| *n == name).map(|(_, b, _)| *b)
 }
 pub fn builtin_name(b: Builtin) -> &'static str {
-    BUILTINS.iter().find(|(_, x, _)| *x == b).map(|(n, _, _)| *n).unwrap()
+    // indexed by discriminant, built once: the interpreter asks on every builtin it runs
+    static NAMES: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    let names = NAMES.get_or_init(|| {
+        let mut v = vec![""; BUILTINS.len()];
+        for (n, x, _) in BUILTINS {
+            v[*x as usize] = n;
+        }
+        v
+    });
+    names[b as usize]
 }
 
 #[derive(Clone, Debug, PartialEq)]
