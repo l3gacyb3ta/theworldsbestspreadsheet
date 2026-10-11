@@ -384,10 +384,11 @@ impl Engine {
         let mut stack = vec![k];
         let mut found = Vec::new();
         while let Some(c) = stack.pop() {
+            // a spilled cell stands for its source: reading a whole spill visits the source once, not once per cell
+            let c = self.cover.get(&c).copied().unwrap_or(c);
             if !seen.insert(c) {
                 continue;
             }
-            let c = self.cover.get(&c).copied().unwrap_or(c);
             if c != k && self.kind(c) == Kind::Number {
                 found.push(c);
                 continue;

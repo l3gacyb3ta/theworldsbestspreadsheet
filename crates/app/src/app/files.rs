@@ -205,6 +205,7 @@ impl App {
     /// Replace the document, dropping everything that pointed into the old one.
     pub(super) fn load(&mut self, eng: Engine, path: Option<PathBuf>) {
         self.eng = eng;
+        self.goal_cands = Default::default();
         self.path = path;
         self.sheet_ix = 0;
         self.anchor = (0, 0);

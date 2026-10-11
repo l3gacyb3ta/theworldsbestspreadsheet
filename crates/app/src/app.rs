@@ -266,6 +266,9 @@ pub struct App {
     chart_hits: Vec<(PointHit, YAxis)>,
     /// The input a computed cell's chart points goal-seek, when switched from the default (click the point).
     goal_inputs: std::collections::HashMap<CellKey, CellKey>,
+    /// The last `goal_choice` candidates: (target, `eng.revision()`, inputs). Hovering a point asks every frame,
+    /// and a target fed by whole columns has thousands of number cells upstream.
+    goal_cands: std::cell::RefCell<Option<(CellKey, u64, std::rc::Rc<[CellKey]>)>>,
     /// Why the last goal-seek found no answer, shown at its point (target, element) until the next press.
     goal_note: Option<(CellKey, usize, String)>,
     /// A goal-seek slower than this stops following the pointer and solves on release.
@@ -345,6 +348,7 @@ impl App {
             range_err: None,
             chart_hits: Vec::new(),
             goal_inputs: Default::default(),
+            goal_cands: Default::default(),
             goal_note: None,
             goal_live_ms: 50.0,
             editor_rect: None,
