@@ -218,6 +218,31 @@ impl<'a> Env for View<'a> {
     }
 }
 
+/// Values a sensitivity pass has computed, with tangents: the seeded input and the cells
+/// downstream of it that its outputs need. Everything else reads as stored, with no tangent.
+pub(crate) type Overlay = HashMap<CellKey, Value>;
+
+/// The document as a sensitivity pass sees it: `View`, with the overlay's values in front.
+struct DualView<'a> {
+    e: &'a Engine,
+    ov: &'a Overlay,
+}
+
+impl<'a> Env for DualView<'a> {
+    fn cell_value(&self, k: CellKey) -> Result<Value, String> {
+        self.e.ref_value_in(k, Some(self.ov))
+    }
+    fn range_value(&self, sheet: SheetId, a: &StoredRef, b: &StoredRef, gaps: bool) -> Result<Value, String> {
+        self.e.range_value_in(sheet, a, b, gaps, Some(self.ov))
+    }
+    fn unit_info(&self, name: &str) -> Result<Arc<UnitInfo>, String> {
+        View(self.e).unit_info(name)
+    }
+    fn word(&self, k: CellKey) -> Option<Arc<Compiled>> {
+        Env::word(&View(self.e), k)
+    }
+}
+
 impl<'a> StaticEnv for View<'a> {
     fn cell(&self, k: CellKey) -> Option<SVal> {
         let e = self.0;
@@ -553,6 +578,14 @@ impl Engine {
     // ---- value access used by the interpreter ----------------------------
 
     fn ref_value(&self, k: CellKey) -> Result<Value, String> {
+        self.ref_value_in(k, None)
+    }
+
+    /// A reference's value, reading the overlay's values first (a sensitivity pass).
+    fn ref_value_in(&self, k: CellKey, ov: Option<&Overlay>) -> Result<Value, String> {
+        if let Some(v) = ov.and_then(|o| o.get(&k)) {
+            return Ok(v.clone());
+        }
         // (a cell with a value is on a live sheet: a deleted sheet's cells have no nodes)
         if let Some(r) = self.res(&k) {
             return match r {
@@ -565,7 +598,7 @@ impl Engine {
             return Err("reference to a deleted sheet".into());
         }
         if self.cover.contains_key(&k) {
-            return self.scalar_at(k);
+            return self.scalar_at(k, ov);
         }
         if self.nodes.contains_key(&k) {
             return Err(format!("{} isn't computed (cycle?)", self.wb.cell_label(k, None)));
@@ -574,19 +607,21 @@ impl Engine {
     }
 
     /// The single element shown at a position (for ranges and spilled cells).
-    fn scalar_at(&self, k: CellKey) -> Result<Value, String> {
+    /// (With an overlay: a sensitivity pass's values, and their tangents, come first.)
+    fn scalar_at(&self, k: CellKey, ov: Option<&Overlay>) -> Result<Value, String> {
         let label = || self.wb.cell_label(k, None);
+        let over = |a: &CellKey| ov.and_then(|o| o.get(a));
         // one lookup for a cell with content (a range reads thousands of these)
         let (v, dr, dc, anchor, literal) = match self.nodes.get(&k) {
-            Some(n) => match &n.result {
-                Some(Ok(v)) => (v, 0, 0, k, n.kind == Kind::Number),
-                Some(Err(_)) => return Err(format!("{} has an error", label())),
-                None => return Err(format!("{} isn't computed (cycle?)", label())),
+            Some(n) => match (over(&k), &n.result) {
+                (Some(v), _) | (None, Some(Ok(v))) => (v, 0, 0, k, n.kind == Kind::Number),
+                (None, Some(Err(_))) => return Err(format!("{} has an error", label())),
+                (None, None) => return Err(format!("{} isn't computed (cycle?)", label())),
             },
             None => match self.shown(k) {
                 Shown::Empty => return Err(format!("{} is empty", label())),
                 Shown::Error(_) => return Err(format!("{} has an error", label())),
-                Shown::Value { value, dr, dc, anchor } => (value, dr, dc, anchor, false),
+                Shown::Value { value, dr, dc, anchor } => (over(&anchor).unwrap_or(value), dr, dc, anchor, false),
             },
         };
         match v {
@@ -601,6 +636,9 @@ impl Engine {
                 let prov = if literal { Prov::Literal(k) } else { Prov::Derived(anchor, i) };
                 let mut s = Num::scalar(x, n.q.clone());
                 s.prov = Provs::one(prov);
+                if n.tan.is_some() {
+                    s.set_tan(Some(vec![n.tan_at(i)]));
+                }
                 Ok(Value::Num(s))
             }
             Value::Text(t) => {
@@ -621,6 +659,10 @@ impl Engine {
     /// are skipped and the rest form a list, row by row; otherwise an empty
     /// cell is an error.
     fn range_value(&self, sheet: SheetId, a: &StoredRef, b: &StoredRef, gaps: bool) -> Result<Value, String> {
+        self.range_value_in(sheet, a, b, gaps, None)
+    }
+
+    fn range_value_in(&self, sheet: SheetId, a: &StoredRef, b: &StoredRef, gaps: bool, ov: Option<&Overlay>) -> Result<Value, String> {
         let s = self.wb.sheet(sheet).ok_or("sheet was deleted")?;
         let (r0, c0, r1, c1) = s.range_bounds(a, b).ok_or("range refers to deleted cells")?;
         let (nr, nc) = (r1 - r0 + 1, c1 - c0 + 1);
@@ -628,13 +670,15 @@ impl Engine {
         let mut texts: Vec<Arc<str>> = Vec::new();
         let mut prov = Vec::with_capacity(nr * nc);
         let mut q: Option<(Quant, CellKey)> = None;
+        // (only in a sensitivity pass, from the first element with one)
+        let mut tans: Option<Vec<f64>> = None;
         for r in r0..=r1 {
             for c in c0..=c1 {
                 let k = s.key(r, c).unwrap();
                 if gaps && !self.nodes.contains_key(&k) && matches!(self.shown(k), Shown::Empty) {
                     continue;
                 }
-                match self.scalar_at(k)? {
+                match self.scalar_at(k, ov)? {
                     Value::Num(n) => {
                         if !texts.is_empty() {
                             return Err(format!("range mixes text and numbers at {}", self.wb.cell_label(k, None)));
@@ -652,6 +696,12 @@ impl Engine {
                                     ));
                                 }
                             }
+                        }
+                        if tans.is_none() && n.tan.is_some() {
+                            tans = Some(vec![0.0; nums.len()]);
+                        }
+                        if let Some(t) = &mut tans {
+                            t.push(n.tan_at(0));
                         }
                         nums.push(n.data[0]);
                         prov.push(n.prov.get(0));
@@ -676,7 +726,7 @@ impl Engine {
         if !texts.is_empty() {
             return Ok(Value::Text(Text { shape, data: Arc::new(texts) }));
         }
-        let mut n = Num::with_shape(shape, nums, q.map(|x| x.0).unwrap_or_else(Quant::none));
+        let mut n = Num::with_shape(shape, nums, q.map(|x| x.0).unwrap_or_else(Quant::none)).with_tan(tans);
         n.prov = Provs::List(prov.into());
         Ok(Value::Num(n))
     }
@@ -1530,6 +1580,10 @@ impl Engine {
     }
 
     fn evaluate_node(&self, n: &Node, k: CellKey) -> CellResult {
+        self.evaluate_node_in(n, k, &View(self))
+    }
+
+    fn evaluate_node_in(&self, n: &Node, k: CellKey, env: &dyn Env) -> CellResult {
         let compiled = match &n.compiled {
             Ok(c) => c,
             Err(e) => return Err(CellError { msg: e.msg.clone(), span: e.span.clone(), kind: ErrKind::Local }),
@@ -1545,11 +1599,10 @@ impl Engine {
                 CellError { msg: format!("{label} has an error"), span: None, kind: ErrKind::Upstream(up) }
             })
         };
-        let env = View(self);
         if let Compiled::Program(ops) = &**compiled {
             // A program reads every cell it references, and reading one with an error fails:
             // one that ran had none upstream, so only a failure needs the check.
-            return run_program(&env, ops).map_err(|e| upstream().unwrap_or_else(|| local(e.msg, e.span)));
+            return run_program(env, ops).map_err(|e| upstream().unwrap_or_else(|| local(e.msg, e.span)));
         }
         if let Some(e) = upstream() {
             return Err(e);
@@ -1572,7 +1625,7 @@ impl Engine {
             }
             Compiled::UnitDef { name, body, offset } => {
                 self.dup_check(&self.syms.units, name, k, "unit")?;
-                let v = run_program(&env, body).map_err(|e| local(e.msg, e.span))?;
+                let v = run_program(env, body).map_err(|e| local(e.msg, e.span))?;
                 let Value::Num(n) = v else { return Err(local("a unit is defined by a number with units".into(), None)) };
                 let Some(f) = n.as_scalar() else { return Err(local("a unit is defined by a single number".into(), None)) };
                 if n.q.absolute.is_some() {
@@ -1584,6 +1637,111 @@ impl Engine {
                 Ok(Value::Unit(Arc::new(UnitInfo::new(name.clone(), n.q.dim.clone(), f, *offset, offset.map(|_| n.q.disp.clone())))))
             }
         }
+    }
+
+    // ---- sensitivities ---------------------------------------------------------
+
+    /// Forward-mode derivatives: how much each of `outputs` moves per unit of the number cell `seed`.
+    /// Re-evaluates the cells downstream of `seed` that the outputs read, carrying each value's
+    /// derivative alongside it, into a scratch overlay: the document and its results are untouched.
+    /// One pass per input, about the cost of a recalc of those cells.
+    ///
+    /// Each result has an output's shape, one derivative per element, in that output's units per the
+    /// input's (`yr/(USD/kW)`): it displays, and converts with `to[…]`, like any quantity. An output
+    /// that doesn't depend on `seed` gives zeros. The derivatives are local: through `min`, `max`,
+    /// `if` and comparisons they are the chosen branch's, so they can jump where the choice flips.
+    pub fn sensitivities(&self, seed: CellKey, outputs: &[CellKey]) -> Result<Vec<Num>, String> {
+        let label = |k: CellKey| self.wb.cell_label(k, None);
+        let input_q = match (self.kind(seed), self.res(&seed)) {
+            (Kind::Number, Some(Ok(Value::Num(n)))) => n.q.linear(),
+            (Kind::Number, Some(Err(e))) => return Err(format!("{} has an error: {}", label(seed), e.msg)),
+            _ => return Err(format!("{} isn't a number cell", label(seed))),
+        };
+        let ov = self.dual_pass(seed, outputs)?;
+        outputs
+            .iter()
+            .map(|&o| {
+                let a = self.cover.get(&o).copied().unwrap_or(o);
+                let v = match ov.get(&a) {
+                    Some(v) => v,
+                    None => match self.res(&a) {
+                        Some(Ok(v)) => v,
+                        Some(Err(e)) => return Err(format!("{} has an error: {}", label(a), e.msg)),
+                        None => return Err(format!("{} is empty", label(a))),
+                    },
+                };
+                let Value::Num(n) = v else { return Err(format!("{} isn't a number", label(a))) };
+                let qo = n.q.linear();
+                let q = Quant { dim: qo.dim.mul(&input_q.dim.inv()), disp: qo.disp.mul(&input_q.disp.pow(crate::rational::Rational::int(-1))), absolute: None };
+                let d = (0..n.len()).map(|i| n.tan_at(i)).collect();
+                Ok(Num::with_shape(n.shape.clone(), d, q))
+            })
+            .collect()
+    }
+
+    /// The overlay of a sensitivity pass seeded at `seed` (tangent 1 on each of its elements).
+    fn dual_pass(&self, seed: CellKey, outputs: &[CellKey]) -> Result<Overlay, String> {
+        let label = |k: CellKey| self.wb.cell_label(k, None);
+        let Some(Ok(Value::Num(n))) = self.res(&seed) else { return Err(format!("{} isn't a number", label(seed))) };
+        let mut ov = Overlay::default();
+        ov.insert(seed, Value::Num(n.clone().with_tan(Some(vec![1.0; n.len()]))));
+        let down = self.closure(vec![seed]);
+        for k in self.upstream_order(outputs, &down)? {
+            if k == seed {
+                continue;
+            }
+            let n = &self.nodes[&k];
+            match &n.result {
+                Some(Ok(_)) => {}
+                Some(Err(e)) => return Err(format!("{} has an error: {}", label(k), e.msg)),
+                None => return Err(format!("{} isn't computed", label(k))),
+            }
+            if n.kind == Kind::UnitDecl {
+                return Err(format!("{} reaches the unit definition at {}: sensitivities don't go through unit definitions", label(seed), label(k)));
+            }
+            let mut v = self.evaluate_node_in(n, k, &DualView { e: self, ov: &ov }).map_err(|e| format!("{}: {}", label(k), e.msg))?;
+            if let Value::Num(x) = &mut v {
+                x.prov = Provs::Cell(k, n.kind == Kind::Number);
+            }
+            ov.insert(k, v);
+        }
+        Ok(ov)
+    }
+
+    /// The nodes in `within` that `outputs` read, directly or not, dependencies first.
+    fn upstream_order(&self, outputs: &[CellKey], within: &HashSet<CellKey>) -> Result<Vec<CellKey>, String> {
+        let mut state: HashMap<CellKey, u8> = HashMap::default();
+        let mut order = Vec::new();
+        for &o in outputs {
+            let o = self.cover.get(&o).copied().unwrap_or(o);
+            if !within.contains(&o) || state.contains_key(&o) {
+                continue;
+            }
+            state.insert(o, 1);
+            let mut stack = vec![(o, self.eval_deps(o), 0)];
+            while let Some(top) = stack.last_mut() {
+                if top.2 < top.1.len() {
+                    let d = top.1[top.2];
+                    top.2 += 1;
+                    if !within.contains(&d) {
+                        continue;
+                    }
+                    match state.get(&d) {
+                        Some(2) => {}
+                        Some(_) => return Err(format!("{} is part of a cycle", self.wb.cell_label(d, None))),
+                        None => {
+                            state.insert(d, 1);
+                            stack.push((d, self.eval_deps(d), 0));
+                        }
+                    }
+                } else {
+                    let (k, _, _) = stack.pop().unwrap();
+                    state.insert(k, 2);
+                    order.push(k);
+                }
+            }
+        }
+        Ok(order)
     }
 
     fn dup_check(&self, table: &HashMap<String, CellKey>, name: &str, k: CellKey, what: &str) -> Result<(), CellError> {

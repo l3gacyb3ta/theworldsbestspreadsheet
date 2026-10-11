@@ -137,13 +137,73 @@ fn zip(a: &Num, b: &Num, q: Quant, f: impl Fn(f64, f64) -> f64) -> R<Num> {
     Ok(Num::with_shape(shape, data, q))
 }
 
+// ---- tangents ------------------------------------------------------------------------------
+// A sensitivity pass (`Engine::sensitivities`) carries each value's derivative with respect to one
+// input alongside it (`Num::tan`). Every word that computes says how a tangent goes through it, next
+// to how the value does; words that only move elements around move their tangents with them. A
+// plain recalc has no tangents, and each rule below starts by checking for none.
+
+/// `p·t`, where a zero tangent stays zero even when `p` isn't finite (`sqrt` at 0, `/` by 0): an
+/// input that doesn't reach this element can't make its derivative NaN.
+fn lin(p: f64, t: f64) -> f64 {
+    if t == 0.0 {
+        0.0
+    } else {
+        p * t
+    }
+}
+
+/// `map` with the chain rule: each tangent times `df` at its element.
+fn map_d(n: &Num, q: Quant, f: impl Fn(f64) -> f64, df: impl Fn(f64) -> f64) -> Num {
+    let r = map(n, q, f);
+    match &n.tan {
+        None => r,
+        Some(t) => r.with_tan(Some(n.data.iter().zip(t.iter()).map(|(x, t)| lin(df(*x), *t)).collect())),
+    }
+}
+
+/// `zip` with tangents: `d(x, y, tx, ty)` for each pair of elements, paired as `broadcast2` pairs them.
+fn zip_d(a: &Num, b: &Num, q: Quant, f: impl Fn(f64, f64) -> f64, d: impl Fn(f64, f64, f64, f64) -> f64) -> R<Num> {
+    let r = zip(a, b, q, f)?;
+    if a.tan.is_none() && b.tan.is_none() {
+        return Ok(r);
+    }
+    let t = pairs(a, b, |i, j| d(a.data[i], b.data[j], a.tan_at(i), b.tan_at(j)));
+    Ok(r.with_tan(Some(t)))
+}
+
+/// `f(i, j)` for element `i` of `a` and `j` of `b`, for each pair `broadcast2` makes (it has already
+/// checked that the shapes fit).
+fn pairs(a: &Num, b: &Num, f: impl Fn(usize, usize) -> f64) -> Vec<f64> {
+    let (la, lb) = (a.len(), b.len());
+    if a.shape == b.shape {
+        (0..la).map(|i| f(i, i)).collect()
+    } else if a.shape.len() <= b.shape.len() && b.shape.starts_with(&a.shape) {
+        let inner = (lb / la.max(1)).max(1);
+        (0..lb).map(|i| f(i / inner, i)).collect()
+    } else {
+        let inner = (la / lb.max(1)).max(1);
+        (0..la).map(|i| f(i, i / inner)).collect()
+    }
+}
+
+/// A value's tangents as an array of their own (zeros where it has none), for words that pick elements.
+fn tangents(n: &Num) -> Num {
+    Num::with_shape(n.shape.clone(), (0..n.len()).map(|i| n.tan_at(i)).collect(), Quant::none())
+}
+
+/// The sum of a value's tangents, in the same order as its values are summed.
+fn tan_sum(n: &Num) -> Option<f64> {
+    n.tan.as_ref().map(|t| t.iter().sum())
+}
+
 /// `+ - * /` on the two scalars on top of the stack, written into the lower one, when
 /// the result's units are simply the lower one's: same dimension for `+ -` (neither
 /// absolute), plain numbers for `* /`. The general path gives the same result; this
 /// one skips building a new value (most of a numeric model's work).
 fn arith_in_place(b: Builtin, st: &mut [Value]) -> bool {
     let [.., Value::Num(x), Value::Num(y)] = st else { return false };
-    if !x.shape.is_empty() || !y.shape.is_empty() || x.q.absolute.is_some() || y.q.absolute.is_some() {
+    if !x.shape.is_empty() || !y.shape.is_empty() || x.q.absolute.is_some() || y.q.absolute.is_some() || x.tan.is_some() || y.tan.is_some() {
         return false;
     }
     let plain = |q: &Quant| q.dim.is_none() && q.disp.is_none() && q.disp.factor == 1.0 && q.disp.offset == 0.0;
@@ -200,6 +260,9 @@ fn row_of(v: &Value, i: usize) -> R<Value> {
             let inner: usize = n.shape[1..].iter().product();
             let mut r = Num::with_shape(n.shape[1..].to_vec(), n.data[i * inner..(i + 1) * inner].to_vec(), n.q.clone());
             r.prov = slice_prov(&n.prov, i * inner, inner);
+            if let Some(t) = &n.tan {
+                r.set_tan(Some(t[i * inner..(i + 1) * inner].to_vec()));
+            }
             Ok(Value::Num(r))
         }
         Value::Text(t) => {
@@ -226,6 +289,8 @@ fn from_rows(rows: Vec<Value>, what: &str) -> R<Value> {
             let mut data = Vec::with_capacity(rows.len() * f.len());
             let traced = rows.iter().any(|r| matches!(r, Value::Num(n) if !n.prov.is_none()));
             let mut prov = Vec::with_capacity(if traced { rows.len() * f.len() } else { 0 });
+            let tanned = rows.iter().any(|r| matches!(r, Value::Num(n) if n.tan.is_some()));
+            let mut tan = Vec::with_capacity(if tanned { rows.len() * f.len() } else { 0 });
             for r in &rows {
                 let Value::Num(n) = r else { return Err(format!("{what}: mixed numbers and {}", r.type_name())) };
                 if n.shape != f.shape {
@@ -238,6 +303,9 @@ fn from_rows(rows: Vec<Value>, what: &str) -> R<Value> {
                 if traced {
                     prov.extend((0..n.len()).map(|i| n.prov.get(i)));
                 }
+                if tanned {
+                    tan.extend((0..n.len()).map(|i| n.tan_at(i)));
+                }
             }
             let mut shape = vec![rows.len()];
             shape.extend_from_slice(&f.shape);
@@ -245,7 +313,7 @@ fn from_rows(rows: Vec<Value>, what: &str) -> R<Value> {
                 Value::Num(n) => n.q.clone(),
                 _ => unreachable!(),
             };
-            let mut n = Num::with_shape(shape, data, q);
+            let mut n = Num::with_shape(shape, data, q).with_tan(tanned.then_some(tan));
             if traced {
                 n.prov = Provs::List(prov.into());
             }
@@ -347,7 +415,7 @@ impl<'e> Interp<'e> {
                 if n.q.absolute.is_some() && n.len() > 1 {
                     return Err(Step::Here("can't add absolute values (temperatures, dates)".into()));
                 }
-                return Ok(Value::Num(Num::scalar(n.data.iter().sum(), n.q.clone())));
+                return Ok(Value::Num(Num::scalar(n.data.iter().sum(), n.q.clone()).with_tan(tan_sum(n).map(|t| vec![t]))));
             }
         }
         let mut it = rows.into_iter();
@@ -404,15 +472,18 @@ impl<'e> Interp<'e> {
             }
             let disp = r.disp;
             let data = n.data.iter().map(|x| disp.to_canonical(*x)).collect();
-            return Ok(Num::with_shape(n.shape, data, Quant { dim: r.dim, disp, absolute: Some(delta) }));
+            let tan = n.tan.as_ref().map(|t| t.iter().map(|t| t * disp.factor).collect());
+            return Ok(Num::with_shape(n.shape, data, Quant { dim: r.dim, disp, absolute: Some(delta) }).with_tan(tan));
         }
         let q = n.q.linear();
         let f = r.disp.factor;
+        let tan = n.tan.as_ref().map(|t| t.iter().map(|t| t * f).collect());
         Ok(Num::with_shape(
             n.shape,
             n.data.iter().map(|x| x * f).collect(),
             Quant { dim: q.dim.mul(&r.dim), disp: q.disp.mul(&r.disp), absolute: None },
-        ))
+        )
+        .with_tan(tan))
     }
 
     fn convert(&self, mut n: Num, u: &UnitExpr) -> R<Num> {
@@ -479,7 +550,11 @@ impl<'e> Interp<'e> {
                     (Sub, None, Some(_)) => return Err(Step::Here("can't subtract an absolute value from a difference".into())),
                     _ => x.q.clone(),
                 };
-                let r = if b == Add { zip(&x, &y, q, |a, b| a + b)? } else { zip(&x, &y, q, |a, b| a - b)? };
+                let r = if b == Add {
+                    zip_d(&x, &y, q, |a, b| a + b, |_, _, ta, tb| ta + tb)?
+                } else {
+                    zip_d(&x, &y, q, |a, b| a - b, |_, _, ta, tb| ta - tb)?
+                };
                 st.push(Value::Num(r));
             }
             Mul | Div => {
@@ -499,7 +574,11 @@ impl<'e> Interp<'e> {
                 } else {
                     Quant { dim: qx.dim.mul(&qy.dim.inv()), disp: qx.disp.mul(&qy.disp.pow(Rational::int(-1))), absolute: None }
                 };
-                let r = if b == Mul { zip(&x, &y, q, |a, b| a * b)? } else { zip(&x, &y, q, |a, b| a / b)? };
+                let r = if b == Mul {
+                    zip_d(&x, &y, q, |a, b| a * b, |a, b, ta, tb| lin(b, ta) + lin(a, tb))?
+                } else {
+                    zip_d(&x, &y, q, |a, b| a / b, |a, b, ta, tb| lin(1.0 / b, ta) - lin(a / (b * b), tb))?
+                };
                 st.push(Value::Num(r));
             }
             Pow => {
@@ -516,12 +595,14 @@ impl<'e> Interp<'e> {
                             None => Quant::none(),
                         }
                     };
-                    st.push(Value::Num(zip(&x, &e, q, f64::powf)?));
+                    // d(aⁿ) = n·aⁿ⁻¹·da + aⁿ·ln a·dn
+                    st.push(Value::Num(zip_d(&x, &e, q, f64::powf, |a, n, ta, tn| lin(n * a.powf(n - 1.0), ta) + lin(a.powf(n) * a.ln(), tn))?));
                 } else {
                     let s = e.as_scalar().ok_or("^ on a quantity with units needs a single exponent")?;
                     let r = Rational::from_f64(s).ok_or("^ on a quantity with units needs a simple fractional exponent")?;
                     let q = Quant { dim: qx.dim.pow(r), disp: qx.disp.pow(r), absolute: None };
-                    st.push(Value::Num(map(&x, q, |v| v.powf(s))));
+                    // (the exponent is a fixed rational here: the result's dimension depends on it)
+                    st.push(Value::Num(map_d(&x, q, |v| v.powf(s), |v| s * v.powf(s - 1.0))));
                 }
             }
             Sqrt => {
@@ -529,14 +610,19 @@ impl<'e> Interp<'e> {
                 let qx = x.q.linear();
                 let h = Rational::new(1, 2);
                 let q = Quant { dim: qx.dim.pow(h), disp: qx.disp.pow(h), absolute: None };
-                st.push(Value::Num(map(&x, q, f64::sqrt)));
+                st.push(Value::Num(map_d(&x, q, f64::sqrt, |v| 0.5 / v.sqrt())));
             }
             Neg | Abs => {
                 let x = pop_num(st, name)?;
                 if x.q.absolute.is_some() {
                     return Err(Step::Here(format!("{name} of an absolute value (temperature, date) is meaningless")));
                 }
-                let r = if b == Neg { map(&x, x.q.clone(), |v| -v) } else { map(&x, x.q.clone(), f64::abs) };
+                // |a| at 0 has derivative 0
+                let r = if b == Neg {
+                    map_d(&x, x.q.clone(), |v| -v, |_| -1.0)
+                } else {
+                    map_d(&x, x.q.clone(), f64::abs, |v| if v > 0.0 { 1.0 } else if v < 0.0 { -1.0 } else { 0.0 })
+                };
                 st.push(Value::Num(r));
             }
             Exp | Log | Log10 | Log2 | Sin | Cos | Tan => {
@@ -544,16 +630,16 @@ impl<'e> Interp<'e> {
                 if !x.q.is_dimensionless() {
                     return Err(Step::Here(format!("{name} needs a dimensionless argument, got {}", x.q.dim)));
                 }
-                let f: fn(f64) -> f64 = match b {
-                    Exp => f64::exp,
-                    Log => f64::ln,
-                    Log10 => f64::log10,
-                    Log2 => f64::log2,
-                    Sin => f64::sin,
-                    Cos => f64::cos,
-                    _ => f64::tan,
+                let (f, df): (fn(f64) -> f64, fn(f64) -> f64) = match b {
+                    Exp => (f64::exp, f64::exp),
+                    Log => (f64::ln, |v| 1.0 / v),
+                    Log10 => (f64::log10, |v| 1.0 / (v * std::f64::consts::LN_10)),
+                    Log2 => (f64::log2, |v| 1.0 / (v * std::f64::consts::LN_2)),
+                    Sin => (f64::sin, f64::cos),
+                    Cos => (f64::cos, |v| -v.sin()),
+                    _ => (f64::tan, |v| 1.0 / (v.cos() * v.cos())),
                 };
-                st.push(Value::Num(map(&x, Quant::none(), f)));
+                st.push(Value::Num(map_d(&x, Quant::none(), f, df)));
             }
             Floor | Ceil | Round => {
                 let x = pop_num(st, name)?;
@@ -574,8 +660,10 @@ impl<'e> Interp<'e> {
                 }
                 let bq = bool_q();
                 let r = match b {
-                    Min => zip(&x, &y, x.q.clone(), f64::min)?,
-                    Max => zip(&x, &y, x.q.clone(), f64::max)?,
+                    // the derivative of the side chosen; a tie takes the left one's
+                    Min => zip_d(&x, &y, x.q.clone(), f64::min, |a, b, ta, tb| if a <= b { ta } else { tb })?,
+                    Max => zip_d(&x, &y, x.q.clone(), f64::max, |a, b, ta, tb| if a >= b { ta } else { tb })?,
+                    // comparisons are flat: no tangent
                     Lt => zip(&x, &y, bq, |a, b| (a < b) as u8 as f64)?,
                     Gt => zip(&x, &y, bq, |a, b| (a > b) as u8 as f64)?,
                     Le => zip(&x, &y, bq, |a, b| (a <= b) as u8 as f64)?,
@@ -610,7 +698,8 @@ impl<'e> Interp<'e> {
                         return Err(Step::Here("if with an array condition needs number branches".into()));
                     };
                     let picked = broadcast3(&c, &t, &e)?;
-                    st.push(Value::Num(Num::with_shape(picked.0, picked.1, t.q.clone())));
+                    let tan = if t.tan.is_some() || e.tan.is_some() { Some(broadcast3(&c, &tangents(&t), &tangents(&e))?.1) } else { None };
+                    st.push(Value::Num(Num::with_shape(picked.0, picked.1, t.q.clone()).with_tan(tan)));
                 }
             }
             Len => {
@@ -643,7 +732,8 @@ impl<'e> Interp<'e> {
                 }
                 let s: f64 = x.data.iter().sum();
                 let v = if b == Sum { s } else { s / x.len() as f64 };
-                st.push(Value::Num(Num::scalar(v, x.q.clone())));
+                let t = tan_sum(&x).map(|t| vec![if b == Sum { t } else { t / x.len() as f64 }]);
+                st.push(Value::Num(Num::scalar(v, x.q.clone()).with_tan(t)));
             }
             Rev => {
                 let v = pop(st, name)?;
@@ -699,8 +789,11 @@ impl<'e> Interp<'e> {
                 if ys.rank() != 1 {
                     return Err(Step::Here(format!("{name} needs a list of y values, got shape {:?}", ys.shape)));
                 }
+                // charts carry values only
+                let mut ys = ys;
+                ys.tan = None;
                 let xs = match xs {
-                    Value::Num(n) if n.rank() == 1 => Xs::Num(n),
+                    Value::Num(n) if n.rank() == 1 => Xs::Num(Num { tan: None, ..n }),
                     Value::Text(t) if t.shape.len() == 1 && b == Bar => Xs::Text(t),
                     Value::Text(_) => return Err(Step::Here(format!("{name} needs numeric x values (bar takes text categories)"))),
                     v => return Err(Step::Here(format!("{name} needs a list of x values, got {} {:?}", v.type_name(), v.shape()))),
@@ -797,22 +890,18 @@ impl<'e> Interp<'e> {
         let n = step_count(&n, what)?;
         check_shapes(&f, &s0, &s1, what)?;
         check_size(&s0, n, what)?;
-        let mut hist: Vec<Vec<f64>> = s0.iter().map(|s| Vec::with_capacity((n + 1) * s.len())).collect();
+        let mut hist = History::new(&s0, n);
         let mut cur = s0.clone();
         for step in 0..n {
-            for (h, s) in hist.iter_mut().zip(&cur) {
-                h.extend_from_slice(&s.data);
-            }
+            hist.push(&cur);
             let next = if step == 0 { s1.clone() } else { self.run_word(&f, cur.into_iter().map(Value::Num), k, what, span)? };
             // a step's units can depend on values (`2 [m] x ^`), so every step is checked
             keeps_units(&f, &s0, &next)?;
             check_shapes(&f, &s0, &next, what)?;
             cur = next;
         }
-        for (h, s) in hist.iter_mut().zip(&cur) {
-            h.extend_from_slice(&s.data);
-        }
-        push_histories(st, &s0, hist, n);
+        hist.push(&cur);
+        hist.push_onto(st, &s0, n);
         Ok(())
     }
 
@@ -850,25 +939,41 @@ impl<'e> Interp<'e> {
             return Err(Step::Here("rk4: the start time and the step are single numbers".into()));
         }
         check_size(&s0, n, what)?;
+        // the start time and the step can be inputs too: their tangents go into every stage
+        let (dt0, dh) = (t0.tan_at(0), h.tan_at(0));
         let (t0, h) = (t0.data[0], h.data[0]);
-        // s + c·d, elementwise, keeping s's units
-        let axpy = |s: &[Num], c: f64, d: &[Num]| -> Vec<Num> {
+        let time = |t: f64, dt: f64| (t, dt);
+        // s + c·d, elementwise, keeping s's units (dc: c's tangent)
+        let axpy = |s: &[Num], c: f64, dc: f64, d: &[Num]| -> Vec<Num> {
             s.iter()
                 .zip(d)
-                .map(|(s, d)| Num::with_shape(s.shape.clone(), s.data.iter().zip(d.data.iter()).map(|(x, y)| x + c * y).collect(), s.q.clone()))
+                .map(|(s, d)| {
+                    let r = Num::with_shape(s.shape.clone(), s.data.iter().zip(d.data.iter()).map(|(x, y)| x + c * y).collect(), s.q.clone());
+                    if s.tan.is_none() && d.tan.is_none() && dc == 0.0 {
+                        return r;
+                    }
+                    r.with_tan(Some((0..s.len()).map(|e| s.tan_at(e) + lin(c, d.tan_at(e)) + lin(d.data[e], dc)).collect()))
+                })
                 .collect()
         };
-        let mut hist: Vec<Vec<f64>> = s0.iter().map(|s| Vec::with_capacity((n + 1) * s.len())).collect();
+        let targs = |(t, dt): (f64, f64), s: &[Num]| {
+            let mut a = args(t, s);
+            if let Some(Value::Num(tn)) = a.first_mut() {
+                tn.set_tan((dt != 0.0).then(|| vec![dt]));
+            }
+            a
+        };
+        let mut hist = History::new(&s0, n);
         let mut cur = s0.clone();
         for i in 0..n {
-            for (hs, s) in hist.iter_mut().zip(&cur) {
-                hs.extend_from_slice(&s.data);
-            }
-            let t = t0 + i as f64 * h;
-            let k1 = if i == 0 { d0.clone() } else { self.run_word(&f, args(t, &cur), k, what, span)? };
-            let k2 = self.run_word(&f, args(t + h / 2.0, &axpy(&cur, h / 2.0, &k1)), k, what, span)?;
-            let k3 = self.run_word(&f, args(t + h / 2.0, &axpy(&cur, h / 2.0, &k2)), k, what, span)?;
-            let k4 = self.run_word(&f, args(t + h, &axpy(&cur, h, &k3)), k, what, span)?;
+            hist.push(&cur);
+            let t = time(t0 + i as f64 * h, dt0 + i as f64 * dh);
+            let mid = time(t.0 + h / 2.0, t.1 + dh / 2.0);
+            let end = time(t.0 + h, t.1 + dh);
+            let k1 = if i == 0 && dt0 == 0.0 { d0.clone() } else { self.run_word(&f, targs(t, &cur), k, what, span)? };
+            let k2 = self.run_word(&f, targs(mid, &axpy(&cur, h / 2.0, dh / 2.0, &k1)), k, what, span)?;
+            let k3 = self.run_word(&f, targs(mid, &axpy(&cur, h / 2.0, dh / 2.0, &k2)), k, what, span)?;
+            let k4 = self.run_word(&f, targs(end, &axpy(&cur, h, dh, &k3)), k, what, span)?;
             for ks in [&k1, &k2, &k3, &k4] {
                 for (j, (d, d0)) in ks.iter().zip(&d0).enumerate() {
                     if d.q.dim != d0.q.dim || d.q.absolute.is_some() {
@@ -882,14 +987,23 @@ impl<'e> Interp<'e> {
                 .enumerate()
                 .map(|(j, s)| {
                     let v = (0..s.len()).map(|e| s.data[e] + h / 6.0 * (k1[j].data[e] + 2.0 * k2[j].data[e] + 2.0 * k3[j].data[e] + k4[j].data[e])).collect();
-                    Num::with_shape(s.shape.clone(), v, s.q.clone())
+                    let r = Num::with_shape(s.shape.clone(), v, s.q.clone());
+                    if s.tan.is_none() && [&k1, &k2, &k3, &k4].iter().all(|ks| ks[j].tan.is_none()) && dh == 0.0 {
+                        return r;
+                    }
+                    let t = (0..s.len())
+                        .map(|e| {
+                            let sum = k1[j].data[e] + 2.0 * k2[j].data[e] + 2.0 * k3[j].data[e] + k4[j].data[e];
+                            let dsum = k1[j].tan_at(e) + 2.0 * k2[j].tan_at(e) + 2.0 * k3[j].tan_at(e) + k4[j].tan_at(e);
+                            s.tan_at(e) + lin(h / 6.0, dsum) + lin(sum, dh / 6.0)
+                        })
+                        .collect();
+                    r.with_tan(Some(t))
                 })
                 .collect();
         }
-        for (hs, s) in hist.iter_mut().zip(&cur) {
-            hs.extend_from_slice(&s.data);
-        }
-        push_histories(st, &s0, hist, n);
+        hist.push(&cur);
+        hist.push_onto(st, &s0, n);
         Ok(())
     }
 }
@@ -1007,12 +1121,39 @@ fn check_shapes(f: &Callee, s0: &[Num], got: &[Num], what: &str) -> R<()> {
     Ok(())
 }
 
-/// One array per state: its value after 0, 1, … n steps, along a new leading axis.
-fn push_histories(st: &mut Vec<Value>, s0: &[Num], hist: Vec<Vec<f64>>, n: usize) {
-    for (s, h) in s0.iter().zip(hist) {
-        let mut shape = vec![n + 1];
-        shape.extend_from_slice(&s.shape);
-        st.push(Value::Num(Num::with_shape(shape, h, s.q.clone())));
+/// Each state's values step after step, and their tangents once any state has one.
+struct History {
+    vals: Vec<Vec<f64>>,
+    tans: Option<Vec<Vec<f64>>>,
+}
+
+impl History {
+    fn new(s0: &[Num], n: usize) -> History {
+        History { vals: s0.iter().map(|s| Vec::with_capacity((n + 1) * s.len())).collect(), tans: None }
+    }
+
+    fn push(&mut self, cur: &[Num]) {
+        if self.tans.is_none() && cur.iter().any(|s| s.tan.is_some()) {
+            // the steps so far had none
+            self.tans = Some(self.vals.iter().map(|v| vec![0.0; v.len()]).collect());
+        }
+        for (j, s) in cur.iter().enumerate() {
+            self.vals[j].extend_from_slice(&s.data);
+            if let Some(t) = &mut self.tans {
+                t[j].extend((0..s.len()).map(|e| s.tan_at(e)));
+            }
+        }
+    }
+
+    /// One array per state: its value after 0, 1, … n steps, along a new leading axis.
+    fn push_onto(self, st: &mut Vec<Value>, s0: &[Num], n: usize) {
+        let mut tans = self.tans.map(|t| t.into_iter());
+        for (s, h) in s0.iter().zip(self.vals) {
+            let mut shape = vec![n + 1];
+            shape.extend_from_slice(&s.shape);
+            let t = tans.as_mut().and_then(|t| t.next());
+            st.push(Value::Num(Num::with_shape(shape, h, s.q.clone()).with_tan(t)));
+        }
     }
 }
 
@@ -1095,7 +1236,8 @@ fn transpose(v: Value) -> R<Value> {
                     d.push(n.data[i * c + j]);
                 }
             }
-            let mut t = Num::with_shape(vec![c, r], d, n.q.clone());
+            let tan = n.tan.as_ref().map(|t| (0..r * c).map(|e| t[(e % r) * c + e / r]).collect());
+            let mut t = Num::with_shape(vec![c, r], d, n.q.clone()).with_tan(tan);
             if !n.prov.is_none() {
                 t.prov = Provs::List((0..r * c).map(|e| n.prov.get((e % r) * c + e / r)).collect());
             }
@@ -1103,7 +1245,7 @@ fn transpose(v: Value) -> R<Value> {
         }
         Value::Num(n) if n.rank() == 1 => {
             let k = n.len();
-            Ok(Value::Num(Num { shape: vec![1, k].into(), data: n.data.clone(), q: n.q.clone(), prov: n.prov.clone() }))
+            Ok(Value::Num(Num { shape: vec![1, k].into(), ..n }))
         }
         Value::Text(t) if t.shape.len() == 2 => {
             let (r, c) = (t.shape[0], t.shape[1]);

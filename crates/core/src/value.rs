@@ -175,25 +175,53 @@ pub struct Num {
     pub data: Data,
     pub q: Quant,
     pub prov: Provs,
+    /// The derivative of each element with respect to one seeded input, in canonical units of this
+    /// value per canonical unit of the input (`None`: all zeros). Only a sensitivity pass seeds one
+    /// (`Engine::sensitivities`); a plain recalc never has any, so it only ever checks `is_none`.
+    /// (Boxed: it's rare, and every value carries the field.)
+    pub tan: Option<Box<Data>>,
 }
 
 impl Num {
     pub fn scalar(x: f64, q: Quant) -> Num {
-        Num { shape: Shape::SCALAR, data: Data::One(x), q, prov: Provs::None }
+        Num { shape: Shape::SCALAR, data: Data::One(x), q, prov: Provs::None, tan: None }
     }
     pub fn plain(x: f64) -> Num {
         Num::scalar(x, Quant::none())
     }
     pub fn vector(v: Vec<f64>, q: Quant) -> Num {
-        Num { shape: Shape::Small { rank: 1, dims: [v.len(), 0] }, data: v.into(), q, prov: Provs::None }
+        Num { shape: Shape::Small { rank: 1, dims: [v.len(), 0] }, data: v.into(), q, prov: Provs::None, tan: None }
     }
     pub fn with_shape(shape: impl Into<Shape>, v: Vec<f64>, q: Quant) -> Num {
         let shape = shape.into();
         debug_assert_eq!(shape.iter().product::<usize>(), v.len());
-        Num { shape, data: v.into(), q, prov: Provs::None }
+        Num { shape, data: v.into(), q, prov: Provs::None, tan: None }
     }
     pub fn rank(&self) -> usize {
         self.shape.len()
+    }
+    /// Element `i`'s tangent (0 when there's none).
+    #[inline]
+    pub fn tan_at(&self, i: usize) -> f64 {
+        self.tan.as_ref().map_or(0.0, |t| t[i])
+    }
+    /// Sets the tangents from one per element; all zeros (or none at all) store nothing.
+    #[inline]
+    pub fn set_tan(&mut self, t: Option<Vec<f64>>) {
+        let Some(t) = t else {
+            self.tan = None;
+            return;
+        };
+        debug_assert_eq!(t.len(), self.data.len());
+        self.tan = t.iter().any(|x| *x != 0.0).then(|| Box::new(Data::from(t)));
+    }
+    /// With tangents `t` (see `set_tan`).
+    #[inline]
+    pub fn with_tan(mut self, t: Option<Vec<f64>>) -> Num {
+        if t.is_some() {
+            self.set_tan(t);
+        }
+        self
     }
     pub fn len(&self) -> usize {
         self.data.len()
