@@ -509,6 +509,13 @@ impl Engine {
         }
     }
 
+    /// Whether `[unit]` means something here: its grammar, and every unit it names defined (built in or declared).
+    pub fn check_unit(&self, unit: &str) -> Result<(), String> {
+        let expr = crate::units::parse_unit(unit)?;
+        let view = View(self);
+        crate::units::resolve(&expr, &mut |n| view.unit_info(n)).map(|_| ())
+    }
+
     /// Every unit with its defining cell and current definition, sorted by name.
     pub fn units_list(&self) -> Vec<(String, CellKey, Option<Arc<UnitInfo>>)> {
         let mut v: Vec<_> = self

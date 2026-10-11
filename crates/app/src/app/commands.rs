@@ -18,6 +18,7 @@ pub enum Command {
     Copy,
     CopyValues,
     Paste,
+    PasteCsv,
     FillDown,
     ToggleTrace,
     Help,
@@ -39,6 +40,7 @@ impl Command {
             Command::Copy => "Copy",
             Command::CopyValues => "Copy Values",
             Command::Paste => "Paste",
+            Command::PasteCsv => "Paste CSV…",
             Command::FillDown => "Fill Down",
             Command::ToggleTrace => "Trace Precedents & Dependents",
             Command::Help => "Help for Selection",
@@ -63,6 +65,8 @@ impl Command {
             Command::Copy => (cmd, Key::C),
             Command::CopyValues => (cmd_shift, Key::C),
             Command::Paste => (cmd, Key::V),
+            // ⌥⇧⌘V (Ctrl+Alt+Shift+V): the integration sends it as a Paste event, which `keys` tells apart by its modifiers
+            Command::PasteCsv => (cmd_shift | Modifiers::ALT, Key::V),
             Command::FillDown => (cmd, Key::D),
             Command::ToggleTrace => return None,
             Command::Help => (Modifiers::NONE, Key::F1),
@@ -115,6 +119,10 @@ impl App {
             // a text field has no values to copy: ⇧⌘C there copies its selection
             Command::CopyValues if self.help.has_focus() => self.help.forward(Command::Copy),
             Command::CopyValues if self.settings.has_focus() => self.settings.forward(Command::Copy),
+            // a text field takes it as a plain paste
+            Command::PasteCsv if self.help.has_focus() => self.help.forward(Command::Paste),
+            Command::PasteCsv if self.settings.has_focus() => self.settings.forward(Command::Paste),
+            Command::PasteCsv if ctx.egui_wants_keyboard_input() || self.edit.is_some() => ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste),
             Command::CopyValues if ctx.egui_wants_keyboard_input() => ctx.send_viewport_cmd(egui::ViewportCommand::RequestCopy),
             Command::Undo | Command::Redo | Command::FillDown | Command::Cut | Command::Copy | Command::Paste if self.help.has_focus() => {
                 self.help.forward(c)
@@ -132,6 +140,7 @@ impl App {
             Command::Copy => ctx.send_viewport_cmd(egui::ViewportCommand::RequestCopy),
             Command::CopyValues => self.copy_values(ctx),
             Command::Paste => ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste),
+            Command::PasteCsv => self.request_csv_paste(ctx),
             Command::ToggleTrace => self.trace = !self.trace,
             Command::Help => self.context_help(),
             Command::SearchHelp => self.help.focus_search(),
@@ -187,7 +196,7 @@ impl App {
                 item(ui, Command::Undo, !self.undo.is_empty(), &mut picked);
                 item(ui, Command::Redo, !self.redo.is_empty(), &mut picked);
                 ui.separator();
-                for c in [Command::Cut, Command::Copy, Command::CopyValues, Command::Paste] {
+                for c in [Command::Cut, Command::Copy, Command::CopyValues, Command::Paste, Command::PasteCsv] {
                     item(ui, c, true, &mut picked);
                 }
                 ui.separator();
