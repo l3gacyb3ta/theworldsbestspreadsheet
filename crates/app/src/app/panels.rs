@@ -974,6 +974,48 @@ impl App {
         }
     }
 
+    /// How element `index` of `k` moves with each named input, one sensitivity pass per input,
+    /// recomputed only when the document changes. Returns an input clicked to go to it.
+    fn sensitivities_list(&mut self, ui: &mut Ui, k: CellKey, index: usize) -> Option<CellKey> {
+        let rev = self.eng.revision();
+        let fresh = self.sens_cache.as_ref().is_some_and(|(c, r, _)| *c == k && *r == rev);
+        if !fresh {
+            let out = match self.eng.result(k) {
+                Some(Ok(Value::Num(n))) => n.q.clone(),
+                _ => return None,
+            };
+            let rows = self.eng.input_sensitivities(k, index).map(|v| {
+                v.into_iter().map(|s| (s.input, s.name.clone(), s.per_step(&out), wbs_core::value::fmt_quantity(s.d, &s.q))).collect()
+            });
+            self.sens_cache = Some((k, rev, rows));
+        }
+        let Some((_, _, rows)) = &self.sens_cache else { return None };
+        let mut goto = None;
+        match rows {
+            Err(e) => {
+                ui.label(RichText::new(e).small().weak());
+            }
+            Ok(rows) if rows.is_empty() => {
+                ui.label(RichText::new("no named inputs upstream").small().weak());
+            }
+            Ok(rows) => {
+                egui::Grid::new("sens_rows").num_columns(2).striped(true).show(ui, |ui| {
+                    for (input, name, step, d) in rows {
+                        if ui.link(name).on_hover_text(format!("go to {name}")).clicked() {
+                            goto = Some(*input);
+                        }
+                        ui.label(RichText::new(step).small()).on_hover_text(format!("d/d{name} = {d}"));
+                        ui.end_row();
+                    }
+                });
+            }
+        }
+        if ui.link(RichText::new("about sensitivities  ?").small().weak()).clicked() {
+            self.help.show_page(Page::Topic("sensitivities"));
+        }
+        goto
+    }
+
     pub(super) fn inspector(&mut self, ui: &mut Ui) {
         let (r, c) = self.cursor;
         let k = self.key(r, c);
@@ -1054,6 +1096,21 @@ impl App {
                 let s = self.eng.trace_cell(k);
                 help_view::trace_table(ui, &text, &s);
             });
+        }
+        if let Shown::Value { value: Value::Num(n), dr, dc, anchor } = self.eng.shown(k) {
+            if self.eng.kind(anchor) == Kind::Program {
+                let index = match n.shape.as_slice() {
+                    [_, cols] => dr * cols + dc,
+                    _ => dr,
+                };
+                let mut goto = None;
+                egui::CollapsingHeader::new("Sensitivities").id_salt("sensitivities").default_open(false).show(ui, |ui| {
+                    goto = self.sensitivities_list(ui, anchor, index);
+                });
+                if let Some(g) = goto {
+                    self.goto(g);
+                }
+            }
         }
 
         ui.separator();

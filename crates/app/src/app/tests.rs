@@ -512,6 +512,42 @@ fn drag_derived_point_goal_seeks_an_input() {
 }
 
 #[test]
+fn goal_seek_drag_shows_the_local_sensitivity() {
+    let mut h = harness();
+    let (p, _) = revenue_point(&h, 7);
+    // the default input: start revenue (B3)
+    let to = p - Vec2::new(0.0, 60.0);
+    let slope = std::cell::RefCell::new(None);
+    drag_with_shot(&mut h, p, to, Modifiers::NONE, "12b_goal_slope", &|h| {
+        if let Drag::Goal(g) = &h.state().drag {
+            *slope.borrow_mut() = g.slope.clone();
+        }
+    });
+    // month 8 is start × 1.04⁷: about 1.316 USD per USD, so +10,000 USD of start revenue is ~13,159 USD
+    let s = slope.into_inner().expect("a sensitivity while dragging");
+    assert_eq!(s, "B17: 13,200 USD per +10,000 USD");
+}
+
+#[test]
+fn inspector_lists_sensitivities() {
+    let mut h = harness();
+    let p = center(&h, "B17");
+    click(&mut h, p, Modifiers::NONE);
+    h.get_by_label("Sensitivities").click();
+    h.run_steps(2);
+    shot(&mut h, "12c_inspector_sensitivities");
+    let rows = match &h.state().sens_cache {
+        Some((_, _, Ok(rows))) => rows.clone(),
+        other => panic!("{other:?}"),
+    };
+    let names: Vec<&str> = rows.iter().map(|r| r.1.as_str()).collect();
+    assert_eq!(names, ["start", "growth", "months"], "named inputs upstream of B17");
+    // months only sets how many there are: flat
+    assert!(rows[2].2.starts_with("0 USD per "), "{:?}", rows[2]);
+    assert!(rows[1].2.ends_with(" USD per +0.2 %") || rows[1].2.ends_with(" USD per +0.5 %"), "{:?}", rows[1]);
+}
+
+#[test]
 fn goal_seek_without_an_answer_changes_nothing() {
     let mut h = harness();
     let (p, _) = revenue_point(&h, 0);

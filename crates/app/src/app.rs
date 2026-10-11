@@ -158,7 +158,11 @@ struct GoalDrag {
     /// The last solve: the input's new text, or why there's no answer.
     outcome: Option<Result<String, String>>,
     solve_ms: f64,
+    /// After an answer: how the point moves with the input there (`breakeven: -0.8 yr per +100 USD/kW`).
+    slope: Option<String>,
 }
+
+type SensRows = Result<Vec<(CellKey, String, String, String)>, String>;
 
 /// The selected cell's precedents and dependents with their positions, for the trace
 /// overlay and the inspector. A cell can have thousands: kept while the graph holds.
@@ -271,6 +275,9 @@ pub struct App {
     goal_cands: std::cell::RefCell<Option<(CellKey, u64, std::rc::Rc<[CellKey]>)>>,
     /// Why the last goal-seek found no answer, shown at its point (target, element) until the next press.
     goal_note: Option<(CellKey, usize, String)>,
+    /// The inspector's sensitivities of a cell element at a document revision: per named input,
+    /// (input, name, "per step" text, the derivative itself), or why there are none.
+    sens_cache: Option<(CellKey, u64, SensRows)>,
     /// A goal-seek slower than this stops following the pointer and solves on release.
     goal_live_ms: f64,
     editor_rect: Option<Rect>,
@@ -350,6 +357,7 @@ impl App {
             goal_inputs: Default::default(),
             goal_cands: Default::default(),
             goal_note: None,
+            sens_cache: None,
             goal_live_ms: 50.0,
             editor_rect: None,
             trace: true,

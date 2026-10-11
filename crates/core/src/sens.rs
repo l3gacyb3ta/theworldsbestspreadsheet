@@ -33,9 +33,11 @@ impl InputSens {
     /// `-0.8 yr per +100 USD/kW`: the change for a round step of the input, in its own unit.
     pub fn per_step(&self, out: &Quant) -> String {
         let step = round_step(self.input_disp.to_display(self.value.abs()).max(self.span.map_or(0.0, |s| s / self.input_disp.factor / 10.0)));
-        let dy = self.d * step * self.input_disp.factor;
+        let out = out.linear();
+        // a readout, not a value to copy: three significant figures
+        let dy = out.disp.to_canonical(round_sig(out.disp.to_display(self.d * step * self.input_disp.factor), 3));
         let unit = if self.input_disp.is_none() { String::new() } else { format!(" {}", self.input_disp) };
-        format!("{} per +{}{unit}", fmt_quantity(dy, &out.linear()), group_thousands(&fmt_num(step)))
+        format!("{} per +{}{unit}", fmt_quantity(dy, &out), group_thousands(&fmt_num(step)))
     }
 
     /// What the tornado chart draws: the change across the input's range, or across a tenth of its
@@ -47,6 +49,14 @@ impl InputSens {
             None => Some((self.d * self.value.abs() / 10.0, "±10%")),
         }
     }
+}
+
+fn round_sig(x: f64, digits: i32) -> f64 {
+    if x == 0.0 || !x.is_finite() {
+        return x;
+    }
+    let p = 10f64.powi(digits - 1 - x.abs().log10().floor() as i32);
+    (x * p).round() / p
 }
 
 /// A round number near a tenth of `x` (1, 2 or 5 × a power of ten), for "per +100 USD/kW".
@@ -74,19 +84,33 @@ impl Engine {
     /// `MAX_INPUTS`.
     pub fn input_sensitivities(&self, k: CellKey, index: usize) -> Result<Vec<InputSens>, String> {
         let k = self.spill_anchor(k).unwrap_or(k);
-        let mut out = Vec::new();
         let named = self.upstream_inputs(k).into_iter().filter_map(|c| self.wb.names.iter().find(|(_, d)| d.cell == c && d.input).map(|(n, _)| (c, n.clone())));
+        let mut out = Vec::new();
         for (input, name) in named.take(MAX_INPUTS) {
-            if self.kind(input) != Kind::Number {
-                continue;
+            if self.kind(input) == Kind::Number {
+                out.push(self.input_sens(input, name, k, index)?);
             }
-            let Some(Ok(Value::Num(iv))) = self.result(input) else { continue };
-            let d = self.sensitivities(input, &[k])?.remove(0);
-            let Some(&dv) = d.data.get(index) else { return Err(format!("{} has no element {index}", self.wb.cell_label(k, None))) };
-            let span = self.input_range(input).and_then(|r| Some((r.max?.0 - r.min?.0) * iv.q.disp.factor));
-            out.push(InputSens { input, name, d: dv, q: d.q.clone(), input_disp: iv.q.linear().disp, span, value: iv.data[0] });
         }
         Ok(out)
+    }
+
+    /// How element `index` of `k` moves with the number cell `input`.
+    pub fn input_sens(&self, input: CellKey, name: String, k: CellKey, index: usize) -> Result<InputSens, String> {
+        let Some(Ok(Value::Num(iv))) = self.result(input) else { return Err(format!("{} isn't a number", self.wb.cell_label(input, None))) };
+        let d = self.sensitivities(input, &[k])?.remove(0);
+        let Some(&dv) = d.data.get(index) else { return Err(format!("{} has no element {index}", self.wb.cell_label(k, None))) };
+        let span = self.input_range(input).and_then(|r| Some((r.max?.0 - r.min?.0) * iv.q.disp.factor));
+        Ok(InputSens { input, name, d: dv, q: d.q.clone(), input_disp: iv.q.linear().disp, span, value: iv.data[0] })
+    }
+
+    /// `breakeven: -0.8 yr per +100 USD/kW`: element `index` of `k`'s local slope by `input`, for the
+    /// goal-seek drag's tooltip.
+    pub fn slope_text(&self, input: CellKey, k: CellKey, index: usize) -> Result<String, String> {
+        let a = self.spill_anchor(k).unwrap_or(k);
+        let Some(Ok(Value::Num(out))) = self.result(a) else { return Err(format!("{} isn't a number", self.wb.cell_label(a, None))) };
+        let s = self.input_sens(input, String::new(), a, index)?;
+        let what = self.name_of(a).map(str::to_string).unwrap_or_else(|| self.wb.cell_label(self.element_cell(a, index), Some(a.sheet)));
+        Ok(format!("{what}: {}", s.per_step(&out.q)))
     }
 
     /// The `sensitivity` word: a bar chart of how much element `index` of `k` swings with each named
@@ -120,6 +144,7 @@ impl Engine {
 mod tests {
     use super::round_step;
 
+
     #[test]
     fn round_steps() {
         assert_eq!(round_step(1200.0), 100.0);
@@ -127,5 +152,13 @@ mod tests {
         assert_eq!(round_step(0.3), 0.02);
         assert_eq!(round_step(0.0), 1.0);
         assert_eq!(round_step(80.0), 10.0);
+    }
+
+    #[test]
+    fn significant_figures() {
+        use super::round_sig;
+        assert_eq!(round_sig(13159.318, 3), 13200.0);
+        assert_eq!(round_sig(-0.081234, 3), -0.0812);
+        assert_eq!(round_sig(0.0, 3), 0.0);
     }
 }
