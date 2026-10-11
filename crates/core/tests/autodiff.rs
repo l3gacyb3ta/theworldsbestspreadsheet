@@ -179,7 +179,7 @@ fn every_word_matches_a_finite_difference() {
         ("", ""),
         &mut covered,
     );
-    let charts = ["line", "scatter", "path", "bar", "layer", "title", "xlabel", "ylabel", "size"];
+    let charts = ["line", "scatter", "path", "bar", "layer", "title", "xlabel", "ylabel", "size", "sensitivity"];
     let missing: Vec<&str> = BUILTINS.iter().map(|b| b.0).filter(|n| !covered.iter().any(|c| c == n) && !charts.contains(n)).collect();
     assert!(missing.is_empty(), "words without a derivative test: {missing:?}");
 }
@@ -394,4 +394,35 @@ fn newton_goal_seek_takes_fewer_evaluations() {
         }
     }
     println!("{}", report.join("\n"));
+}
+
+#[test]
+fn tornado_chart_of_named_inputs() {
+    let mut e = solar();
+    // ranges on two inputs: their bars span them; the rest swing ±10%
+    e.set_range("solarCost", "800 [USD/kW]", "1600 [USD/kW]").unwrap();
+    e.set_range("price", "0.2 [USD/(kW*h)]", "0.4 [USD/(kW*h)]").unwrap();
+    set(&mut e, "J1", "=G3 sensitivity");
+    let Some(Ok(Value::Chart(c))) = e.result(key(&e, "J1")) else { panic!("{}", show(&e, "J1")) };
+    let wbs_core::chart::Xs::Text(cats) = &c.layers[0].xs else { panic!() };
+    let ys = &c.layers[0].ys;
+    assert_eq!(cats.data.len(), 7, "{cats:?}");
+    // largest swing first
+    assert!(ys.data.windows(2).all(|w| w[0].abs() >= w[1].abs()), "{:?}", ys.data);
+    // the solar cost bar: d(payback)/d(cost) across 800 USD/kW
+    let i = cats.data.iter().position(|s| &**s == "solarCost (range)").unwrap();
+    let d = e.sensitivities(e.wb.names["solarCost"].cell, &[key(&e, "G3")]).unwrap().remove(0);
+    assert!((ys.data[i] - d.data[0] * 800.0).abs() < 1e-9 * ys.data[i].abs(), "{} vs {}", ys.data[i], d.data[0] * 800.0);
+    assert!(cats.data.iter().any(|s| &**s == "roundtrip (±10%)"), "{cats:?}");
+    assert_eq!(ys.q.dim.to_string(), "time");
+    // follows the model: a dearer system pays back slower, so the chart changes
+    let before = ys.data.to_vec();
+    set(&mut e, "B6", "500 [USD/(kW*h)]");
+    let Some(Ok(Value::Chart(c))) = e.result(key(&e, "J1")) else { panic!() };
+    assert_ne!(c.layers[0].ys.data.to_vec(), before);
+    // the inspector's list: per step of each input, in its own unit
+    let list = e.input_sensitivities(key(&e, "G3"), 0).unwrap();
+    let cost = list.iter().find(|s| s.name == "solarCost").unwrap();
+    let Some(Ok(Value::Num(out))) = e.result(key(&e, "G3")) else { panic!() };
+    assert!(cost.per_step(&out.q).ends_with(" yr per +100 USD/kW"), "{}", cost.per_step(&out.q));
 }

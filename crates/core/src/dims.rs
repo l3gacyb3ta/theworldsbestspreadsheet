@@ -724,6 +724,10 @@ impl<'e> Abs<'e> {
             }
             Iterate => self.iterate(st, span)?,
             Rk4 => self.rk4(st, span)?,
+            Sensitivity => {
+                self.pop_num(st, name)?;
+                st.push(SVal::Chart);
+            }
         }
         Ok(())
     }

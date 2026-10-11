@@ -26,6 +26,10 @@ pub trait Env {
     fn range_value(&self, sheet: SheetId, a: &StoredRef, b: &StoredRef, gaps: bool) -> Result<Value, String>;
     fn unit_info(&self, name: &str) -> Result<Arc<UnitInfo>, String>;
     fn word(&self, k: CellKey) -> Option<Arc<Compiled>>;
+    /// The `sensitivity` chart for element `i` of cell `k` (`Engine::tornado`).
+    fn tornado(&self, _k: CellKey, _i: usize) -> Result<Value, String> {
+        Err("sensitivity isn't available here".into())
+    }
 }
 
 type R<T> = Result<T, String>;
@@ -852,6 +856,19 @@ impl<'e> Interp<'e> {
             }
             Iterate => self.iterate(st, span)?,
             Rk4 => self.rk4(st, span)?,
+            Sensitivity => {
+                // which cell's value this is: a reference carries it
+                let x = pop_num(st, name)?;
+                if x.len() != 1 {
+                    return Err(Step::Here(format!("sensitivity needs a single number, got shape {:?}; pick one element (`last`, `pick`)", x.shape)));
+                }
+                let (k, i) = match x.prov.get(0) {
+                    crate::value::Prov::Derived(k, i) => (k, i),
+                    crate::value::Prov::Literal(_) => return Err(Step::Here("sensitivity: that's an input itself; give it a cell computed from inputs".into())),
+                    crate::value::Prov::None => return Err(Step::Here("sensitivity needs a cell's value (a reference like B10), not one computed here".into())),
+                };
+                st.push(self.env.tornado(k, i)?);
+            }
         }
         Ok(())
     }

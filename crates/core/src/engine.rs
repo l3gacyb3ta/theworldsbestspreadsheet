@@ -216,6 +216,9 @@ impl<'a> Env for View<'a> {
     fn word(&self, k: CellKey) -> Option<Arc<Compiled>> {
         self.0.nodes.get(&k)?.compiled.as_ref().ok().cloned()
     }
+    fn tornado(&self, k: CellKey, i: usize) -> Result<Value, String> {
+        self.0.tornado(k, i)
+    }
 }
 
 /// Values a sensitivity pass has computed, with tangents: the seeded input and the cells
@@ -240,6 +243,9 @@ impl<'a> Env for DualView<'a> {
     }
     fn word(&self, k: CellKey) -> Option<Arc<Compiled>> {
         Env::word(&View(self.e), k)
+    }
+    fn tornado(&self, _k: CellKey, _i: usize) -> Result<Value, String> {
+        Err("sensitivity can't run inside another sensitivity pass".into())
     }
 }
 

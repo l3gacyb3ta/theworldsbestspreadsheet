@@ -14,7 +14,7 @@ pub enum Builtin {
     Add, Sub, Mul, Div, Pow, Neg, Abs, Sqrt, Exp, Log, Log10, Log2, Sin, Cos, Tan,
     Floor, Ceil, Round, Min, Max, Dup, Drop, Swap, Over, Rot, Len, Range, If,
     Lt, Gt, Le, Ge, Eq, Ne, Not, Sum, Mean, Rev, Join, First, Last, Pick, Transpose, Reshape,
-    Couple, Pi, Line, Scatter, Path, Bar, Layer, Title, XLabel, YLabel, Size, Iterate, Rk4,
+    Couple, Pi, Line, Scatter, Path, Bar, Layer, Title, XLabel, YLabel, Size, Iterate, Rk4, Sensitivity,
 }
 
 pub const BUILTINS: &[(&str, Builtin, &str)] = {
@@ -77,6 +77,7 @@ pub const BUILTINS: &[(&str, Builtin, &str)] = {
         ("size", Size, "chart cols rows → chart spilling cols×rows cells"),
         ("iterate", Iterate, "n s1…sk 'step k → k arrays: the state after 0…n steps"),
         ("rk4", Rk4, "t0 h n s1…sk 'deriv k → k arrays: the ODE solved over n steps"),
+        ("sensitivity", Sensitivity, "x → bar chart of how x swings with each named input"),
     ]
 };
 
