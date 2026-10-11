@@ -259,3 +259,139 @@ fn what_a_pass_cant_do_it_says() {
     set(&mut e, "C3", "=a \"x\" +");
     assert!(e.sensitivities(key(&e, "A1"), &[key(&e, "C3")]).unwrap_err().contains("has an error"));
 }
+
+/// `out`'s derivative by `input` (a named cell), against a central difference.
+fn golden(e: &mut Engine, input: &str, out: &str) -> f64 {
+    let k = e.wb.names[input].cell;
+    let at = e.wb.cell_label(k, None);
+    let at = at.strip_prefix("Sheet1!").unwrap_or(&at).to_string();
+    let ok = key(e, out);
+    let d = e.sensitivities(k, &[ok]).unwrap().remove(0);
+    let text = e.wb.cell_text(k);
+    let (x, unit) = text.trim().split_once(' ').unwrap_or((text.trim(), ""));
+    let (x, unit): (f64, String) = (x.parse().unwrap(), unit.into());
+    let h = 1e-5 * x.abs().max(1e-3);
+    let mut f = |x: f64| {
+        set(e, &at, &format!("{x} {unit}"));
+        (nums(e, k)[0], *nums(e, ok).last().unwrap())
+    };
+    let ((xp, fp), (xm, fm)) = (f(x + h), f(x - h));
+    set(e, &at, &text);
+    let fd = (fp - fm) / (xp - xm);
+    let ad = *d.data.last().unwrap();
+    assert!((ad - fd).abs() <= 1e-4 * fd.abs().max(ad.abs()).max(1e-9), "d {out}/d {input}: tangent {ad}, finite difference {fd}");
+    ad
+}
+
+/// The spring from the help page: position over 40 steps of rk4.
+fn spring() -> Engine {
+    let mut e = Engine::new(default_workbook());
+    for (at, text, name) in [
+        ("B1", "4 [N/m]", "spring"),
+        ("B2", "1.5 [kg]", "mass"),
+        ("B3", "0.5 [N*s/m]", "damping"),
+        ("B4", "0.25 [s]", "timestep"),
+        ("B5", "1 [m]", "x0"),
+        ("B6", "0.3 [m/s]", "v0"),
+    ] {
+        set(&mut e, at, text);
+        e.set_name(name, Some(key(&e, at)), true).unwrap();
+    }
+    set(&mut e, "A9", ": msd { t x v } v   spring mass / x * neg   damping mass / v * - ;");
+    set(&mut e, "C1", "=0 [s] timestep 40 x0 v0 'msd 2 rk4 drop");
+    e
+}
+
+#[test]
+fn spring_sensitivities_match_finite_differences() {
+    let mut e = spring();
+    for input in ["spring", "mass", "damping", "timestep", "x0", "v0"] {
+        golden(&mut e, input, "C1");
+    }
+    // typed: metres of final position per N·s/m of damping
+    let d = e.sensitivities(e.wb.names["damping"].cell, &[key(&e, "C1")]).unwrap().remove(0);
+    assert_eq!(d.q.dim.to_string(), "length*time/mass");
+}
+
+const HOURS: usize = 24 * 14;
+
+/// A home solar and battery system: an hourly battery `iterate` over two weeks, scaled to a year of
+/// savings, and the years until the system pays for itself.
+fn solar() -> Engine {
+    let mut e = Engine::new(default_workbook());
+    for (at, text, name) in [
+        ("B1", "5 [kW]", "solarSize"),
+        ("B2", "1200 [USD/kW]", "solarCost"),
+        ("B3", "5.5 [kW*h]", "batteryCapacity"),
+        ("B4", "3 [kW]", "batteryPower"),
+        ("B5", "0.9", "roundtrip"),
+        ("B6", "400 [USD/(kW*h)]", "batteryCost"),
+        ("B7", "0.3 [USD/(kW*h)]", "price"),
+    ] {
+        set(&mut e, at, text);
+        e.set_name(name, Some(key(&e, at)), true).unwrap();
+    }
+    set(&mut e, "A1", "1 [h]");
+    e.set_name("dt", Some(key(&e, "A1")), false).unwrap();
+    set(&mut e, "A2", ": chg { n soc } n roundtrip * batteryCapacity soc - min batteryPower dt * min ;");
+    set(&mut e, "A3", ": dis { n soc } n neg soc min batteryPower dt * min ;");
+    set(
+        &mut e,
+        "A4",
+        ": step { i soc cum } i 1 +   net i pick 0 [kW*h] > soc net i pick soc chg + soc net i pick soc dis - if   cum net i pick 0 [kW*h] > 0 [kW*h] net i pick soc dis if + ;",
+    );
+    // sun per kW of panels, and the house's use
+    for h in 0..HOURS {
+        let sun = (((h % 24) as f64 - 6.0) / 12.0 * std::f64::consts::PI).sin().max(0.0) * (0.7 + 0.3 * ((h / 24 * 5 % 7) as f64 / 7.0));
+        let used = 0.6 + 0.4 * ((h * 7 % 11) as f64 / 11.0);
+        set(&mut e, &format!("C{}", h + 1), &format!("{sun:.3}"));
+        set(&mut e, &format!("D{}", h + 1), &format!("{used:.3} [kW*h]"));
+    }
+    set(&mut e, "E1", &format!("=C1:C{HOURS} solarSize * dt *"));
+    e.set_name("gen", Some(key(&e, "E1")), false).unwrap();
+    set(&mut e, "F1", &format!("=E1:E{HOURS} D1:D{HOURS} -"));
+    e.set_name("net", Some(key(&e, "F1")), false).unwrap();
+    set(&mut e, "G1", "=net len 0 0 [kW*h] 0 [kW*h] 'step 3 iterate last swap drop swap drop");
+    set(&mut e, "G2", &format!("=E1:E{HOURS} D1:D{HOURS} min sum G1 + price * {} 1 [yr] / *", 8760.0 / HOURS as f64));
+    set(&mut e, "G3", "=solarSize solarCost * batteryCapacity batteryCost * + G2 /");
+    e
+}
+
+#[test]
+fn solar_breakeven_sensitivities_match_finite_differences() {
+    let mut e = solar();
+    assert!(show(&e, "G3").ends_with(" yr"), "{}", show(&e, "G3"));
+    for input in ["solarSize", "solarCost", "batteryCapacity", "batteryPower", "roundtrip", "batteryCost", "price"] {
+        golden(&mut e, input, "G3");
+    }
+    // years of payback per USD/kW of panel price
+    let d = e.sensitivities(e.wb.names["solarCost"].cell, &[key(&e, "G3")]).unwrap().remove(0);
+    assert_eq!(d.q.dim.to_string(), "length^2*mass/(currency*time^2)");
+    assert!(fmt_quantity(d.data[0], &d.q).ends_with(" yr*kW/USD"), "{}", fmt_quantity(d.data[0], &d.q));
+}
+
+#[test]
+fn newton_goal_seek_takes_fewer_evaluations() {
+    use wbs_core::solve::Goal;
+    let mut e = solar();
+    let g3 = key(&e, "G3");
+    let yr = |e: &Engine| nums(e, g3)[0];
+    let now = yr(&e);
+    let mut report = Vec::new();
+    for (input, want) in [("solarCost", now * 0.8), ("solarSize", now * 0.95), ("batteryCapacity", now * 1.05), ("price", now * 0.7)] {
+        let k = e.wb.names[input].cell;
+        let goal = Goal::new(g3, 0, want, want * 1e-6, k, Some(6));
+        let n = e.goal_seek(&goal).unwrap_or_else(|m| panic!("{input}: {m}"));
+        let b = e.goal_seek(&Goal { newton: false, ..goal.clone() }).unwrap_or_else(|m| panic!("{input}: {m}"));
+        report.push(format!("{input}: newton {} evals ({}), bracketing {} ({})", n.evals, n.text, b.evals, b.text));
+        assert!(n.evals < b.evals, "{}", report.join("\n"));
+        // both land on the target
+        for s in [&n, &b] {
+            let before = e.wb.cell_text(k);
+            e.set_text(k, &s.text);
+            assert!((yr(&e) - want).abs() < want * 1e-4, "{input} = {} gives {} yr, not {want}", s.text, yr(&e));
+            e.set_text(k, &before);
+        }
+    }
+    println!("{}", report.join("\n"));
+}

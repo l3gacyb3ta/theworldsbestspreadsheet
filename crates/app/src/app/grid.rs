@@ -364,6 +364,7 @@ impl App {
             tol: (a.y1 - a.y0).abs() / 1000.0 * a.disp.factor.abs(),
             input: g.input,
             decimals: Some(g.decimals + if g.fine { 2 } else { 0 }),
+            newton: true,
         };
         let t = std::time::Instant::now();
         let res = self.eng.goal_seek(&goal);

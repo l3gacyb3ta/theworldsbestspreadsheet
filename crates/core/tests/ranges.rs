@@ -133,7 +133,7 @@ fn goal_seek_stays_inside_the_range() {
     set(&mut e, "B2", "=x x *");
     let k = key(&e, "B1");
     e.set_name("x", Some(k), true).unwrap();
-    let goal = Goal { target: key(&e, "B2"), index: 0, want: 4.0, tol: 1e-9, input: k, decimals: Some(3) };
+    let goal = Goal { target: key(&e, "B2"), index: 0, want: 4.0, tol: 1e-9, input: k, decimals: Some(3), newton: true };
     // unbounded, the nearer root
     assert_eq!(e.goal_seek(&goal).unwrap().text, "-2.000");
     // x ≥ -1 leaves only the other one
@@ -303,7 +303,7 @@ fn goal_seek_uses_a_referenced_ends_value() {
     let k = key(&e, "B1");
     e.set_name("x", Some(k), true).unwrap();
     e.set_range("x", "C1", "").unwrap();
-    let goal = Goal { target: key(&e, "B2"), index: 0, want: 4.0, tol: 1e-9, input: k, decimals: Some(3) };
+    let goal = Goal { target: key(&e, "B2"), index: 0, want: 4.0, tol: 1e-9, input: k, decimals: Some(3), newton: true };
     assert_eq!(e.goal_seek(&goal).unwrap().text, "2.000");
     set(&mut e, "C1", "-3");
     assert_eq!(e.goal_seek(&goal).unwrap().text, "-2.000");

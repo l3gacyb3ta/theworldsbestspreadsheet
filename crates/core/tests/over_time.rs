@@ -230,7 +230,7 @@ fn results_are_derived_so_charts_goal_seek_through_them() {
     let Some(Ok(Value::Chart(c))) = e.result(key(&e, "C1")) else { panic!() };
     assert_eq!(c.layers[0].ys.prov.get(10), Prov::Derived(key(&e, "B1"), 10));
     // drag x(1 s) to half a metre: the rate is ln 2
-    let goal = Goal { target: key(&e, "B1"), index: 10, want: 0.5, tol: 1e-6, input: key(&e, "A1"), decimals: Some(4) };
+    let goal = Goal { target: key(&e, "B1"), index: 10, want: 0.5, tol: 1e-6, input: key(&e, "A1"), decimals: Some(4), newton: true };
     let s = e.goal_seek(&goal).unwrap();
     assert_eq!(s.text, "0.6931 [1/s]");
 }
