@@ -5,7 +5,7 @@ use super::*;
 use crate::chart_view::{self, Tip};
 use std::collections::HashSet;
 use wbs_core::bounds::InputRange;
-use wbs_core::solve::Goal;
+use wbs_core::solve::{Goal, Goal2};
 
 impl App {
     fn geometry(&self, area: Rect) -> Geo {
@@ -184,6 +184,21 @@ impl App {
                             ctx.set_cursor_icon(CursorIcon::ResizeVertical);
                             chart_view::tooltip_lines(ctx, pos, &[Tip::Value(label.clone()), Tip::Action(format!("drag to edit {}", self.label(k)))]);
                         }
+                        (Prov::Derived(yt, yi), None) if hit.two_d && matches!(hit.xprov, Prov::Derived(..)) && self.goal_pair_choice_for(hit).is_some() => {
+                            let Prov::Derived(xt, xi) = hit.xprov else { unreachable!() };
+                            let (pair, pairs) = self.goal_pair_choice(xt, yt).unwrap();
+                            ctx.set_cursor_icon(CursorIcon::Move);
+                            let mut tip = vec![Tip::Value(label.clone()), Tip::Action(format!("drag to solve for {} and {}", self.input_name(pair[0]), self.input_name(pair[1])))];
+                            if pairs.len() > 1 {
+                                let at = pairs.iter().position(|p| *p == pair).unwrap_or(0);
+                                let next = pairs[(at + 1) % pairs.len()];
+                                tip.push(Tip::Note(format!("click to switch to {} and {}", self.input_name(next[0]), self.input_name(next[1]))));
+                            }
+                            tip.push(Tip::Note(format!("hold Alt to lock to one axis and goal-seek {} alone", self.input_name(pair[0]))));
+                            let (xe, ye) = (self.eng.element_cell(xt, xi), self.eng.element_cell(yt, yi));
+                            tip.push(Tip::Note(format!("computed in {} and {}", self.label(xe), self.label(ye))));
+                            chart_view::tooltip_lines(ctx, pos, &tip);
+                        }
                         (Prov::Derived(k, i), None) => {
                             let elem = self.eng.element_cell(k, i);
                             let from = if elem == k { format!("computed in {}", self.label(k)) } else { format!("{}, spilled from {}", self.label(elem), self.label(k)) };
@@ -299,10 +314,16 @@ impl App {
     /// the first, unless a click on one of its points switched it.
     fn goal_choice(&self, target: CellKey) -> Option<(CellKey, std::rc::Rc<[CellKey]>)> {
         let rev = self.eng.revision();
-        let cached = self.goal_cands.borrow().as_ref().filter(|(t, r, _)| *t == target && *r == rev).map(|(_, _, c)| c.clone());
+        let cached = self.goal_cands.borrow().iter().find(|(t, r, _)| *t == target && *r == rev).map(|(_, _, c)| c.clone());
         let cands = cached.unwrap_or_else(|| {
             let c: std::rc::Rc<[CellKey]> = self.eng.upstream_inputs(target).into();
-            *self.goal_cands.borrow_mut() = Some((target, rev, c.clone()));
+            // (two: a 2D point asks for its x's and its y's every frame)
+            let mut cache = self.goal_cands.borrow_mut();
+            cache.retain(|(_, r, _)| *r == rev);
+            if cache.len() >= 2 {
+                cache.remove(0);
+            }
+            cache.push((target, rev, c.clone()));
             c
         });
         let pick = self.goal_inputs.get(&target).copied().filter(|k| cands.contains(k)).or(cands.first().copied())?;
@@ -329,6 +350,226 @@ impl App {
             Shown::Error(e) => e.short().to_string(),
             Shown::Empty => String::new(),
         }
+    }
+
+    /// The number cells upstream of a 2D point's x or y (named first, at most six), its pairs of them in
+    /// order, and the pair a drag solves for: the first two, unless clicks on the point moved on.
+    fn goal_pair_choice(&self, xt: CellKey, yt: CellKey) -> Option<([CellKey; 2], Vec<[CellKey; 2]>)> {
+        let mut cands: Vec<CellKey> = Vec::new();
+        for t in [xt, yt] {
+            let (_, c) = self.goal_choice(t)?;
+            for k in c.iter() {
+                if !cands.contains(k) {
+                    cands.push(*k);
+                }
+            }
+        }
+        // named first, across both
+        let named = |k: &CellKey| self.eng.name_of(*k).is_none();
+        cands.sort_by_key(named);
+        cands.truncate(6);
+        let pairs: Vec<[CellKey; 2]> = (0..cands.len()).flat_map(|i| (i + 1..cands.len()).map(move |j| (i, j))).map(|(i, j)| [cands[i], cands[j]]).collect();
+        let at = self.goal_pairs.get(&(xt, yt)).copied().unwrap_or(0);
+        let pick = *pairs.get(at % pairs.len().max(1))?;
+        Some((pick, pairs))
+    }
+
+    fn goal_pair_choice_for(&self, hit: &PointHit) -> Option<[CellKey; 2]> {
+        match (hit.xprov, hit.prov) {
+            (Prov::Derived(xt, _), Prov::Derived(yt, _)) => self.goal_pair_choice(xt, yt).map(|p| p.0),
+            _ => None,
+        }
+    }
+
+    fn goal2_update(&mut self, ctx: &egui::Context, g: &mut Goal2Drag, pos: Pos2, mods: Modifiers) {
+        g.pointer = pos;
+        if !g.moved {
+            if pos.distance(g.press) < 3.0 {
+                ctx.set_cursor_icon(CursorIcon::Move);
+                return;
+            }
+            g.moved = true;
+        }
+        // Alt locks to the axis moved along most since the press, and solves for the first input alone
+        let d = pos - g.press;
+        let lock = if !mods.alt {
+            None
+        } else if d.x.abs() > d.y.abs() {
+            Some(true)
+        } else if d.y.abs() > d.x.abs() {
+            Some(false)
+        } else {
+            g.lock
+        };
+        ctx.set_cursor_icon(match lock {
+            Some(true) => CursorIcon::ResizeHorizontal,
+            Some(false) => CursorIcon::ResizeVertical,
+            None => CursorIcon::Move,
+        });
+        if g.axis.xdisp.is_none() {
+            return;
+        }
+        let want = (g.axis.x_from_screen(pos.x), g.axis.from_screen(pos.y));
+        if g.want == Some(want) && g.fine == mods.shift && g.lock == lock {
+            return;
+        }
+        (g.want, g.fine, g.lock) = (Some(want), mods.shift, lock);
+        if g.live {
+            self.goal2_run(g, true);
+        }
+    }
+
+    /// Solves for the pointer's point and writes the inputs, or puts both back if there's no answer.
+    fn goal2_run(&mut self, g: &mut Goal2Drag, live: bool) {
+        let (Some((wx, wy)), Some(xdisp)) = (g.want, g.axis.xdisp.clone()) else { return };
+        let a = &g.axis;
+        let extra = if g.fine { 2 } else { 0 };
+        // a thousandth of each axis: finer than the pointer can aim
+        let (tx, ty) = ((a.x1 - a.x0).abs() / 1000.0 * xdisp.factor.abs(), (a.y1 - a.y0).abs() / 1000.0 * a.disp.factor.abs());
+        let t = std::time::Instant::now();
+        let res: Result<[String; 2], String> = match g.lock {
+            Some(along_x) => {
+                let ((k, i), want, tol) = if along_x { (g.x, xdisp.to_canonical(wx), tx) } else { (g.y, a.disp.to_canonical(wy), ty) };
+                let goal = Goal::new(k, i, want, tol, g.inputs[0], Some(g.decimals[0] + extra));
+                // the other input goes back to where it was
+                if self.eng.wb.cell(g.inputs[1]) != g.origs[1].as_ref() {
+                    self.eng.apply(Edit::Cells(vec![(g.inputs[1], g.origs[1].clone())]));
+                }
+                self.eng.goal_seek(&goal).map(|s| [s.text, self.eng.wb.cell_text(g.inputs[1])])
+            }
+            None => {
+                let goal = Goal2 {
+                    x: g.x,
+                    y: g.y,
+                    want: [xdisp.to_canonical(wx), a.disp.to_canonical(wy)],
+                    tol: [tx, ty],
+                    inputs: g.inputs,
+                    decimals: [Some(g.decimals[0] + extra), Some(g.decimals[1] + extra)],
+                };
+                self.eng.goal_seek_2d(&goal).map(|s| s.texts)
+            }
+        };
+        g.solve_ms = t.elapsed().as_secs_f64() * 1000.0;
+        self.last_recalc_ms = g.solve_ms;
+        let restore = |app: &mut App, g: &Goal2Drag| {
+            let back: Vec<_> = (0..2).filter(|&i| app.eng.wb.cell(g.inputs[i]) != g.origs[i].as_ref()).map(|i| (g.inputs[i], g.origs[i].clone())).collect();
+            if !back.is_empty() {
+                app.eng.apply(Edit::Cells(back));
+            }
+        };
+        if live && g.solve_ms > self.goal_live_ms {
+            g.live = false;
+            g.outcome = None;
+            restore(self, g);
+            return;
+        }
+        g.outcome = Some(match res {
+            Ok(texts) => {
+                // both cells in one edit: one recalc
+                let cells: Vec<_> = (0..2)
+                    .filter(|&i| texts[i] != self.eng.wb.cell_text(g.inputs[i]))
+                    .map(|i| (g.inputs[i], Some(Cell::new(self.eng.wb.parse_text(&texts[i], g.inputs[i].sheet)))))
+                    .collect();
+                if !cells.is_empty() {
+                    self.eng.apply(Edit::Cells(cells));
+                }
+                let written: Vec<String> = (0..2)
+                    .filter(|&i| g.lock.is_none() || i == 0)
+                    .map(|i| format!("{} = {}", self.eng.name_of(g.inputs[i]).map(str::to_string).unwrap_or_else(|| self.label(g.inputs[i])), texts[i]))
+                    .collect();
+                Ok(written.join(", "))
+            }
+            Err(e) => {
+                restore(self, g);
+                Err(e)
+            }
+        });
+    }
+
+    fn goal2_end(&mut self, mut g: Goal2Drag) {
+        if !g.moved {
+            // a click: the next pair
+            if let Some((pick, pairs)) = self.goal_pair_choice(g.x.0, g.y.0) {
+                let at = pairs.iter().position(|p| *p == pick).unwrap_or(0);
+                self.goal_pairs.insert((g.x.0, g.y.0), (at + 1) % pairs.len());
+                let next = pairs[(at + 1) % pairs.len()];
+                self.status = Some(format!("dragging this point now solves for {} and {}", self.input_name(next[0]), self.input_name(next[1])));
+            }
+            return;
+        }
+        if !g.live {
+            self.goal2_run(&mut g, false);
+        }
+        match &g.outcome {
+            Some(Ok(text)) => self.status = Some(format!("goal-seek: {text}")),
+            Some(Err(e)) => {
+                self.status = Some(format!("goal-seek: no answer — {e}"));
+                self.goal_note = Some((g.y.0, g.y.1, e.clone()));
+            }
+            None => {}
+        }
+        let undo: Vec<_> = (0..2).filter(|&i| self.eng.wb.cell(g.inputs[i]) != g.origs[i].as_ref()).map(|i| (g.inputs[i], g.origs[i].clone())).collect();
+        if !undo.is_empty() {
+            self.undo.push(Edit::Cells(undo));
+            self.redo.clear();
+        }
+    }
+
+    /// The ghost crosshair at the pointer's point and what the solve says, while dragging a computed 2D point.
+    fn paint_goal2(&self, ctx: &egui::Context, cp: &Painter, pal: &Pal) {
+        let Drag::Goal2(g) = &self.drag else { return };
+        let (Some((wx, wy)), Some(xdisp)) = (g.want, &g.axis.xdisp) else { return };
+        if !g.moved {
+            return;
+        }
+        let (x, y) = (g.axis.x_to_screen(wx), g.axis.to_screen(wy));
+        let plot = g.axis.plot;
+        let dash = Stroke::new(1.5, pal.sel);
+        match g.lock {
+            Some(true) => cp.extend(egui::Shape::dashed_line(&[Pos2::new(x, plot.top()), Pos2::new(x, plot.bottom())], dash, 5.0, 4.0)),
+            Some(false) => cp.extend(egui::Shape::dashed_line(&[Pos2::new(plot.left(), y), Pos2::new(plot.right(), y)], dash, 5.0, 4.0)),
+            None => {
+                cp.extend(egui::Shape::dashed_line(&[Pos2::new(plot.left(), y), Pos2::new(plot.right(), y)], dash, 5.0, 4.0));
+                cp.extend(egui::Shape::dashed_line(&[Pos2::new(x, plot.top()), Pos2::new(x, plot.bottom())], dash, 5.0, 4.0));
+            }
+        }
+        let ring = match g.lock {
+            Some(true) => Pos2::new(x, g.at.y),
+            Some(false) => Pos2::new(g.at.x, y),
+            None => Pos2::new(x, y),
+        };
+        cp.circle_stroke(ring, 5.0, Stroke::new(2.0, pal.sel));
+        let short = |v: f64, lo: f64, hi: f64, d: &wbs_core::units::DispUnit| {
+            let res = ((hi - lo).abs() / 1000.0).max(f64::MIN_POSITIVE);
+            let step = 10f64.powf(res.log10().floor());
+            let n = wbs_core::value::group_thousands(&wbs_core::value::fmt_num((v / step).round() * step));
+            if d.is_none() { n } else { format!("{n} {d}") }
+        };
+        let (sx, sy) = (short(wx, g.axis.x0, g.axis.x1, xdisp), short(wy, g.axis.y0, g.axis.y1, &g.axis.disp));
+        let pair = format!("{} and {}", self.input_name(g.inputs[0]), self.input_name(g.inputs[1]));
+        let head = match g.lock {
+            Some(true) => format!("goal: x = {sx}"),
+            Some(false) => format!("goal: y = {sy}"),
+            None => format!("goal: ({sx}, {sy})"),
+        };
+        let mut tip = vec![Tip::Value(head)];
+        let solving = if g.lock.is_some() { self.input_name(g.inputs[0]) } else { pair };
+        match &g.outcome {
+            _ if !g.live => {
+                tip.push(Tip::Action(format!("release to solve for {solving}")));
+                tip.push(Tip::Note(format!("a solve takes {:.0} ms, too slow to follow the pointer", g.solve_ms)));
+            }
+            Some(Ok(text)) => tip.push(Tip::Action(text.clone())),
+            Some(Err(e)) => {
+                tip.push(Tip::Action(format!("no answer: {solving} stay as they were")));
+                tip.push(Tip::Note(e.to_string()));
+            }
+            None => tip.push(Tip::Note(format!("solving for {solving}…"))),
+        }
+        if g.lock.is_some() {
+            tip.push(Tip::Note(format!("locked to {} — release Alt to solve for both", if g.lock == Some(true) { "x" } else { "y" })));
+        }
+        chart_view::tooltip_lines(ctx, g.pointer, &tip);
     }
 
     fn goal_update(&mut self, ctx: &egui::Context, g: &mut GoalDrag, pos: Pos2, mods: Modifiers) {
@@ -570,6 +811,33 @@ impl App {
                     self.drag = Drag::Point { y, x, axis, press: pos };
                     return;
                 }
+                // both computed, on a scatter or path: solve two inputs so it lands under the pointer
+                if let (true, Prov::Derived(xt, xi), Prov::Derived(yt, yi)) = (hit.two_d, hit.xprov, hit.prov) {
+                    if let Some((inputs, _)) = self.goal_pair_choice(xt, yt) {
+                        let decimals = inputs.map(|k| ops::cell_literal(&self.eng.wb.cell_text(k)).map_or(0, |l| l.decimals));
+                        let origs = inputs.map(|k| self.eng.wb.cell(k).cloned());
+                        let g = Goal2Drag {
+                            x: (xt, xi),
+                            y: (yt, yi),
+                            inputs,
+                            origs,
+                            axis: axis.clone(),
+                            at: hit.pos,
+                            press: pos,
+                            pointer: pos,
+                            decimals,
+                            fine: false,
+                            moved: false,
+                            live: true,
+                            want: None,
+                            lock: None,
+                            outcome: None,
+                            solve_ms: 0.0,
+                        };
+                        self.drag = Drag::Goal2(Box::new(g));
+                        return;
+                    }
+                }
                 if let Prov::Derived(target, index) = hit.prov {
                     if let Some((input, _)) = self.goal_choice(target) {
                         let decimals = ops::cell_literal(&self.eng.wb.cell_text(input)).map_or(0, |l| l.decimals);
@@ -629,6 +897,12 @@ impl App {
             let Drag::Goal(mut gd) = std::mem::replace(&mut self.drag, Drag::None) else { unreachable!() };
             self.goal_update(ctx, &mut gd, pos, mods);
             self.drag = Drag::Goal(gd);
+            return;
+        }
+        if let Drag::Goal2(_) = self.drag {
+            let Drag::Goal2(mut gd) = std::mem::replace(&mut self.drag, Drag::None) else { unreachable!() };
+            self.goal2_update(ctx, &mut gd, pos, mods);
+            self.drag = Drag::Goal2(gd);
             return;
         }
         let autoscroll = matches!(self.drag, Drag::Select | Drag::Ref { .. } | Drag::Fill { .. } | Drag::Move { .. });
@@ -713,7 +987,7 @@ impl App {
                     self.last_recalc_ms = t.elapsed().as_secs_f64() * 1000.0;
                 }
             }
-            Drag::Goal(_) => {}
+            Drag::Goal(_) | Drag::Goal2(_) => {}
             Drag::Point { y, x, axis, press } => {
                 // Alt locks a 2D drag to the axis moved along most since the press (neither, until one leads);
                 // the other cell stays exactly as it was
@@ -799,6 +1073,7 @@ impl App {
                 self.move_block(src, (dst.r0, dst.c0));
             }
             Drag::Goal(g) => self.goal_end(*g),
+            Drag::Goal2(g) => self.goal2_end(*g),
             Drag::Scrub { key, orig, .. } => {
                 self.pinned = None;
                 if self.eng.wb.cell(key) != orig.as_ref() {
@@ -979,6 +1254,7 @@ impl App {
                 // the chart under a point drag keeps its ranges
                 let held = match &self.drag {
                     Drag::Goal(g) => Some(&g.axis),
+                    Drag::Goal2(g) => Some(&g.axis),
                     Drag::Point { axis, .. } => Some(axis),
                     _ => None,
                 };
@@ -1088,6 +1364,7 @@ impl App {
         self.chart_hits = chart_hits;
         self.paint_goal_note(&cp, pal);
         self.paint_goal(ctx, &cp, pal);
+        self.paint_goal2(ctx, &cp, pal);
     }
 
     fn cell_editor(&mut self, ui: &mut Ui, g: &Geo, pal: &Pal, sid: SheetId) {

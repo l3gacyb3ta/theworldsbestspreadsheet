@@ -30,6 +30,10 @@ pub trait Env {
     fn tornado(&self, _k: CellKey, _i: usize) -> Result<Value, String> {
         Err("sensitivity isn't available here".into())
     }
+    /// The number cell element `i` of cell `k` comes straight from (`Engine::literal_source`).
+    fn literal_source(&self, _k: CellKey, _i: usize) -> Option<CellKey> {
+        None
+    }
 }
 
 type R<T> = Result<T, String>;
@@ -794,11 +798,16 @@ impl<'e> Interp<'e> {
                 if ys.rank() != 1 {
                     return Err(Step::Here(format!("{name} needs a list of y values, got shape {:?}", ys.shape)));
                 }
-                // charts carry values only
+                // charts carry values only, and each point's cells as far back as they go
                 let mut ys = ys;
                 ys.tan = None;
+                self.trace_back(&mut ys);
                 let xs = match xs {
-                    Value::Num(n) if n.rank() == 1 => Xs::Num(Num { tan: None, ..n }),
+                    Value::Num(mut n) if n.rank() == 1 => {
+                        n.tan = None;
+                        self.trace_back(&mut n);
+                        Xs::Num(n)
+                    }
                     Value::Text(t) if t.shape.len() == 1 && b == Bar => Xs::Text(t),
                     Value::Text(_) => return Err(Step::Here(format!("{name} needs numeric x values (bar takes text categories)"))),
                     v => return Err(Step::Here(format!("{name} needs a list of x values, got {} {:?}", v.type_name(), v.shape()))),
@@ -872,6 +881,38 @@ impl<'e> Interp<'e> {
             }
         }
         Ok(())
+    }
+
+    /// Points read from another cell's array (`=xs vs path`) are that cell's elements; where one came
+    /// straight from a number cell, the point is that cell's, so dragging it writes the cell.
+    fn trace_back(&self, n: &mut Num) {
+        let derived = |p: &Provs| match p {
+            Provs::None => false,
+            Provs::List(l) => l.iter().any(|p| matches!(p, crate::value::Prov::Derived(..))),
+            _ => true,
+        };
+        if !derived(&n.prov) {
+            return;
+        }
+        use crate::value::Prov;
+        // (most charts' points trace back to nothing: build a new list only when one does)
+        let mut traced: Option<Vec<Prov>> = None;
+        for i in 0..n.len() {
+            let p = n.prov.get(i);
+            let lit = match p {
+                Prov::Derived(k, j) => self.env.literal_source(k, j).map(Prov::Literal),
+                _ => None,
+            };
+            if let (None, Some(_)) = (&traced, lit) {
+                traced = Some((0..i).map(|e| n.prov.get(e)).collect());
+            }
+            if let Some(t) = &mut traced {
+                t.push(lit.unwrap_or(p));
+            }
+        }
+        if let Some(t) = traced {
+            n.prov = Provs::List(t.into());
+        }
     }
 
     /// Runs `f` on a stack holding just `args`, and checks that it leaves `k` numbers.
@@ -1163,14 +1204,21 @@ impl History {
         }
     }
 
-    /// One array per state: its value after 0, 1, … n steps, along a new leading axis.
+    /// One array per state: its value after 0, 1, … n steps, along a new leading axis. The first
+    /// row is the start, unchanged, so it keeps the start's provenance (a chart point there drags
+    /// the start's cell); every later step computes.
     fn push_onto(self, st: &mut Vec<Value>, s0: &[Num], n: usize) {
         let mut tans = self.tans.map(|t| t.into_iter());
         for (s, h) in s0.iter().zip(self.vals) {
             let mut shape = vec![n + 1];
             shape.extend_from_slice(&s.shape);
             let t = tans.as_mut().and_then(|t| t.next());
-            st.push(Value::Num(Num::with_shape(shape, h, s.q.clone()).with_tan(t)));
+            let mut v = Num::with_shape(shape, h, s.q.clone()).with_tan(t);
+            if !s.prov.is_none() {
+                // (a list shorter than the array: the rest have none)
+                v.prov = Provs::List((0..s.len()).map(|e| s.prov.get(e)).collect());
+            }
+            st.push(Value::Num(v));
         }
     }
 }

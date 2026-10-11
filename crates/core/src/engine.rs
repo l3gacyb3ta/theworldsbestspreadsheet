@@ -65,6 +65,9 @@ struct Node {
     deps: Vec<Dep>,
     stat: Option<Static>,
     result: Option<CellResult>,
+    /// Where each element of the result came from, as the program left it, before `recalc` stamped
+    /// the result as this cell's own (`literal_source`). Usually `None`: only rearranging keeps it.
+    sources: Provs,
 }
 
 /// A node's result from the static dimension pass (`dims`).
@@ -219,6 +222,9 @@ impl<'a> Env for View<'a> {
     fn tornado(&self, k: CellKey, i: usize) -> Result<Value, String> {
         self.0.tornado(k, i)
     }
+    fn literal_source(&self, k: CellKey, i: usize) -> Option<CellKey> {
+        self.0.literal_source(k, i)
+    }
 }
 
 /// Values a sensitivity pass has computed, with tangents: the seeded input and the cells
@@ -246,6 +252,9 @@ impl<'a> Env for DualView<'a> {
     }
     fn tornado(&self, _k: CellKey, _i: usize) -> Result<Value, String> {
         Err("sensitivity can't run inside another sensitivity pass".into())
+    }
+    fn literal_source(&self, k: CellKey, i: usize) -> Option<CellKey> {
+        self.e.literal_source(k, i)
     }
 }
 
@@ -469,6 +478,26 @@ impl Engine {
         found.sort_by_key(|c| (!named.contains(c), self.wb.pos(*c)));
         found.dedup();
         found
+    }
+
+    /// The number cell element `i` of `k`'s value comes straight from, through rearranging words
+    /// (`rev`, `pick`, a reference, an `iterate` or `rk4` history's start…) in any number of cells:
+    /// dragging that element writes the cell. `None` once anything computes it.
+    pub fn literal_source(&self, k: CellKey, i: usize) -> Option<CellKey> {
+        let (mut k, mut i) = (k, i);
+        // (a chain of references is as long as the sheet's; cycles have no results)
+        for _ in 0..256 {
+            let n = self.nodes.get(&k)?;
+            if n.kind == Kind::Number {
+                return Some(k);
+            }
+            match n.sources.get(i) {
+                Prov::Literal(c) => return Some(c),
+                Prov::Derived(k2, j) if k2 != k => (k, i) = (k2, j),
+                _ => return None,
+            }
+        }
+        None
     }
 
     pub fn name_of(&self, k: CellKey) -> Option<&str> {
@@ -1180,7 +1209,7 @@ impl Engine {
 
     fn compile_node(&self, k: CellKey, text: &str) -> Node {
         if let Some(e) = self.dead_sheet_ref(k) {
-            return Node { kind: classify(text), compiled: Err(Box::new(e)), deps: vec![], stat: None, result: None };
+            return Node { kind: classify(text), compiled: Err(Box::new(e)), deps: vec![], stat: None, result: None, sources: Provs::None };
         }
         let mut c = Compiler::new(&self.wb, &self.syms, k.sheet);
         let compiled = c.compile(text).map(Arc::new).map_err(Box::new);
@@ -1188,7 +1217,7 @@ impl Engine {
         if let Some(r) = self.ranges.get(&k) {
             c.deps.extend(r.deps.iter().cloned());
         }
-        Node { kind: classify(text), compiled, deps: c.deps, stat: None, result: None }
+        Node { kind: classify(text), compiled, deps: c.deps, stat: None, result: None, sources: Provs::None }
     }
 
     /// A reference into a deleted sheet renders as `#ref!`; say which kind of deletion it was.
@@ -1462,10 +1491,13 @@ impl Engine {
                 changed_positions.extend(changed);
                 // Stamp the provenance a reference to this cell carries once, here, so
                 // every reference is an Arc clone instead of a fresh allocation.
-                if let Ok(Value::Num(n)) = &mut res {
-                    n.prov = Provs::Cell(k, kind == Kind::Number);
-                }
-                self.nodes.get_mut(&k).unwrap().result = Some(res);
+                let sources = match &mut res {
+                    Ok(Value::Num(n)) => std::mem::replace(&mut n.prov, Provs::Cell(k, kind == Kind::Number)),
+                    _ => Provs::None,
+                };
+                let node = self.nodes.get_mut(&k).unwrap();
+                node.result = Some(res);
+                node.sources = sources;
             }
             if changed_positions.is_empty() {
                 return reusable.map(|o| (dirty, o));

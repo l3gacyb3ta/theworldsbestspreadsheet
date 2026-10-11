@@ -129,10 +129,11 @@ These are the things that make Excel good and are non-negotiable:
 - Charts are built by composing words, not via a wizard: `xs ys line`, `xs ys scatter`, `xs ys path` (points joined in the order given), `cats vals bar`, plus composition words for layering, axes, labels. Axes use the values' units automatically.
 - **Bidirectional editing, v0 scope**: dragging a point that is bound directly to a literal input cell writes that cell. Points backed by derived values are not draggable in v0 but show, on hover, which input they would solve for.
 - **Later**: dragging a derived point picks one upstream input and goal-seeks it with a 1-D root finder ("what growth rate makes this hit 1M").
+- A scatter or path point whose x and y are both derived solves for a pair of upstream inputs at once (Newton on the 2×2 Jacobian from sensitivities, damped, inside both inputs' ranges, starting from their current values; no answer, no change). The first element of an `iterate`/`rk4` history is its start state unchanged, so it is bound to the start's cell like a rearranged value.
 
 ## 8. out of scope for v0
 
-Collaboration/sync, structured tables (use Grist/Airtable), Excel import/export, log units, auto unit simplification, multi-variable solving.
+Collaboration/sync, structured tables (use Grist/Airtable), Excel import/export, log units, auto unit simplification, solving for more than two inputs at once.
 
 ## suggested build order
 

@@ -274,6 +274,159 @@ fn scatter_point_drags_diagonally_in_one_undo_step() {
     assert_eq!((source(&h, "A2"), source(&h, "B2")), ("2.0".to_string(), "20 [m]".to_string()));
 }
 
+/// The spring from the help page, named, with its phase plot (position against speed) at E1.
+fn spring_phase_plot() -> Harness<'static, App> {
+    let mut h = sheet_with(&[
+        ("B1", "4 [N/m]"),
+        ("B2", "1 [kg]"),
+        ("B3", "0.5 [N*s/m]"),
+        ("B4", "0.25 [s]"),
+        ("B5", "40"),
+        ("B6", "1.0 [m]"),
+        ("B7", "0.0 [m/s]"),
+    ]);
+    for (at, name) in [("B1", "spring"), ("B2", "mass"), ("B3", "damping"), ("B4", "timestep"), ("B5", "steps"), ("B6", "x0"), ("B7", "v0")] {
+        let k = cell_key(&h, at);
+        h.state_mut().eng.set_name(name, Some(k), true).unwrap();
+    }
+    for (at, text) in [
+        ("A9", ": msd { t x v } v   spring mass / x * neg   damping mass / v * - ;"),
+        ("C1", "=0 [s] timestep steps x0 v0 'msd 2 rk4 drop"),
+        ("D1", "=0 [s] timestep steps x0 v0 'msd 2 rk4 swap drop"),
+        ("E1", "=C1 D1 path 5 14 size"),
+    ] {
+        let k = cell_key(&h, at);
+        h.state_mut().eng.set_text(k, text);
+    }
+    h.run_steps(3);
+    h
+}
+
+#[test]
+fn a_phase_plots_first_point_is_its_start_and_drags_in_2d() {
+    let mut h = spring_phase_plot();
+    let (p, two_d) = point_at(&h, "B6", "B7");
+    assert!(two_d);
+    let cursor = hover_cursor(&mut h, p);
+    shot(&mut h, "70_phase_start_hover");
+    assert_eq!(cursor, CursorIcon::Move, "drawn and dragged like any cell-bound point");
+    drag_with_shot(&mut h, p, p + Vec2::new(-40.0, -30.0), Modifiers::NONE, "71_phase_start_dragging", &|h| {
+        assert!(num(h, "B6") < 1.0 && num(h, "B7") > 0.0, "x0 and v0 follow the pointer live");
+    });
+    let (x0, v0) = (source(&h, "B6"), source(&h, "B7"));
+    assert!(x0.ends_with(" [m]") && x0.split_whitespace().next().unwrap().split('.').nth(1).map(str::len) == Some(1), "own decimals and unit: {x0}");
+    assert!(v0.ends_with(" [m/s]"), "{v0}");
+    assert_eq!((h.state().undo.len(), undo_cells(&h)), (1, 2), "one undo step writing both");
+    key_cmd(&mut h, Key::Z);
+    assert_eq!((source(&h, "B6"), source(&h, "B7")), ("1.0 [m]".to_string(), "0.0 [m/s]".to_string()));
+    // every later point is computed: it goal-seeks
+    let c1 = cell_key(&h, "C1");
+    assert!(h.state().chart_hits.iter().any(|(p, _)| p.xprov == Prov::Derived(c1, 1)));
+}
+
+#[test]
+fn a_phase_plots_start_locks_to_an_axis_and_stops_at_ranges() {
+    let mut h = spring_phase_plot();
+    let (p, _) = point_at(&h, "B6", "B7");
+    let steps: Vec<(Vec2, Modifiers)> = (1..=6).map(|i| (Vec2::new(-10.0, -2.0) * i as f32, Modifiers::ALT)).collect();
+    drag_steps(&mut h, p, &steps, &|_, _| {});
+    assert!(num(&h, "B6") < 1.0, "{}", source(&h, "B6"));
+    assert_eq!(source(&h, "B7"), "0.0 [m/s]", "Alt: only x moves");
+    key_cmd(&mut h, Key::Z);
+    h.state_mut().eng.set_range("v0", "", "0.5 [m/s]").unwrap();
+    h.run_steps(2);
+    let (p, _) = point_at(&h, "B6", "B7");
+    drag_with_shot(&mut h, p, p + Vec2::new(0.0, -400.0), Modifiers::NONE, "72_phase_start_at_max", &|h| {
+        assert_eq!(source(h, "B7"), "0.5 [m/s]", "v0 stops at its max");
+    });
+    assert_eq!(source(&h, "B7"), "0.5 [m/s]");
+}
+
+/// Where the phase plot draws point `i`, and its axes.
+fn phase_point(h: &Harness<'static, App>, i: usize) -> (Pos2, YAxis) {
+    let c1 = cell_key(h, "C1");
+    let hit = h.state().chart_hits.iter().find(|(p, _)| p.xprov == Prov::Derived(c1, i)).map(|(p, a)| (p.pos, a.clone()));
+    hit.expect("phase point on the chart")
+}
+
+/// Point `i` of the phase plot, in display units (m, m/s).
+fn phase_value(h: &Harness<'static, App>, i: usize) -> (f64, f64) {
+    let v = |at: &str| match h.state().eng.result(cell_key(h, at)) {
+        Some(Ok(Value::Num(n))) => n.shown(i),
+        other => panic!("{other:?}"),
+    };
+    (v("C1"), v("D1"))
+}
+
+#[test]
+fn a_computed_phase_point_solves_for_two_inputs() {
+    let mut h = spring_phase_plot();
+    // where point 4 would be with a stiffer, more damped spring
+    for (at, text) in [("B1", "5 [N/m]"), ("B3", "0.7 [N*s/m]")] {
+        let k = cell_key(&h, at);
+        h.state_mut().eng.set_text(k, text);
+    }
+    h.run_steps(2);
+    let want = phase_value(&h, 4);
+    for (at, text) in [("B1", "4 [N/m]"), ("B3", "0.5 [N*s/m]")] {
+        let k = cell_key(&h, at);
+        h.state_mut().eng.set_text(k, text);
+    }
+    h.run_steps(2);
+    let (p, axis) = phase_point(&h, 4);
+    // the first two named inputs upstream; a click moves on to the next pair
+    let cursor = hover_cursor(&mut h, p);
+    shot(&mut h, "73_phase_point_hover");
+    assert_eq!(cursor, CursorIcon::Move);
+    click(&mut h, p, Modifiers::NONE);
+    assert_eq!(h.state().status.as_deref(), Some("dragging this point now solves for spring (B1) and damping (B3)"));
+    assert_eq!(h.state().undo.len(), 0, "a click changes nothing");
+    let to = Pos2::new(axis.x_to_screen(want.0), axis.to_screen(want.1));
+    drag_with_shot(&mut h, p, to, Modifiers::NONE, "74_phase_point_solving", &|h| assert!(matches!(h.state().drag, Drag::Goal2(_))));
+    shot(&mut h, "75_phase_point_solved");
+    let got = phase_value(&h, 4);
+    // within a thousandth of each axis (plus the inputs' rounding to their decimals)
+    assert!((got.0 - want.0).abs() < (axis.x1 - axis.x0) * 0.004 && (got.1 - want.1).abs() < (axis.y1 - axis.y0) * 0.004, "{got:?} vs {want:?}");
+    assert!(source(&h, "B1").ends_with(" [N/m]") && source(&h, "B3").ends_with(" [N*s/m]"), "{} {}", source(&h, "B1"), source(&h, "B3"));
+    assert_eq!((h.state().undo.len(), undo_cells(&h)), (1, 2), "one undo step writing both");
+    assert!(h.state().status.as_deref().unwrap_or("").starts_with("goal-seek: spring = "), "{:?}", h.state().status);
+    key_cmd(&mut h, Key::Z);
+    assert_eq!((source(&h, "B1"), source(&h, "B3")), ("4 [N/m]".to_string(), "0.5 [N*s/m]".to_string()));
+}
+
+#[test]
+fn an_unreachable_phase_point_changes_nothing_and_says_why() {
+    let mut h = spring_phase_plot();
+    // a positive spring and mass never swing it past where it starts (x0 = 1 m)
+    for (name, lo) in [("spring", "0.1 [N/m]"), ("mass", "0.1 [kg]")] {
+        h.state_mut().eng.set_range(name, lo, "").unwrap();
+    }
+    h.run_steps(2);
+    let (p, axis) = phase_point(&h, 4);
+    let to = Pos2::new(axis.x_to_screen(1.6), p.y);
+    drag_with_shot(&mut h, p, to, Modifiers::NONE, "76_phase_point_unreachable", &|_| {});
+    shot(&mut h, "77_phase_point_note");
+    assert_eq!((source(&h, "B1"), source(&h, "B2")), ("4 [N/m]".to_string(), "1 [kg]".to_string()));
+    assert_eq!(h.state().undo.len(), 0);
+    let note = h.state().goal_note.as_ref().map(|n| n.2.clone()).unwrap_or_default();
+    assert!(note.starts_with("can't reach") || note.starts_with("out of reach"), "{note}");
+}
+
+#[test]
+fn alt_locks_a_computed_2d_point_to_one_input() {
+    let mut h = spring_phase_plot();
+    let (p, _) = phase_point(&h, 4);
+    let steps: Vec<(Vec2, Modifiers)> = (1..=6).map(|i| (Vec2::new(2.0, -8.0) * i as f32, Modifiers::ALT)).collect();
+    drag_steps(&mut h, p, &steps, &|h, i| {
+        if let Drag::Goal2(g) = &h.state().drag {
+            assert_eq!(g.lock, Some(false), "step {i}: locked to y");
+        }
+    });
+    assert_ne!(source(&h, "B1"), "4 [N/m]", "the first input (spring) is solved");
+    assert_eq!(source(&h, "B2"), "1 [kg]", "the second stays");
+    assert_eq!((h.state().undo.len(), undo_cells(&h)), (1, 1));
+}
+
 #[test]
 fn scatter_drag_pins_x_at_its_range_while_y_moves() {
     let mut h = sheet_with(&[XY.as_slice(), &[("D1", "=A1:A3 B1:B3 scatter")]].concat());
@@ -417,14 +570,17 @@ fn only_the_literal_axis_of_a_point_moves() {
     drag(&mut h, p, p + Vec2::new(50.0, -40.0), Modifiers::NONE);
     assert!(num(&h, "A2") > 2.0, "{}", source(&h, "A2"));
     assert_eq!(source(&h, "B2"), b2, "the computed y isn't solved for");
-    // both computed: the y goal-seeks, up and down only
+    // both computed: solves two inputs at once (here A2 for x and B2 for y, once a click picks them)
     h.state_mut().eng.set_text(k, "=F1 G1 scatter");
     h.run_steps(2);
     let (p, _) = point_at(&h, "F1", "G1");
-    assert_eq!(hover_cursor(&mut h, p), CursorIcon::ResizeVertical);
-    let a = source(&h, "A2");
-    drag_with_shot(&mut h, p, p + Vec2::new(50.0, -40.0), Modifiers::NONE, "57_scatter_both_computed", &|h| assert!(matches!(h.state().drag, Drag::Goal(_))));
-    assert_eq!(source(&h, "A2"), a, "x isn't solved for");
+    assert_eq!(hover_cursor(&mut h, p), CursorIcon::Move);
+    let (a, b) = (source(&h, "A2"), source(&h, "B2"));
+    // the first pair, A1 and A2, can't move B2's point up: nothing changes, and it says why
+    drag_with_shot(&mut h, p, p + Vec2::new(50.0, -40.0), Modifiers::NONE, "57_scatter_both_computed", &|h| assert!(matches!(h.state().drag, Drag::Goal2(_))));
+    assert_eq!((source(&h, "A2"), source(&h, "B2")), (a, b));
+    let note = h.state().goal_note.as_ref().map(|n| n.2.clone()).unwrap_or_default();
+    assert!(note.contains("doesn't move this point"), "{note}");
 }
 
 #[test]
