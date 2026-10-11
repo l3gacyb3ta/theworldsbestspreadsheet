@@ -359,8 +359,31 @@ impl Engine {
         &self.syms
     }
 
-    /// Direct precedents (cells this cell reads), with spill coverage resolved.
+    /// Precedents (cells this cell reads), with spill coverage resolved. A word it calls or quotes
+    /// reads what its body reads, so the word's precedents count too, through any words it calls in
+    /// turn: `='msd 2 rk4` reads the inputs `msd` does. (Unit declarations aren't followed.)
     pub fn precedents(&self, k: CellKey) -> Vec<CellKey> {
+        let mut out = Vec::new();
+        let mut words = vec![k];
+        let mut seen: HashSet<CellKey> = HashSet::default();
+        while let Some(w) = words.pop() {
+            if !seen.insert(w) {
+                continue;
+            }
+            for p in self.direct_precedents(w) {
+                if self.kind(p) == Kind::WordDef {
+                    words.push(p);
+                }
+                out.push(p);
+            }
+        }
+        out.retain(|x| *x != k);
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    fn direct_precedents(&self, k: CellKey) -> Vec<CellKey> {
         let mut out = Vec::new();
         if let Some(n) = self.nodes.get(&k) {
             for d in &n.deps {
@@ -382,20 +405,31 @@ impl Engine {
                 }
             }
         }
-        out.sort();
-        out.dedup();
         out
     }
 
-    /// Direct dependents (cells that read this position or its spill).
+    /// Dependents (cells that read this position or its spill). A word definition that reads it
+    /// passes it on to every cell calling or quoting the word, as `precedents` sees it.
     pub fn dependents(&self, k: CellKey) -> Vec<CellKey> {
-        let mut positions = vec![k];
-        if let Some(reg) = self.spills.get(&k) {
-            positions.extend(self.region_keys(reg));
-        }
         let mut out = Vec::new();
-        for p in positions {
-            out.extend(self.dependents_of_position(p));
+        let mut todo = vec![k];
+        let mut seen: HashSet<CellKey> = HashSet::default();
+        while let Some(w) = todo.pop() {
+            if !seen.insert(w) {
+                continue;
+            }
+            let mut positions = vec![w];
+            if let Some(reg) = self.spills.get(&w) {
+                positions.extend(self.region_keys(reg));
+            }
+            for p in positions {
+                for d in self.dependents_of_position(p) {
+                    if self.kind(d) == Kind::WordDef {
+                        todo.push(d);
+                    }
+                    out.push(d);
+                }
+            }
         }
         out.sort();
         out.dedup();
@@ -418,6 +452,7 @@ impl Engine {
                 found.push(c);
                 continue;
             }
+            // (`precedents` already looked inside the words this cell uses)
             for p in self.precedents(c) {
                 if !matches!(self.kind(p), Kind::UnitDecl | Kind::WordDef) {
                     stack.push(p);

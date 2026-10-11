@@ -260,3 +260,74 @@ fn scrubbing_a_simulation_is_fast() {
     eprintln!("1000-step rk4 spring: best {best:.2} ms per scrub step");
     assert!(best < 16.0, "{best} ms per step is too slow for interactive scrubbing");
 }
+
+/// The spring model from the help page, with its inputs named and read only inside the word `msd`.
+fn spring_model() -> Engine {
+    let mut e = eng();
+    for (at, text, name) in [
+        ("B1", "4 [N/m]", Some("spring")),
+        ("B2", "1 [kg]", Some("mass")),
+        ("B3", "0.5 [N*s/m]", Some("damping")),
+        ("B4", "0.25 [s]", Some("timestep")),
+        ("B5", "40", Some("steps")),
+        ("B6", "1 [m]", Some("x0")),
+        ("B7", "0 [m/s]", Some("v0")),
+        ("A9", ": msd ( t x v -- dx dv ) { t x v } v   spring mass / x * neg   damping mass / v * - ;", None),
+        ("C1", "=0 [s] timestep steps x0 v0 'msd 2 rk4 drop", None),
+    ] {
+        set(&mut e, at, text);
+        if let Some(n) = name {
+            let k = key(&e, at);
+            e.set_name(n, Some(k), true).unwrap();
+        }
+    }
+    e
+}
+
+#[test]
+fn inputs_read_inside_a_quoted_word_are_upstream() {
+    let mut e = spring_model();
+    let c1 = key(&e, "C1");
+    let names = |e: &Engine, ks: Vec<CellKey>| ks.into_iter().filter_map(|k| e.name_of(k).map(str::to_string)).collect::<Vec<_>>();
+    let mut up = names(&e, e.upstream_inputs(c1));
+    up.sort();
+    assert_eq!(up, ["damping", "mass", "spring", "steps", "timestep", "v0", "x0"]);
+    // trace sees them too, and the word's inputs see C1 downstream
+    let pre = names(&e, e.precedents(c1));
+    for n in ["damping", "mass", "spring"] {
+        assert!(pre.contains(&n.to_string()), "{pre:?}");
+    }
+    assert!(e.precedents(c1).contains(&key(&e, "A9")));
+    assert!(e.dependents(key(&e, "B3")).contains(&c1));
+    // scrubbing one updates the run
+    let before = nums(&e, "C1");
+    set(&mut e, "B3", "2 [N*s/m]");
+    assert_ne!(nums(&e, "C1"), before);
+    // and goal-seek solves for it: pull element 4 down to 0.1 m
+    let g = Goal { target: c1, index: 4, want: 0.1, tol: 1e-6, input: key(&e, "B3"), decimals: Some(4) };
+    let s = e.goal_seek(&g).unwrap();
+    set(&mut e, "B3", &s.text);
+    assert!((nums(&e, "C1")[4] - 0.1).abs() < 1e-3, "{} → {:?}", s.text, nums(&e, "C1"));
+}
+
+#[test]
+fn inputs_read_by_a_word_a_quoted_word_calls_are_upstream() {
+    let mut e = eng();
+    set(&mut e, "B1", "1.1");
+    e.set_name("rate", Some(key(&e, "B1")), true).unwrap();
+    set(&mut e, "B2", "3");
+    set(&mut e, "A1", ": scale rate * ;");
+    set(&mut e, "A2", ": grow scale ;");
+    set(&mut e, "C1", "=3 1 'grow 1 iterate");
+    let c1 = key(&e, "C1");
+    assert_eq!(e.upstream_inputs(c1), vec![key(&e, "B1")]);
+    assert!(e.dependents(key(&e, "B1")).contains(&c1));
+    set(&mut e, "B1", "2");
+    assert_eq!(nums(&e, "C1"), vec![1.0, 2.0, 4.0, 8.0]);
+    // a word that starts reading another input brings it along, without C1 being edited
+    set(&mut e, "A1", ": scale rate * B2 * ;");
+    assert_eq!(e.upstream_inputs(c1), vec![key(&e, "B1"), key(&e, "B2")]);
+    assert_eq!(nums(&e, "C1"), vec![1.0, 6.0, 36.0, 216.0]);
+    set(&mut e, "B2", "1");
+    assert_eq!(nums(&e, "C1"), vec![1.0, 2.0, 4.0, 8.0]);
+}
