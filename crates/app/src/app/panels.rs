@@ -709,12 +709,14 @@ impl App {
                     self.bar_scrub = Some((k, self.eng.wb.cell(k).cloned(), text_now.clone(), lit, x0));
                 }
             }
-            if let Some((sk, _, ref text, ref lit, x0)) = self.bar_scrub {
+            if let Some((sk, _, text, lit, x0)) = self.bar_scrub.clone() {
                 if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
                     ctx.set_cursor_icon(CursorIcon::ResizeHorizontal);
                     let fast = if ui.input(|i| i.modifiers.shift) { 10.0 } else { 1.0 };
                     let steps = ((p.x - x0) / 4.0).round() as f64 * fast;
-                    let new = ops::replace_span(text, &lit.span, &ops::scrub(lit, steps));
+                    // (a literal inside a program has no range: only a number cell's does)
+                    let num = self.pin(&ctx, sk, ops::scrub_value(&lit, steps), lit.decimals, lit.is_date, false);
+                    let new = ops::replace_span(&text, &lit.span, &num);
                     if new != self.eng.wb.cell_text(sk) {
                         let t = std::time::Instant::now();
                         self.eng.set_text(sk, &new);
@@ -723,6 +725,7 @@ impl App {
                 }
                 if resp.drag_stopped() || !ui.input(|i| i.pointer.primary_down()) {
                     let (sk, orig, ..) = self.bar_scrub.take().unwrap();
+                    self.pinned = None;
                     if self.eng.wb.cell(sk) != orig.as_ref() {
                         self.undo.push(Edit::Cells(vec![(sk, orig)]));
                         self.redo.clear();
@@ -1061,14 +1064,7 @@ impl App {
             let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
             if (ui.button("Set").clicked() || enter) && !self.name_buf.trim().is_empty() {
                 let name = self.name_buf.trim().to_string();
-                if let Some(old) = &current {
-                    if *old != name {
-                        let e = self.eng.set_name(old, None, false);
-                        if let Ok(e) = e {
-                            self.undo.push(e);
-                        }
-                    }
-                }
+                // (a rename replaces the old name, keeping "input" and the range: one undo step)
                 match self.eng.set_name(&name, Some(k), is_input || current.is_none()) {
                     Ok(e) => {
                         self.undo.push(e);
@@ -1094,6 +1090,9 @@ impl App {
                     }
                 }
             });
+            if is_input {
+                self.range_fields(ui, n, k);
+            }
         }
 
         ui.separator();
@@ -1114,15 +1113,27 @@ impl App {
                         let mut v = lit.value;
                         let speed = 10f64.powi(-(lit.decimals as i32));
                         let suffix = text[lit.span.end..].trim().to_string();
-                        let r = ui.add(
-                            egui::DragValue::new(&mut v)
-                                .speed(speed)
-                                .max_decimals(lit.decimals.max(0))
-                                .min_decimals(lit.decimals)
-                                .suffix(if suffix.is_empty() { String::new() } else { format!(" {suffix}") }),
-                        );
-                        if r.changed() {
-                            let new = ops::replace_span(&text, &lit.span, &ops::format_lit(v, lit.decimals, false));
+                        let suffix = if suffix.is_empty() { String::new() } else { format!(" {suffix}") };
+                        // an input with both ends is a slider between them; the value box beside it
+                        // still takes any typed value (outside the range: an error on the input)
+                        let r = match self.eng.input_range(ik).map(|r| (r.min, r.max)) {
+                            Some((Some((lo, _)), Some((hi, _)))) => ui.add(
+                                egui::Slider::new(&mut v, lo..=hi)
+                                    .clamping(egui::SliderClamping::Never)
+                                    .max_decimals(lit.decimals)
+                                    .min_decimals(lit.decimals)
+                                    .suffix(suffix),
+                            ),
+                            _ => ui.add(egui::DragValue::new(&mut v).speed(speed).max_decimals(lit.decimals).min_decimals(lit.decimals).suffix(suffix)),
+                        };
+                        // dragging stops at the range; typing doesn't
+                        let num = if r.dragged() {
+                            Some(self.pin(ui.ctx(), ik, v, lit.decimals, false, false))
+                        } else {
+                            r.changed().then(|| ops::format_lit(v, lit.decimals, false))
+                        };
+                        let new = num.map(|n| ops::replace_span(&text, &lit.span, &n)).filter(|n| *n != text);
+                        if let Some(new) = new {
                             if self.input_scrub.is_none() {
                                 self.input_scrub = Some((ik, self.eng.wb.cell(ik).cloned()));
                             }
@@ -1133,6 +1144,7 @@ impl App {
                         if !r.dragged() && !r.has_focus() {
                             if let Some((sk, orig)) = self.input_scrub.take() {
                                 if sk == ik {
+                                    self.pinned = None;
                                     self.undo.push(Edit::Cells(vec![(sk, orig)]));
                                     self.redo.clear();
                                 } else {
@@ -1199,6 +1211,48 @@ impl App {
                 }
             });
         });
+    }
+
+    /// An input's min and max, each a number in its unit (`0 [1/s]`) or a formula (`B7`, a name),
+    /// set when a field loses focus; one that doesn't fit is refused here, with why, and nothing changes.
+    fn range_fields(&mut self, ui: &mut Ui, name: &str, k: CellKey) {
+        // references shown in A1, as they are now
+        let stored = self.eng.range_text(name);
+        // refilled when the selection or the stored range changes (undo, an insert above B7, say)
+        if self.range_for.as_ref() != Some(&(k, stored.clone())) {
+            self.range_for = Some((k, stored.clone()));
+            self.range_buf = stored.clone();
+            self.range_err = None;
+        }
+        // in the input's own unit
+        let text = self.eng.wb.cell_text(k);
+        let hint = match ops::cell_literal(&text) {
+            Some(lit) if !lit.is_date => ops::replace_span(&text, &lit.span, "0").trim().to_string(),
+            _ => text.trim().to_string(),
+        };
+        let mut done = false;
+        ui.horizontal(|ui| {
+            ui.label("range");
+            let a = ui.add(TextEdit::singleline(&mut self.range_buf.0).desired_width(78.0).hint_text(format!("min, e.g. {hint}")).id_salt("range_min"));
+            ui.label("to");
+            let b = ui.add(TextEdit::singleline(&mut self.range_buf.1).desired_width(78.0).hint_text("max").id_salt("range_max"));
+            done = a.lost_focus() || b.lost_focus();
+        })
+        .response
+        .on_hover_text("scrubbing, chart dragging and goal-seek stop at the range; a typed value outside it is an error on the cell");
+        if done && self.range_buf != stored {
+            match self.eng.set_range(name, &self.range_buf.0, &self.range_buf.1) {
+                Ok(e) => {
+                    self.undo.push(e);
+                    self.redo.clear();
+                    self.range_err = None;
+                }
+                Err(m) => self.range_err = Some(m),
+            }
+        }
+        if let Some(m) = &self.range_err {
+            ui.colored_label(Color32::from_rgb(0xdc, 0x26, 0x26), format!("range not set: {m}"));
+        }
     }
 }
 

@@ -99,9 +99,13 @@ pub fn replace_span(text: &str, span: &Range<usize>, with: &str) -> String {
 
 /// One step of scrubbing: `steps` ticks of the literal's last digit.
 pub fn scrub(lit: &Lit, steps: f64) -> String {
+    format_lit(scrub_value(lit, steps), lit.decimals, lit.is_date)
+}
+
+/// The number `scrub` writes (an input's range stops it: `InputRange::pin`).
+pub fn scrub_value(lit: &Lit, steps: f64) -> f64 {
     let unit = if lit.is_date { 1.0 } else { 10f64.powi(-(lit.decimals as i32)) };
-    let v = lit.value + steps * unit;
-    format_lit(v, lit.decimals, lit.is_date)
+    lit.value + steps * unit
 }
 
 fn cell_of(e: &Engine, k: CellKey) -> Option<Cell> {
@@ -388,8 +392,16 @@ pub fn move_cells(e: &mut Engine, src: Rect, sheet: SheetId, at: (usize, usize))
     let mut names = wb.names.clone();
     names.retain(|_, d| !replaced.contains(&d.cell));
     for d in names.values_mut() {
+        let home = d.cell.sheet;
         if let Some(k) = moved.get(&d.cell) {
             d.cell = *k;
+        }
+        // a range's ends are references like any other
+        for end in [&mut d.min, &mut d.max].into_iter().flatten() {
+            let pieces = m.pieces(&end.pieces, home, d.cell.sheet);
+            if pieces[..] != end.pieces[..] {
+                *end = Cell::new(pieces);
+            }
         }
     }
     // a stable order keeps the edit (and its inverse) deterministic

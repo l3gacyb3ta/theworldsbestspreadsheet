@@ -4,6 +4,7 @@
 //! recomputed, in dependency order. Spill regions are part of the graph:
 //! a reference into a spilled cell depends on the spill's source.
 
+use crate::bounds::Ranged;
 use crate::dims::{self, Halt, SVal, StaticEnv, StaticTrace};
 use crate::eval::{run_program, run_traced, Env, EvalErr, TraceStep};
 use crate::ids::*;
@@ -183,6 +184,8 @@ pub struct Engine {
     plan: Option<Plan>,
     /// Bumped by every applied edit: a cheap "might the document have changed?".
     revision: u64,
+    /// Inputs' ranges by cell (`bounds`), compiled on rebuild.
+    pub(crate) ranges: HashMap<CellKey, Arc<Ranged>>,
 }
 
 /// A recalc plan: valid for `seeds` while `graph_gen` hasn't moved.
@@ -193,7 +196,7 @@ struct Plan {
     order: Vec<CellKey>,
 }
 
-struct View<'a>(&'a Engine);
+pub(crate) struct View<'a>(pub(crate) &'a Engine);
 
 impl<'a> Env for View<'a> {
     fn cell_value(&self, k: CellKey) -> Result<Value, String> {
@@ -274,6 +277,7 @@ impl Engine {
             graph_gen: 0,
             plan: None,
             revision: 0,
+            ranges: HashMap::default(),
         };
         e.wb.after_load();
         e.rebuild();
@@ -952,8 +956,10 @@ impl Engine {
                         return Err(format!("{name} already names {}", self.wb.cell_label(d.cell, None)));
                     }
                 }
+                // a rename keeps an input's range; it goes with "input"
+                let (min, max) = names.values().find(|d| d.cell == cell && input).map(|d| (d.min.clone(), d.max.clone())).unwrap_or_default();
                 names.retain(|_, d| d.cell != cell);
-                names.insert(name.to_string(), NameDef { cell, input });
+                names.insert(name.to_string(), NameDef { cell, input, min, max });
             }
         }
         let edits = Edit::names(&self.wb.names, &names);
@@ -1079,6 +1085,10 @@ impl Engine {
         }
         let mut c = Compiler::new(&self.wb, &self.syms, k.sheet);
         let compiled = c.compile(text).map(Arc::new).map_err(Box::new);
+        // an input's range is checked with its value: the units it's written in are read too
+        if let Some(r) = self.ranges.get(&k) {
+            c.deps.extend(r.deps.iter().cloned());
+        }
         Node { kind: classify(text), compiled, deps: c.deps, stat: None, result: None }
     }
 
@@ -1132,6 +1142,7 @@ impl Engine {
     pub fn rebuild(&mut self) {
         let content = self.all_content();
         self.build_symbols(&content);
+        self.ranges = self.compile_ranges();
         self.nodes.clear();
         self.rdeps.clear();
         self.range_deps.clear();
@@ -1344,7 +1355,10 @@ impl Engine {
                     self.nodes.get_mut(&k).unwrap().stat = Some(s);
                 }
                 self.last_eval_count += 1;
-                let (res, kind) = self.evaluate(k);
+                let (mut res, kind) = self.evaluate(k);
+                if !self.ranges.is_empty() {
+                    res = self.check_range(k, res);
+                }
                 let (mut res, changed) = self.place_spill(k, res);
                 changed_positions.extend(changed);
                 // Stamp the provenance a reference to this cell carries once, here, so
@@ -1617,7 +1631,7 @@ fn same_statics(old: &Node, new: &Node) -> bool {
     }
 }
 
-fn local(msg: String, span: Option<Range<usize>>) -> CellError {
+pub(crate) fn local(msg: String, span: Option<Range<usize>>) -> CellError {
     CellError { msg, span, kind: ErrKind::Local }
 }
 

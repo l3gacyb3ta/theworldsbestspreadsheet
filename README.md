@@ -106,6 +106,11 @@ is an ordinary, editable `units` sheet; exchange rates are inputs you can scrub.
   dimension: `4 [%] 100 [USD] *` shows `4 USD`, not `400 USD*%`. Identical-factor
   cancellation is otherwise the only simplification.
 - **Empty cells are not zero**: referencing one is an error naming the cell.
+- **Input ranges** (`crates/core/src/bounds.rs`): an input's range limits scrubbing,
+  chart dragging and goal-seek; typing a value outside it is an error on that cell
+  (kept, never clamped). The ends are stored as written, in the input's unit, on
+  the name (per key, like the rest of a `NameDef`), and their units are
+  dependencies of the input's cell.
 - **Fill**: one cell copies; two or more numbers in an arithmetic progression
   continue the series; otherwise the pattern repeats. Formulas move relative refs.
 - **Charts**: `xs ys line|scatter|path`, `cats vals bar`, `layer`, `title`,
