@@ -4,6 +4,7 @@
 use super::*;
 use crate::chart_view::{self, Tip};
 use std::collections::HashSet;
+use wbs_core::bounds::InputRange;
 use wbs_core::solve::Goal;
 
 impl App {
@@ -688,9 +689,10 @@ impl App {
             Drag::Scrub { key, text, lit, x0, .. } => {
                 let fast = if mods.shift { 10.0 } else { 1.0 };
                 let steps = ((pos.x - *x0) / 4.0).round() as f64 * fast;
-                let new = ops::replace_span(text, &lit.span, &ops::scrub(lit, steps));
-                let key = *key;
+                let (key, text, lit) = (*key, text.clone(), lit.clone());
                 ctx.set_cursor_icon(CursorIcon::ResizeHorizontal);
+                let num = self.pin(ctx, key, ops::scrub_value(&lit, steps), lit.decimals, lit.is_date, false);
+                let new = ops::replace_span(&text, &lit.span, &num);
                 if new != self.eng.wb.cell_text(key) {
                     let t = std::time::Instant::now();
                     self.eng.set_text(key, &new);
@@ -715,14 +717,34 @@ impl App {
                     (false, true) => CursorIcon::ResizeVertical,
                     (false, false) => CursorIcon::Move,
                 });
+                // each cell stops at its own input's range; a 2D drag says which axis did
+                let range = |c: &PointCell| self.eng.input_range(c.key).unwrap_or_default();
+                let two = y.is_some() && x.is_some();
+                let mut pins = Vec::new();
                 let mut writes = Vec::new();
                 if let Some(c) = y {
-                    let new = if move_y { point_text(c, &axis.disp, axis.from_screen(pos.y), axis.y1 - axis.y0, mods.shift) } else { c.text.clone() };
+                    let new = if move_y {
+                        let (new, pin) = point_text(c, &axis.disp, axis.from_screen(pos.y), axis.y1 - axis.y0, mods.shift, &range(c));
+                        pins.extend(pin.map(|p| if two { format!("y at {p}") } else { p }));
+                        new
+                    } else {
+                        c.text.clone()
+                    };
                     writes.push((c, new));
                 }
                 if let (Some(c), Some(xdisp)) = (x, &axis.xdisp) {
-                    let new = if move_x { point_text(c, xdisp, axis.x_from_screen(pos.x), axis.x1 - axis.x0, mods.shift) } else { c.text.clone() };
+                    let new = if move_x {
+                        let (new, pin) = point_text(c, xdisp, axis.x_from_screen(pos.x), axis.x1 - axis.x0, mods.shift, &range(c));
+                        pins.extend(pin.map(|p| format!("x at {p}")));
+                        new
+                    } else {
+                        c.text.clone()
+                    };
                     writes.push((c, new));
+                }
+                self.pinned = (!pins.is_empty()).then(|| pins.join(", "));
+                if let Some(p) = &self.pinned {
+                    chart_view::tooltip_lines(ctx, pos, &[Tip::Value(p.clone()), Tip::Note("the input's range ends here".into())]);
                 }
                 writes.retain(|(c, new)| *new != self.eng.wb.cell_text(c.key));
                 if !writes.is_empty() {
@@ -764,6 +786,7 @@ impl App {
             }
             Drag::Goal(g) => self.goal_end(*g),
             Drag::Scrub { key, orig, .. } => {
+                self.pinned = None;
                 if self.eng.wb.cell(key) != orig.as_ref() {
                     self.undo.push(Edit::Cells(vec![(key, orig)]));
                     self.redo.clear();
@@ -771,6 +794,7 @@ impl App {
             }
             // a diagonal drag that wrote two cells is one undo step
             Drag::Point { y, x, .. } => {
+                self.pinned = None;
                 let undo: Vec<_> = y.into_iter().chain(x).filter(|c| self.eng.wb.cell(c.key) != c.orig.as_ref()).map(|c| (c.key, c.orig)).collect();
                 if !undo.is_empty() {
                     self.undo.push(Edit::Cells(undo));
@@ -1164,8 +1188,9 @@ fn dashed_rect(p: &Painter, r: Rect, stroke: Stroke) {
 
 /// A dragged point's literal cell's new text for the value `shown` in the axis' unit `disp`, the axis spanning `span`:
 /// in the cell's own unit and with its own decimals (a date in whole days); `fine` (Shift) about 1/200 of the axis.
-fn point_text(c: &PointCell, disp: &wbs_core::units::DispUnit, shown: f64, span: f64, fine: bool) -> String {
-    let v = c.disp.to_display(disp.to_canonical(shown));
+/// The text a point drag writes into `c`, stopped at its input's `range`, with the end that stopped it.
+fn point_text(c: &PointCell, disp: &wbs_core::units::DispUnit, shown: f64, span: f64, fine: bool, range: &InputRange) -> (String, Option<String>) {
+    let (v, pin) = range.pin(c.disp.to_display(disp.to_canonical(shown)));
     let decimals = if fine {
         let step = span.abs() / 200.0 / c.disp.factor.abs().max(1e-300) * disp.factor.abs();
         let dec = if step > 0.0 { (-step.log10()).ceil().max(0.0) as usize } else { 0 };
@@ -1173,5 +1198,5 @@ fn point_text(c: &PointCell, disp: &wbs_core::units::DispUnit, shown: f64, span:
     } else {
         c.lit.decimals
     };
-    ops::replace_span(&c.text, &c.lit.span, &ops::format_lit(v, decimals, c.lit.is_date))
+    (ops::replace_span(&c.text, &c.lit.span, &range.format(v, decimals, c.lit.is_date)), pin)
 }

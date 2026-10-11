@@ -274,6 +274,26 @@ fn scatter_point_drags_diagonally_in_one_undo_step() {
     assert_eq!((source(&h, "A2"), source(&h, "B2")), ("2.0".to_string(), "20 [m]".to_string()));
 }
 
+#[test]
+fn scatter_drag_pins_x_at_its_range_while_y_moves() {
+    let mut h = sheet_with(&[XY.as_slice(), &[("D1", "=A1:A3 B1:B3 scatter")]].concat());
+    // only x has a range
+    let a2 = cell_key(&h, "A2");
+    h.state_mut().eng.set_name("xin", Some(a2), true).unwrap();
+    h.state_mut().eng.set_range("xin", "", "2.2").unwrap();
+    h.run_steps(2);
+    let (p, _) = point_at(&h, "A2", "B2");
+    drag_with_shot(&mut h, p, p + Vec2::new(300.0, -60.0), Modifiers::NONE, "65_scatter_x_at_max", &|h| {
+        assert_eq!(source(h, "A2"), "2.2", "x stops at its max");
+        assert!(num(h, "B2") > 20.0, "y still follows the pointer");
+        assert_eq!(h.state().pinned.as_deref(), Some("x at max 2.2"));
+    });
+    assert_eq!(source(&h, "A2"), "2.2");
+    assert!(num(&h, "B2") > 20.0);
+    assert!(h.state().pinned.is_none());
+    assert_eq!(undo_cells(&h), 2, "one undo step for both");
+}
+
 /// Presses at `from`, moves through `steps` (offsets from `from`, each with the modifiers held there; `check`
 /// runs after each), and lets go at the last.
 fn drag_steps(h: &mut Harness<'static, App>, from: Pos2, steps: &[(Vec2, Modifiers)], check: &dyn Fn(&mut Harness<'static, App>, usize)) {
@@ -2087,4 +2107,111 @@ fn autosave_is_on_by_default() {
     wait(&mut h, 35.0);
     assert!(p.exists(), "a workbook with a file is autosaved without asking");
     assert_eq!(h.state().autosave_note(0.0).as_deref(), Some("autosaved"));
+}
+
+#[test]
+fn scrubbing_stops_at_an_inputs_range() {
+    let mut h = harness();
+    h.state_mut().eng.set_range("growth", "3.5 [%]", "10 [%]").unwrap();
+    h.run_steps(2);
+    let from = center(&h, "B4");
+    // 40 px left is 10 ticks of 0.1 %: past the min
+    drag_with_shot(&mut h, from, from - Vec2::new(40.0, 0.0), Modifiers::ALT, "60_scrub_stopped_at_min", &|h| {
+        assert_eq!(source(h, "B4"), "3.5 [%]");
+        assert_eq!(h.state().pinned.as_deref(), Some("min 3.5 [%]"));
+    });
+    assert_eq!(source(&h, "B4"), "3.5 [%]");
+    assert!(h.state().pinned.is_none());
+    // and the max, from the other side
+    let from = center(&h, "B4");
+    drag(&mut h, from, from + Vec2::new(400.0, 0.0), Modifiers::ALT);
+    assert_eq!(source(&h, "B4"), "10.0 [%]");
+    // each scrub is one undo step
+    key_cmd(&mut h, Key::Z);
+    assert_eq!(source(&h, "B4"), "3.5 [%]");
+    key_cmd(&mut h, Key::Z);
+    assert_eq!(source(&h, "B4"), "4.0 [%]");
+}
+
+#[test]
+fn inspector_sets_an_inputs_range() {
+    let mut h = harness();
+    { let p = center(&h, "B4"); click(&mut h, p, Modifiers::NONE); }
+    let field = |h: &Harness<'static, App>, hint: &str| {
+        let n = h.get_by(|n| n.role() == egui::accesskit::Role::TextInput && n.placeholder() == Some(hint));
+        n.focus();
+    };
+    // a bound in the wrong dimension is refused, and says why
+    field(&h, "min, e.g. 0 [%]");
+    h.run_steps(1);
+    typ(&mut h, "0 [m]");
+    key(&mut h, Key::Enter);
+    h.get_by_label("range not set: min 0 [m] is length, but growth is dimensionless");
+    assert_eq!(h.state().eng.wb.names["growth"].min, None);
+    shot(&mut h, "61_range_refused");
+    // in the input's unit, it's set (one undo step)
+    h.get_by(|n| n.role() == egui::accesskit::Role::TextInput && n.value().as_deref() == Some("0 [m]")).focus();
+    h.run_steps(1);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    typ(&mut h, "0 [%]");
+    key(&mut h, Key::Enter);
+    field(&h, "max");
+    h.run_steps(1);
+    typ(&mut h, "12 [%]");
+    key(&mut h, Key::Enter);
+    assert_eq!(h.state().eng.range_text("growth"), ("0 [%]".into(), "12 [%]".into()));
+    assert!(h.query_by_label_contains("range not set").is_none());
+    // a typed value outside it is an error on the input, kept as typed and explained
+    type_into(&mut h, "B4", "-1 [%]");
+    assert_eq!(shown(&h, "B4"), "ERR growth must be ≥ 0 [%]");
+    assert_eq!(source(&h, "B4"), "-1 [%]");
+    assert!(shown(&h, "B10").starts_with("ERR"), "{}", shown(&h, "B10"));
+    { let p = center(&h, "B4"); click(&mut h, p, Modifiers::NONE); }
+    h.run_steps(2);
+    h.get_by_label("Outside the input's range");
+    shot(&mut h, "62_outside_the_range");
+    // undo: the value, then the max, then the min
+    key_cmd(&mut h, Key::Z);
+    key_cmd(&mut h, Key::Z);
+    assert_eq!(h.state().eng.wb.names["growth"].max, None);
+    key_cmd(&mut h, Key::Z);
+    assert_eq!(h.state().eng.wb.names["growth"].min, None);
+}
+
+#[test]
+fn chart_point_drag_stops_at_an_inputs_range() {
+    let mut h = harness();
+    let k = cell_key(&h, "B47");
+    h.state_mut().eng.set_name("q4", Some(k), true).unwrap();
+    h.state_mut().eng.set_range("q4", "", "190 [widget]").unwrap();
+    let p = center(&h, "E20");
+    h.hover_at(p);
+    h.run_steps(1);
+    h.event(Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -700.0), modifiers: Modifiers::NONE, phase: egui::TouchPhase::Move });
+    h.run_steps(20);
+    let hit = h.state().chart_hits.iter().find(|(p, a)| h.state().hit_label(p, a).starts_with("Q4")).map(|(p, _)| p.pos).expect("Q4 bar");
+    drag_with_shot(&mut h, hit, hit - Vec2::new(0.0, 200.0), Modifiers::NONE, "64_bar_stopped_at_max", &|h| {
+        assert_eq!(source(h, "B47"), "190 [widget]");
+        assert_eq!(h.state().pinned.as_deref(), Some("max 190 [widget]"));
+    });
+    assert_eq!(source(&h, "B47"), "190 [widget]");
+}
+
+#[test]
+fn bounded_inputs_are_sliders() {
+    let mut h = harness();
+    let sliders = |h: &Harness<'static, App>| h.query_all_by(|n| n.role() == egui::accesskit::Role::Slider).count();
+    assert_eq!(sliders(&h), 0);
+    h.state_mut().eng.set_range("growth", "0 [%]", "10 [%]").unwrap();
+    // one end only: still a drag value
+    h.state_mut().eng.set_range("months", "1", "").unwrap();
+    h.run_steps(3);
+    assert_eq!(sliders(&h), 1);
+    shot(&mut h, "63_input_slider");
+    // dragging the slider past its end stops there
+    let r = h.get_by(|n| n.role() == egui::accesskit::Role::Slider).rect();
+    let from = r.left_center() + Vec2::new(r.height(), 0.0);
+    drag(&mut h, from, r.right_center() + Vec2::new(300.0, 0.0), Modifiers::NONE);
+    assert_eq!(source(&h, "B4"), "10.0 [%]");
+    assert!(h.state().pinned.is_none());
 }
