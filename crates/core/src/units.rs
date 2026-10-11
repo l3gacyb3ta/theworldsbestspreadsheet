@@ -53,6 +53,44 @@ fn no_terms() -> Terms {
     Terms(None)
 }
 
+/// Which combination of terms a memo entry holds.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Combine {
+    Merge,
+    Pow,
+    DimMul,
+}
+
+/// The memo forgets everything when it holds this many combinations.
+const MEMO_SIZE: usize = 256;
+
+type MemoKey = (Combine, usize, usize, Rational);
+
+thread_local! {
+    /// Recent combinations of shared terms, by pointer: a model (a word run a few
+    /// thousand times by `rk4`, say) combines the same few units over and over, and
+    /// each combination would allocate. Entries hold their operands, so a pointer
+    /// can't be freed and reused for other terms while it's a key.
+    static MEMO: std::cell::RefCell<rustc_hash::FxHashMap<MemoKey, (Terms, Terms, Terms)>> = std::cell::RefCell::new(Default::default());
+}
+
+fn memo(kind: Combine, a: &Terms, o: &Terms, r: Rational, f: impl FnOnce() -> Terms) -> Terms {
+    let ptr = |t: &Terms| t.0.as_ref().map_or(0, |p| Arc::as_ptr(p) as usize);
+    let key = (kind, ptr(a), ptr(o), r);
+    if let Some(t) = MEMO.with(|m| m.borrow().get(&key).map(|e| e.2.clone())) {
+        return t;
+    }
+    let t = f();
+    MEMO.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() >= MEMO_SIZE {
+            m.clear();
+        }
+        m.insert(key, (a.clone(), o.clone(), t.clone()));
+    });
+    t
+}
+
 /// Adds `o`'s exponents into `a`'s, keeping `a`'s order; zero exponents drop out.
 fn merge_terms(a: &Terms, o: &Terms, sign: Rational) -> Terms {
     if o.is_empty() {
@@ -61,6 +99,10 @@ fn merge_terms(a: &Terms, o: &Terms, sign: Rational) -> Terms {
     if a.is_empty() && sign == Rational::ONE {
         return o.clone();
     }
+    memo(Combine::Merge, a, o, sign, || merge_terms_new(a, o, sign))
+}
+
+fn merge_terms_new(a: &Terms, o: &Terms, sign: Rational) -> Terms {
     let mut v = a.to_vec();
     for (n, e) in o.iter() {
         let e = e.mul(sign);
@@ -77,6 +119,10 @@ fn pow_terms(a: &Terms, r: Rational) -> Terms {
     if r == Rational::ONE || a.is_empty() {
         return a.clone();
     }
+    memo(Combine::Pow, a, &no_terms(), r, || pow_terms_new(a, r))
+}
+
+fn pow_terms_new(a: &Terms, r: Rational) -> Terms {
     let v: Vec<_> = a.iter().map(|(n, e)| (n.clone(), e.mul(r))).filter(|(_, e)| !e.is_zero()).collect();
     if v.is_empty() { no_terms() } else { v.into() }
 }
@@ -101,14 +147,22 @@ impl Dim {
         self.0.is_empty()
     }
     pub fn mul(&self, o: &Dim) -> Dim {
-        let m = merge_terms(&self.0, &o.0, Rational::ONE);
-        if Terms::ptr_eq(&m, &self.0) || Terms::ptr_eq(&m, &o.0) || m.len() < 2 {
-            return Dim(m);
+        if self.0.is_empty() {
+            return o.clone();
         }
-        // dimensions are kept sorted so equal dimensions compare equal
-        let mut v = m.to_vec();
-        v.sort_by(|a, b| a.0.cmp(&b.0));
-        Dim(v.into())
+        if o.0.is_empty() {
+            return self.clone();
+        }
+        Dim(memo(Combine::DimMul, &self.0, &o.0, Rational::ONE, || {
+            let m = merge_terms_new(&self.0, &o.0, Rational::ONE);
+            if m.len() < 2 {
+                return m;
+            }
+            // dimensions are kept sorted so equal dimensions compare equal
+            let mut v = m.to_vec();
+            v.sort_by(|a, b| a.0.cmp(&b.0));
+            v.into()
+        }))
     }
     pub fn pow(&self, r: Rational) -> Dim {
         Dim(pow_terms(&self.0, r))

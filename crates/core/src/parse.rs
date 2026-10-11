@@ -14,7 +14,7 @@ pub enum Builtin {
     Add, Sub, Mul, Div, Pow, Neg, Abs, Sqrt, Exp, Log, Log10, Log2, Sin, Cos, Tan,
     Floor, Ceil, Round, Min, Max, Dup, Drop, Swap, Over, Rot, Len, Range, If,
     Lt, Gt, Le, Ge, Eq, Ne, Not, Sum, Mean, Rev, Join, First, Last, Pick, Transpose,
-    Couple, Pi, Line, Scatter, Path, Bar, Layer, Title, XLabel, YLabel, Size,
+    Couple, Pi, Line, Scatter, Path, Bar, Layer, Title, XLabel, YLabel, Size, Iterate, Rk4,
 }
 
 pub const BUILTINS: &[(&str, Builtin, &str)] = {
@@ -62,7 +62,8 @@ pub const BUILTINS: &[(&str, Builtin, &str)] = {
         ("first", First, "a → first row"),
         ("last", Last, "a → last row"),
         ("pick", Pick, "a i → row i of a (0-based)"),
-        ("transpose", Transpose, "a → a with axes swapped"),        ("couple", Couple, "a b → 2-row array [a, b]"),
+        ("transpose", Transpose, "a → a with axes swapped"),
+        ("couple", Couple, "a b → 2-row array [a, b]"),
         ("pi", Pi, " → π"),
         ("line", Line, "xs ys → line chart"),
         ("scatter", Scatter, "xs ys → scatter chart"),
@@ -73,6 +74,8 @@ pub const BUILTINS: &[(&str, Builtin, &str)] = {
         ("xlabel", XLabel, "chart \"t\" → chart with x label"),
         ("ylabel", YLabel, "chart \"t\" → chart with y label"),
         ("size", Size, "chart cols rows → chart spilling cols×rows cells"),
+        ("iterate", Iterate, "n s1…sk 'step k → k arrays: the state after 0…n steps"),
+        ("rk4", Rk4, "t0 h n s1…sk 'deriv k → k arrays: the ODE solved over n steps"),
     ]
 };
 
@@ -98,6 +101,15 @@ pub enum Callee {
     User(Arc<str>, CellKey),
 }
 
+impl Callee {
+    pub fn name(&self) -> &str {
+        match self {
+            Callee::Builtin(b) => builtin_name(*b),
+            Callee::User(n, _) => n,
+        }
+    }
+}
+
 /// One op. The rarer, bigger ones are boxed: a recalc streams through every cell's
 /// ops, so their size is memory traffic (48 bytes an op, from 112).
 #[derive(Clone, Debug, PartialEq)]
@@ -115,6 +127,8 @@ pub enum OpKind {
     Local(usize),
     Reduce(Box<Callee>),
     Scan(Box<Callee>),
+    /// `'word`: pushes the word as a value.
+    Quote(Box<Callee>),
 }
 
 /// `gaps` (written `A1:B5?`): skip empty cells and read the rest as a list.
@@ -402,6 +416,7 @@ impl<'a> Compiler<'a> {
                 Tok::DeadRef => return err("reference to a deleted cell", span),
                 Tok::Reduce(w) => OpKind::Reduce(Box::new(self.callee(w, &span)?)),
                 Tok::Scan(w) => OpKind::Scan(Box::new(self.callee(w, &span)?)),
+                Tok::Quote(w) => OpKind::Quote(Box::new(self.callee(w, &span)?)),
                 Tok::Bad(m) => return err(m.clone(), span),
                 Tok::Comment(_) => continue,
                 Tok::Word(w) => {

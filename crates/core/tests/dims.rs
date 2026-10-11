@@ -57,6 +57,10 @@ fn fixture() -> Engine {
         ("D2", ": hyp { a b } a a * b b * + sqrt ;"),
         ("D3", ": bad 1 [m] + ;"),
         ("D4", ": deep deep ;"),
+        ("D5", ": fall { t y v } v -9.81 [m/s^2] ;"),
+        ("D6", ": walk 1 [m] + ;"),
+        ("D7", ": run 3 swap 'walk 1 iterate ;"),
+        ("D8", "='sq"),
         ("E1", "=2 3 [m] *"),
         ("E2", "=A7 1 [m] +"),
         // units defined from cells: one known, one whose factor is empty
@@ -80,13 +84,18 @@ fn static_pass_agrees_with_evaluation() {
         "to[m]", "to[km]", "to[°C]", "to[K]", "to[s]", "to[day]", "\"t\"", "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9", "B1:B3",
         "A1:A2", "B1:B3?", "A5:A7?", "A1:A6", "C1", "C2", "C1:C3", "E1", "E2", "sq", "hyp", "bad", "deep", "/+", "\\+", "/*", "/max",
         "/sq", "\\hyp", "/-", "\\*", "[crate]", "[box]", "to[crate]", "F1",
+        // words as values, iterate and rk4
+        "'sq", "'hyp", "'bad", "'walk", "'fall", "'run", "'+", "'swap", "'dup", "'drop", "'*", "'neg", "D8", "1 iterate", "2 iterate",
+        "1 rk4", "2 rk4", "3 rk4", "0 [s] 1 [s] 2", "3 1 [m]", "1 [m] 0 [m/s]", "2 0 1", "'walk 1 iterate", "'fall 2 rk4",
+        "'sq 1 iterate", "'swap 2 iterate", "'dup 1 iterate", "0 [s] 1 [s] 2 1 [m] 0 [m/s]", "2 1 [m]", "2 A5 A1", "A5 B1", "0 [s] A2 3",
+        "3 1 [m] 'walk 1 iterate", "0 [s] 1 [s] 2 1 [m] 0 [m/s] 'fall 2 rk4",
     ]
     .iter()
     .map(|s| s.to_string())
     .collect();
     // half the programs use only the common words, so that more of them get somewhere
     let common: Vec<String> =
-        pool.iter().cloned().chain(["+", "-", "*", "/", "^", "sqrt", "dup", "swap", "sum", "if", "min"].map(String::from)).collect();
+        pool.iter().cloned().chain(["+", "-", "*", "/", "^", "sqrt", "dup", "swap", "sum", "if", "min", "iterate", "rk4", "drop"].map(String::from)).collect();
     pool.extend(BUILTINS.iter().map(|(n, _, _)| n.to_string()));
     let k = key(&mut e, "H30");
     // DIMS_SEED=n tries other programs
@@ -106,6 +115,7 @@ fn static_pass_agrees_with_evaluation() {
         let text = format!("={}", prog.join(" "));
         e.set_text(k, &text);
         let run = e.eval_scratch(&text, sid).result;
+
         match (e.static_error(k).cloned(), &run) {
             (Some(se), Ok(v)) => bad.push(format!("`{text}`: static error {:?} but evaluates to {}", se.msg, v.summary(4))),
             (Some(se), Err(re)) => {
@@ -138,6 +148,7 @@ fn static_pass_agrees_with_evaluation() {
                         s.dim.as_ref().is_none_or(|d| *d == n.q.dim) && s.abs.is_none_or(|a| a == n.q.absolute.is_some())
                     }
                     (SVal::Text, Value::Text(_)) | (SVal::Chart, Value::Chart(_)) | (SVal::Any, _) => true,
+                    (SVal::Fn(a), Value::Fn(b)) => a == b,
                     (SVal::Other(t), v) => *t == v.type_name(),
                     _ => false,
                 };

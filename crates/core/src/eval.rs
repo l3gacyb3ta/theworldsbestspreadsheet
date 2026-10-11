@@ -288,7 +288,7 @@ impl<'e> Interp<'e> {
                 stack.push(Value::Num(self.convert(n, u)?));
             }
             OpKind::Local(i) => stack.push(locals[*i].clone()),
-            OpKind::Builtin(b) => self.builtin(*b, stack)?,
+            OpKind::Builtin(b) => self.builtin(*b, stack, &op.span)?,
             OpKind::Call(c) => self.call(&c.0, c.1, stack, &op.span)?,
             OpKind::Reduce(c) => {
                 let v = pop(stack, "reduce")?;
@@ -298,6 +298,7 @@ impl<'e> Interp<'e> {
                 let v = pop(stack, "scan")?;
                 stack.push(self.scan(c, v, &op.span)?);
             }
+            OpKind::Quote(c) => stack.push(Value::Fn((**c).clone())),
         }
         Ok(())
     }
@@ -320,7 +321,7 @@ impl<'e> Interp<'e> {
 
     fn apply_callee(&mut self, c: &Callee, stack: &mut Vec<Value>, span: &Range<usize>) -> Result<(), Step> {
         match c {
-            Callee::Builtin(b) => self.builtin(*b, stack),
+            Callee::Builtin(b) => self.builtin(*b, stack, span),
             Callee::User(name, k) => self.call(name, *k, stack, span),
         }
     }
@@ -425,7 +426,7 @@ impl<'e> Interp<'e> {
         Ok(n)
     }
 
-    fn builtin(&mut self, b: Builtin, st: &mut Vec<Value>) -> Result<(), Step> {
+    fn builtin(&mut self, b: Builtin, st: &mut Vec<Value>, span: &Range<usize>) -> Result<(), Step> {
         use Builtin::*;
         if matches!(b, Add | Sub | Mul | Div) && arith_in_place(b, st) {
             st.pop();
@@ -743,8 +744,262 @@ impl<'e> Interp<'e> {
                 ch.cols = c as usize;
                 st.push(Value::Chart(Arc::new(ch)));
             }
+            Iterate => self.iterate(st, span)?,
+            Rk4 => self.rk4(st, span)?,
         }
         Ok(())
+    }
+
+    /// Runs `f` on a stack holding just `args`, and checks that it leaves `k` numbers.
+    fn run_word(&mut self, f: &Callee, args: impl IntoIterator<Item = Value>, k: usize, what: &str, span: &Range<usize>) -> Result<Vec<Num>, Step> {
+        // room for the word's working values, so its stack doesn't grow call after call
+        let mut st = Vec::with_capacity(k + 16);
+        st.extend(args);
+        self.apply_callee(f, &mut st, span)?;
+        if st.len() != k {
+            return Err(Step::Here(left_count(what, f, k, st.len())));
+        }
+        let mut out = Vec::with_capacity(k);
+        for (i, v) in st.into_iter().enumerate() {
+            match v {
+                Value::Num(n) => out.push(n),
+                v => return Err(Step::Here(left_type(what, f, i, v.type_name()))),
+            }
+        }
+        Ok(out)
+    }
+
+    /// `n s1 … sk 'step k iterate`: the state after 0, 1, … n applications of `step`, one array per state value.
+    fn iterate(&mut self, st: &mut Vec<Value>, span: &Range<usize>) -> Result<(), Step> {
+        let what = "iterate";
+        let k = state_count(st, what)?;
+        let f = pop_fn(st, what)?;
+        let s0 = pop_states(st, k, what)?;
+        let n = pop_num(st, what)?;
+        dimless_only(&n, what)?;
+        // the step always runs once, so its unit errors show even for 0 steps
+        let s1 = self.run_word(&f, s0.iter().cloned().map(Value::Num), k, what, span)?;
+        keeps_units(&f, &s0, &s1)?;
+        // the static pass knows these checks' outcome so far; the rest depend on values
+        let n = step_count(&n, what)?;
+        check_shapes(&f, &s0, &s1, what)?;
+        check_size(&s0, n, what)?;
+        let mut hist: Vec<Vec<f64>> = s0.iter().map(|s| Vec::with_capacity((n + 1) * s.len())).collect();
+        let mut cur = s0.clone();
+        for step in 0..n {
+            for (h, s) in hist.iter_mut().zip(&cur) {
+                h.extend_from_slice(&s.data);
+            }
+            let next = if step == 0 { s1.clone() } else { self.run_word(&f, cur.into_iter().map(Value::Num), k, what, span)? };
+            // a step's units can depend on values (`2 [m] x ^`), so every step is checked
+            keeps_units(&f, &s0, &next)?;
+            check_shapes(&f, &s0, &next, what)?;
+            cur = next;
+        }
+        for (h, s) in hist.iter_mut().zip(&cur) {
+            h.extend_from_slice(&s.data);
+        }
+        push_histories(st, &s0, hist, n);
+        Ok(())
+    }
+
+    /// `t0 h n s1 … sk 'deriv k rk4`: fixed-step 4th-order Runge–Kutta for `ds/dt = deriv(t, s)`.
+    fn rk4(&mut self, st: &mut Vec<Value>, span: &Range<usize>) -> Result<(), Step> {
+        let what = "rk4";
+        let k = state_count(st, what)?;
+        let f = pop_fn(st, what)?;
+        let s0 = pop_states(st, k, what)?;
+        let n = pop_num(st, what)?;
+        dimless_only(&n, what)?;
+        let h = pop_num(st, what)?;
+        let t0 = pop_num(st, what)?;
+        same_dims(&t0.q, &h.q, what)?;
+        if h.q.absolute.is_some() {
+            return Err(Step::Here(RK4_ABS_STEP.into()));
+        }
+        let args = |t: f64, s: &[Num]| std::iter::once(Value::Num(Num::scalar(t, t0.q.clone()))).chain(s.iter().cloned().map(Value::Num)).collect::<Vec<_>>();
+        // the derivative at the start is both the unit check and the first step's first stage
+        // (whether t0 is a single number is checked after the unit checks; until then, its first element)
+        let d0 = self.run_word(&f, args(t0.data.first().copied().unwrap_or(f64::NAN), &s0), k, what, span)?;
+        for (i, (s, d)) in s0.iter().zip(&d0).enumerate() {
+            if d.q.absolute.is_some() {
+                return Err(Step::Here(rk4_abs_deriv(i)));
+            }
+            let dh = d.q.dim.mul(&h.q.dim);
+            if dh != s.q.dim {
+                return Err(Step::Here(rk4_units(i, &s.q.dim, &dh)));
+            }
+        }
+        // the static pass knows these checks' outcome so far; the rest depend on values
+        let n = step_count(&n, what)?;
+        check_shapes(&f, &s0, &d0, what)?;
+        if h.as_scalar().is_none() || t0.as_scalar().is_none() {
+            return Err(Step::Here("rk4: the start time and the step are single numbers".into()));
+        }
+        check_size(&s0, n, what)?;
+        let (t0, h) = (t0.data[0], h.data[0]);
+        // s + c·d, elementwise, keeping s's units
+        let axpy = |s: &[Num], c: f64, d: &[Num]| -> Vec<Num> {
+            s.iter()
+                .zip(d)
+                .map(|(s, d)| Num::with_shape(s.shape.clone(), s.data.iter().zip(d.data.iter()).map(|(x, y)| x + c * y).collect(), s.q.clone()))
+                .collect()
+        };
+        let mut hist: Vec<Vec<f64>> = s0.iter().map(|s| Vec::with_capacity((n + 1) * s.len())).collect();
+        let mut cur = s0.clone();
+        for i in 0..n {
+            for (hs, s) in hist.iter_mut().zip(&cur) {
+                hs.extend_from_slice(&s.data);
+            }
+            let t = t0 + i as f64 * h;
+            let k1 = if i == 0 { d0.clone() } else { self.run_word(&f, args(t, &cur), k, what, span)? };
+            let k2 = self.run_word(&f, args(t + h / 2.0, &axpy(&cur, h / 2.0, &k1)), k, what, span)?;
+            let k3 = self.run_word(&f, args(t + h / 2.0, &axpy(&cur, h / 2.0, &k2)), k, what, span)?;
+            let k4 = self.run_word(&f, args(t + h, &axpy(&cur, h, &k3)), k, what, span)?;
+            for ks in [&k1, &k2, &k3, &k4] {
+                for (j, (d, d0)) in ks.iter().zip(&d0).enumerate() {
+                    if d.q.dim != d0.q.dim || d.q.absolute.is_some() {
+                        return Err(Step::Here(format!("rk4: derivative {} changed units, from {} to {}", j + 1, describe(&d0.q), describe(&d.q))));
+                    }
+                }
+                check_shapes(&f, &s0, ks, what)?;
+            }
+            cur = cur
+                .iter()
+                .enumerate()
+                .map(|(j, s)| {
+                    let v = (0..s.len()).map(|e| s.data[e] + h / 6.0 * (k1[j].data[e] + 2.0 * k2[j].data[e] + 2.0 * k3[j].data[e] + k4[j].data[e])).collect();
+                    Num::with_shape(s.shape.clone(), v, s.q.clone())
+                })
+                .collect();
+        }
+        for (hs, s) in hist.iter_mut().zip(&cur) {
+            hs.extend_from_slice(&s.data);
+        }
+        push_histories(st, &s0, hist, n);
+        Ok(())
+    }
+}
+
+/// `iterate`'s step keeps each state's dimension, and whether it's absolute.
+fn keeps_units(f: &Callee, before: &[Num], after: &[Num]) -> R<()> {
+    for (i, (a, b)) in before.iter().zip(after).enumerate() {
+        if a.q.dim != b.q.dim || a.q.absolute.is_some() != b.q.absolute.is_some() {
+            return Err(units_changed(f, i, &describe(&a.q), &describe(&b.q)));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn units_changed(f: &Callee, i: usize, from: &str, to: &str) -> String {
+    format!("iterate needs matching units: '{} turns state {} from {from} into {to}", f.name(), i + 1)
+}
+
+pub(crate) fn rk4_units(i: usize, state: &Dim, dh: &Dim) -> String {
+    format!("rk4 needs matching units: state {} is {state}, but its derivative × the step is {dh}", i + 1)
+}
+
+pub(crate) const RK4_ABS_STEP: &str = "rk4: the step size is a difference, not an absolute value (a date or temperature)";
+
+pub(crate) fn rk4_abs_deriv(i: usize) -> String {
+    format!("rk4: derivative {} is an absolute value; a rate of change is a difference", i + 1)
+}
+
+/// The most steps `iterate` and `rk4` take, and the most values they produce.
+pub(crate) const MAX_STEPS: f64 = 1_000_000.0;
+pub(crate) const MAX_VALUES: usize = 10_000_000;
+
+/// A quantity's dimension, and whether it's absolute, the way the static pass writes it.
+fn describe(q: &Quant) -> String {
+    if q.absolute.is_some() {
+        format!("{} (absolute)", q.dim)
+    } else {
+        q.dim.to_string()
+    }
+}
+
+pub(crate) fn left_count(what: &str, f: &Callee, k: usize, got: usize) -> String {
+    format!("{what}: '{} should leave {k} value{}, left {got}", f.name(), if k == 1 { "" } else { "s" })
+}
+
+pub(crate) fn left_type(what: &str, f: &Callee, i: usize, ty: &str) -> String {
+    format!("{what}: '{}'s value {} is a {ty}, not a number", f.name(), i + 1)
+}
+
+pub(crate) fn bad_count(what: &str, v: f64) -> String {
+    format!("{what}: the state count must be a whole number ≥ 1, got {}", crate::value::fmt_num(v))
+}
+
+pub(crate) fn bad_steps(what: &str, v: f64) -> String {
+    format!("{what}: the step count must be a whole number from 0 to 1,000,000, got {}", crate::value::fmt_num(v))
+}
+
+/// The state count `k` on top of the stack.
+fn state_count(st: &mut Vec<Value>, what: &str) -> R<usize> {
+    let k = pop_num(st, what)?;
+    let v = scalar_dimless(&k, what)?;
+    if v < 1.0 || v.fract() != 0.0 {
+        return Err(bad_count(what, v));
+    }
+    Ok(v.min(u32::MAX as f64) as usize)
+}
+
+fn pop_fn(st: &mut Vec<Value>, what: &str) -> R<Callee> {
+    match pop(st, what)? {
+        Value::Fn(c) => Ok(c),
+        v => Err(format!("{what} expects a word ('name), got {}", v.type_name())),
+    }
+}
+
+/// `k` numbers, deepest first.
+fn pop_states(st: &mut Vec<Value>, k: usize, what: &str) -> R<Vec<Num>> {
+    let mut v = Vec::with_capacity(k.min(st.len()));
+    for _ in 0..k {
+        v.push(pop_num(st, what)?);
+    }
+    v.reverse();
+    Ok(v)
+}
+
+fn dimless_only(n: &Num, what: &str) -> R<()> {
+    if !n.q.is_dimensionless() {
+        return Err(format!("{what} expects a dimensionless number, got {}", n.q.dim));
+    }
+    Ok(())
+}
+
+fn step_count(n: &Num, what: &str) -> R<usize> {
+    let v = n.as_scalar().ok_or_else(|| format!("{what} expects a single number, got shape {:?}", n.shape))?;
+    if !(0.0..=MAX_STEPS).contains(&v) || v.fract() != 0.0 {
+        return Err(bad_steps(what, v));
+    }
+    Ok(v as usize)
+}
+
+fn check_size(s0: &[Num], n: usize, what: &str) -> R<()> {
+    let per: usize = s0.iter().map(|s| s.len()).sum();
+    if per.saturating_mul(n + 1) > MAX_VALUES {
+        return Err(format!("{what}: {n} steps of {per} values each is more than 10,000,000 values"));
+    }
+    Ok(())
+}
+
+fn check_shapes(f: &Callee, s0: &[Num], got: &[Num], what: &str) -> R<()> {
+    for (i, (a, b)) in s0.iter().zip(got).enumerate() {
+        if a.shape != b.shape {
+            let role = if what == "rk4" { "derivative" } else { "state" };
+            return Err(format!("{what}: '{} gives {role} {} with shape {:?}, but state {} has shape {:?}", f.name(), i + 1, b.shape, i + 1, a.shape));
+        }
+    }
+    Ok(())
+}
+
+/// One array per state: its value after 0, 1, … n steps, along a new leading axis.
+fn push_histories(st: &mut Vec<Value>, s0: &[Num], hist: Vec<Vec<f64>>, n: usize) {
+    for (s, h) in s0.iter().zip(hist) {
+        let mut shape = vec![n + 1];
+        shape.extend_from_slice(&s.shape);
+        st.push(Value::Num(Num::with_shape(shape, h, s.q.clone())));
     }
 }
 

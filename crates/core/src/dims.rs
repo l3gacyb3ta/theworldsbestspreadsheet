@@ -7,7 +7,7 @@
 //! So a static error is always the error evaluation reports once the inputs
 //! are there, unless a value-dependent check fails first.
 
-use crate::eval::MAX_DEPTH;
+use crate::eval::{self, MAX_DEPTH};
 use crate::ids::*;
 use crate::model::StoredRef;
 use crate::parse::{Builtin, Callee, Compiled, Op, OpKind};
@@ -38,6 +38,8 @@ pub enum SVal {
     Chart,
     /// A unit, dimension or word cell's value.
     Other(&'static str),
+    /// A word as a value (`'step`).
+    Fn(Callee),
     /// Could be anything (an empty input, a cycle, an unknown branch).
     Any,
 }
@@ -87,6 +89,7 @@ impl fmt::Display for SVal {
             SVal::Text => write!(f, "text"),
             SVal::Chart => write!(f, "chart"),
             SVal::Other(t) => write!(f, "{t}"),
+            SVal::Fn(c) => write!(f, "'{}", c.name()),
             SVal::Any => write!(f, "?"),
         }
     }
@@ -192,7 +195,7 @@ pub fn range_type(cells: &[(CellKey, Option<SVal>)], label: &dyn Fn(CellKey) -> 
                 texts = true;
             }
             Some(SVal::Any) => certain = false,
-            Some(SVal::Chart | SVal::Other(_)) => return Err(Halt::Stop),
+            Some(SVal::Chart | SVal::Other(_) | SVal::Fn(_)) => return Err(Halt::Stop),
         }
     }
     Ok(match (nums, texts) {
@@ -238,6 +241,7 @@ fn type_name(v: &SVal) -> &'static str {
         SVal::Text => "text",
         SVal::Chart => "chart",
         SVal::Other(t) => t,
+        SVal::Fn(_) => "word",
         SVal::Any => "value",
     }
 }
@@ -270,7 +274,7 @@ fn same_dims(a: &SNum, b: &SNum, what: &str) -> S<()> {
 /// `rows_of`: only numbers and text split into rows.
 fn rows_ok(v: &SVal) -> S<()> {
     match v {
-        SVal::Chart | SVal::Other(_) => Err(format!("can't split a {} into rows", type_name(v)).into()),
+        SVal::Chart | SVal::Other(_) | SVal::Fn(_) => Err(format!("can't split a {} into rows", type_name(v)).into()),
         _ => Ok(()),
     }
 }
@@ -293,11 +297,14 @@ struct Abs<'e> {
     /// The current op took an unknown slot as a number, text or chart: that
     /// may fail first, so no later failure in the op is certain.
     loose: bool,
+    /// An op of the word body being run was loose. A body's errors all point at
+    /// the call, so a later one in the body isn't certain either.
+    tainted: bool,
 }
 
 impl<'e> Abs<'e> {
     fn new(env: &'e dyn StaticEnv) -> Abs<'e> {
-        Abs { env, depth: 0, loose: false }
+        Abs { env, depth: 0, loose: false, tainted: false }
     }
 
     fn pop_typed(&mut self, st: &mut Vec<SVal>, what: &str) -> S<SVal> {
@@ -337,6 +344,7 @@ impl<'e> Abs<'e> {
                 Step::Inner(e) => Fail::Err(e),
                 Step::Stop => Fail::Stop,
             })?;
+            self.tainted |= self.loose;
         }
         Ok(())
     }
@@ -383,7 +391,7 @@ impl<'e> Abs<'e> {
                 st.push(v);
             }
             OpKind::Local(i) => st.push(locals[*i].clone()),
-            OpKind::Builtin(b) => self.builtin(*b, st)?,
+            OpKind::Builtin(b) => self.builtin(*b, st, &op.span)?,
             OpKind::Call(c) => self.call(&c.0, c.1, st, &op.span)?,
             OpKind::Reduce(c) => {
                 let v = pop(st, "reduce")?;
@@ -410,6 +418,7 @@ impl<'e> Abs<'e> {
                 };
                 st.push(r);
             }
+            OpKind::Quote(c) => st.push(SVal::Fn((**c).clone())),
         }
         Ok(())
     }
@@ -420,7 +429,7 @@ impl<'e> Abs<'e> {
         let mut st = vec![row.clone(), row.clone()];
         let loose = self.loose;
         let ok = match c {
-            Callee::Builtin(b) => self.builtin(*b, &mut st).is_ok(),
+            Callee::Builtin(b) => self.builtin(*b, &mut st, span).is_ok(),
             Callee::User(name, k) => self.call(name, *k, &mut st, span).is_ok(),
         };
         self.loose = loose;
@@ -442,10 +451,17 @@ impl<'e> Abs<'e> {
             return Err(format!("{name} takes {} values from the stack", locals.len()).into());
         }
         let args: Vec<SVal> = st.split_off(st.len() - locals.len());
+        let (loose, tainted) = (self.loose, self.tainted);
+        self.tainted = false;
         self.depth += 1;
         let r = self.run(body, st, &args);
         self.depth -= 1;
+        let inner = self.tainted;
+        // a loose op in the body leaves the call itself loose
+        self.loose = loose || inner;
+        self.tainted = tainted || inner;
         r.map_err(|e| match e {
+            Fail::Err(_) if inner => Step::Stop,
             Fail::Err(e) => Step::Inner(EvalErr { msg: format!("in {name}: {}", e.msg), span: Some(span.clone()) }),
             Fail::Stop => Step::Stop,
         })
@@ -466,7 +482,7 @@ impl<'e> Abs<'e> {
         }
     }
 
-    fn builtin(&mut self, b: Builtin, st: &mut Vec<SVal>) -> S<()> {
+    fn builtin(&mut self, b: Builtin, st: &mut Vec<SVal>, span: &Range<usize>) -> S<()> {
         use Builtin::*;
         let name = crate::parse::builtin_name(b);
         match b {
@@ -610,7 +626,7 @@ impl<'e> Abs<'e> {
             }
             Len => {
                 let v = pop(st, name)?;
-                if let SVal::Chart | SVal::Other(_) = v {
+                if let SVal::Chart | SVal::Other(_) | SVal::Fn(_) = v {
                     return Err(format!("len of a {}", type_name(&v)).into());
                 }
                 st.push(SVal::plain());
@@ -695,7 +711,161 @@ impl<'e> Abs<'e> {
                 self.pop_chart(st, name).map_err(|_| Step::Stop)?;
                 st.push(SVal::Chart);
             }
+            Iterate => self.iterate(st, span)?,
+            Rk4 => self.rk4(st, span)?,
         }
+        Ok(())
+    }
+
+    /// `k`, which must be known: it says how many values to take.
+    fn state_count(&mut self, st: &mut Vec<SVal>, what: &str) -> S<usize> {
+        let k = self.pop_num(st, what)?;
+        scalar_dimless(&k, what)?;
+        match k.konst {
+            Some(v) if v < 1.0 || v.fract() != 0.0 => Err(eval::bad_count(what, v).into()),
+            Some(v) => Ok(v.min(u32::MAX as f64) as usize),
+            None => Err(Step::Stop),
+        }
+    }
+
+    /// The quoted word, or `None` if the slot might be one.
+    fn pop_fn(&mut self, st: &mut Vec<SVal>, what: &str) -> S<Option<Callee>> {
+        match self.pop_typed(st, what)? {
+            SVal::Fn(c) => Ok(Some(c)),
+            SVal::Any => Ok(None),
+            v => Err(format!("{what} expects a word ('name), got {}", type_name(&v)).into()),
+        }
+    }
+
+    fn pop_states(&mut self, st: &mut Vec<SVal>, k: usize, what: &str) -> S<Vec<SNum>> {
+        let mut v = Vec::new();
+        for _ in 0..k {
+            v.push(self.pop_num(st, what)?);
+        }
+        v.reverse();
+        Ok(v)
+    }
+
+    /// Runs `f` on a stack holding just `args`, as `Interp::run_word` does: the
+    /// numbers it leaves, `None` for one that may be anything.
+    fn run_word(&mut self, f: &Callee, args: Vec<SVal>, k: usize, what: &str, span: &Range<usize>) -> S<Vec<Option<SNum>>> {
+        let mut w = args;
+        let r = match f {
+            Callee::Builtin(b) => self.builtin(*b, &mut w, span),
+            Callee::User(name, key) => self.call(name, *key, &mut w, span),
+        };
+        match r {
+            // a value taken earlier in this op may not be a number at all, which fails first
+            Err(Step::Inner(_)) if self.loose => return Err(Step::Stop),
+            r => r?,
+        }
+        if w.len() != k {
+            return Err(eval::left_count(what, f, k, w.len()).into());
+        }
+        let mut out = Vec::with_capacity(k);
+        for (i, v) in w.into_iter().enumerate() {
+            match v {
+                SVal::Num(n) => out.push(Some(n)),
+                SVal::Any => {
+                    self.loose = true;
+                    out.push(None);
+                }
+                v => return Err(eval::left_type(what, f, i, type_name(&v)).into()),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Mirrors `Interp::iterate`: the step runs once on the states' slots, and must keep each one's dimension.
+    fn iterate(&mut self, st: &mut Vec<SVal>, span: &Range<usize>) -> S<()> {
+        let what = "iterate";
+        let k = self.state_count(st, what)?;
+        let f = self.pop_fn(st, what)?;
+        let s0 = self.pop_states(st, k, what)?;
+        let n = self.pop_num(st, what)?;
+        match dimless(&n) {
+            Some(false) => return Err(format!("{what} expects a dimensionless number, got {}", n.dim.as_ref().unwrap()).into()),
+            Some(true) => {}
+            None => self.loose = true,
+        }
+        let mut out: Vec<SVal> = s0.iter().map(|s| SVal::num(s.dim.clone(), s.abs)).collect();
+        if let Some(f) = f {
+            let s1 = self.run_word(&f, out.clone(), k, what, span)?;
+            for (i, (a, b)) in s0.iter().zip(&s1).enumerate() {
+                let Some(b) = b else { continue };
+                match (&a.dim, a.abs, &b.dim, b.abs) {
+                    (Some(da), Some(aa), Some(db), Some(ab)) => {
+                        if da != db || aa != ab {
+                            let (x, y) = (SVal::num(a.dim.clone(), a.abs), SVal::num(b.dim.clone(), b.abs));
+                            return Err(eval::units_changed(&f, i, &x.to_string(), &y.to_string()).into());
+                        }
+                    }
+                    _ => self.loose = true,
+                }
+                out[i] = SVal::num(a.dim.clone().or(b.dim.clone()), a.abs.or(b.abs));
+            }
+        }
+        // shapes are checked next, then the step count's value
+        if let Some(v) = n.konst {
+            if !(0.0..=eval::MAX_STEPS).contains(&v) || v.fract() != 0.0 {
+                return Err(eval::bad_steps(what, v).into());
+            }
+        }
+        st.extend(out);
+        Ok(())
+    }
+
+    /// Mirrors `Interp::rk4`: each derivative times the step has its state's dimension.
+    fn rk4(&mut self, st: &mut Vec<SVal>, span: &Range<usize>) -> S<()> {
+        let what = "rk4";
+        let k = self.state_count(st, what)?;
+        let f = self.pop_fn(st, what)?;
+        let s0 = self.pop_states(st, k, what)?;
+        let n = self.pop_num(st, what)?;
+        match dimless(&n) {
+            Some(false) => return Err(format!("{what} expects a dimensionless number, got {}", n.dim.as_ref().unwrap()).into()),
+            Some(true) => {}
+            None => self.loose = true,
+        }
+        let h = self.pop_num(st, what)?;
+        let t0 = self.pop_num(st, what)?;
+        same_dims(&t0, &h, what)?;
+        match h.abs {
+            Some(true) if t0.dim.is_some() && h.dim.is_some() => return Err(eval::RK4_ABS_STEP.into()),
+            Some(false) if t0.dim.is_some() && h.dim.is_some() => {}
+            _ => self.loose = true,
+        }
+        let out: Vec<SVal> = s0.iter().map(|s| SVal::num(s.dim.clone(), s.abs)).collect();
+        if let Some(f) = f {
+            let args = std::iter::once(SVal::num(t0.dim.clone(), t0.abs)).chain(out.iter().cloned()).collect();
+            let d0 = self.run_word(&f, args, k, what, span)?;
+            for (i, (s, d)) in s0.iter().zip(&d0).enumerate() {
+                let Some(d) = d else {
+                    self.loose = true;
+                    continue;
+                };
+                match d.abs {
+                    Some(true) => return Err(eval::rk4_abs_deriv(i).into()),
+                    Some(false) => {}
+                    None => self.loose = true,
+                }
+                match (&s.dim, &d.dim, &h.dim) {
+                    (Some(sd), Some(dd), Some(hd)) => {
+                        let dh = dd.mul(hd);
+                        if dh != *sd {
+                            return Err(eval::rk4_units(i, sd, &dh).into());
+                        }
+                    }
+                    _ => self.loose = true,
+                }
+            }
+        }
+        if let Some(v) = n.konst {
+            if !(0.0..=eval::MAX_STEPS).contains(&v) || v.fract() != 0.0 {
+                return Err(eval::bad_steps(what, v).into());
+            }
+        }
+        st.extend(out);
         Ok(())
     }
 }

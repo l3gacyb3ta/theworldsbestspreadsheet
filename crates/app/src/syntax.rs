@@ -99,7 +99,7 @@ pub fn layout(text: &str, refs: &[RefHi], err: Option<&Range<usize>>, font: Font
                 Tok::Num(_) | Tok::Date(_) => C_NUM,
                 Tok::Unit(_) | Tok::To(_) => C_UNIT,
                 Tok::Str(_) => C_STR,
-                Tok::Reduce(_) | Tok::Scan(_) => C_WORD,
+                Tok::Reduce(_) | Tok::Scan(_) | Tok::Quote(_) => C_WORD,
                 Tok::Word(w) if w == "=" || w == ":" || w == ";" || w == "{" || w == "}" => C_DIM,
                 Tok::Word(w) if builtin(w).is_some() => C_WORD,
                 Tok::Bad(_) | Tok::DeadRef => C_ERR,
