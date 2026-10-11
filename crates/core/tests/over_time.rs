@@ -331,3 +331,47 @@ fn inputs_read_by_a_word_a_quoted_word_calls_are_upstream() {
     set(&mut e, "B2", "1");
     assert_eq!(nums(&e, "C1"), vec![1.0, 2.0, 4.0, 8.0]);
 }
+
+/// The spring's phase plot: position against speed, from separate cells.
+fn phase_plot() -> Engine {
+    let mut e = spring_model();
+    set(&mut e, "C1", "=0 [s] timestep steps x0 v0 'msd 2 rk4 drop");
+    set(&mut e, "D1", "=0 [s] timestep steps x0 v0 'msd 2 rk4 swap drop");
+    set(&mut e, "F1", "=C1 D1 path");
+    e
+}
+
+fn chart_provs(e: &Engine, at: &str) -> (Vec<Prov>, Vec<Prov>) {
+    let Some(Ok(Value::Chart(c))) = e.result(key(e, at)) else { panic!("{}", show(e, at)) };
+    let l = &c.layers[0];
+    let wbs_core::chart::Xs::Num(xs) = &l.xs else { panic!() };
+    (xs.prov.to_vec(xs.len()).unwrap(), l.ys.prov.to_vec(l.ys.len()).unwrap())
+}
+
+#[test]
+fn a_history_starts_with_its_start_cells() {
+    let mut e = phase_plot();
+    let (xs, vs) = chart_provs(&e, "F1");
+    // the first point is x0 and v0, unchanged: it's theirs
+    assert_eq!((xs[0], vs[0]), (Prov::Literal(key(&e, "B6")), Prov::Literal(key(&e, "B7"))));
+    // every other point is computed
+    assert_eq!((xs[1], vs[1]), (Prov::Derived(key(&e, "C1"), 1), Prov::Derived(key(&e, "D1"), 1)));
+    assert_eq!(e.literal_source(key(&e, "C1"), 0), Some(key(&e, "B6")));
+    assert_eq!(e.literal_source(key(&e, "C1"), 1), None);
+    // through any number of cells that only rearrange
+    set(&mut e, "M1", "=C1");
+    set(&mut e, "N1", "=D1 rev rev");
+    set(&mut e, "P1", "=M1 N1 path");
+    let (xs, vs) = chart_provs(&e, "P1");
+    assert_eq!((xs[0], vs[0]), (Prov::Literal(key(&e, "B6")), Prov::Literal(key(&e, "B7"))));
+    // not once something computes it
+    set(&mut e, "N1", "=D1 1 *");
+    let (_, vs) = chart_provs(&e, "P1");
+    assert_eq!(vs[0], Prov::Derived(key(&e, "N1"), 0));
+    // iterate too; a computed start isn't anyone's
+    set(&mut e, "A12", ": half 0.5 * ;");
+    set(&mut e, "C60", "=4 x0 'half 1 iterate");
+    assert_eq!(e.literal_source(key(&e, "C60"), 0), Some(key(&e, "B6")));
+    set(&mut e, "C60", "=4 x0 2 * 'half 1 iterate");
+    assert_eq!(e.literal_source(key(&e, "C60"), 0), None);
+}
