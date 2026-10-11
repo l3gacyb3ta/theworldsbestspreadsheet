@@ -409,10 +409,11 @@ fn tornado_chart_of_named_inputs() {
     assert_eq!(cats.data.len(), 7, "{cats:?}");
     // largest swing first
     assert!(ys.data.windows(2).all(|w| w[0].abs() >= w[1].abs()), "{:?}", ys.data);
-    // the solar cost bar: d(payback)/d(cost) across 800 USD/kW
+    // the solar cost bar: d(payback)/d(cost) across 800 USD/kW (canonically 0.8 USD/W)
     let i = cats.data.iter().position(|s| &**s == "solarCost (range)").unwrap();
     let d = e.sensitivities(e.wb.names["solarCost"].cell, &[key(&e, "G3")]).unwrap().remove(0);
-    assert!((ys.data[i] - d.data[0] * 800.0).abs() < 1e-9 * ys.data[i].abs(), "{} vs {}", ys.data[i], d.data[0] * 800.0);
+    assert!((ys.data[i] - d.data[0] * 0.8).abs() < 1e-9 * ys.data[i].abs(), "{} vs {}", ys.data[i], d.data[0] * 0.8);
+    assert_eq!(fmt_quantity(ys.data[i], &ys.q).split(' ').nth(1), Some("yr"));
     assert!(cats.data.iter().any(|s| &**s == "roundtrip (±10%)"), "{cats:?}");
     assert_eq!(ys.q.dim.to_string(), "time");
     // follows the model: a dearer system pays back slower, so the chart changes

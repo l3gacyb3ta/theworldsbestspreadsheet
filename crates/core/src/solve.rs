@@ -592,6 +592,45 @@ mod tests {
         assert_eq!((o.lo, o.hi), (1.0, 7.0));
     }
 
+    /// `solve_newton` on `f` with derivative `df`, counting value and slope calls.
+    fn newton(f: impl Fn(f64) -> f64, df: impl Fn(f64) -> Result<f64, String>, x0: f64, t: f64, o: &Opts) -> Result<Root, Fail> {
+        let mut x = x0;
+        let mut g = |a: Ask| match a {
+            Ask::Value(v) => {
+                x = v;
+                Ok(f(v))
+            }
+            Ask::Slope => df(x),
+        };
+        solve_newton(&mut g, x0, t, o)
+    }
+
+    #[test]
+    fn newton_steps_then_brackets() {
+        // monotone: a few steps, fewer evaluations than bracketing
+        let r = newton(|g| (1.0 + g).powi(12), |g| Ok(12.0 * (1.0 + g).powi(11)), 0.04, 2.0, &opts(0.04, 2)).unwrap();
+        let b = run(|g| Ok((1.0 + g).powi(12)), 0.04, 2.0, &opts(0.04, 2)).unwrap();
+        assert!((r.x - b.x).abs() < 1e-9 && r.evals < b.evals, "{r:?} vs {b:?}");
+        // the nearer root of a parabola, as bracketing finds
+        let r = newton(|x| (x - 3.0).powi(2), |x| Ok(2.0 * (x - 3.0)), 4.0, 0.25, &opts(4.0, 1)).unwrap();
+        assert!((r.x - 3.5).abs() < 1e-9, "{r:?}");
+        // a flat start (the bottom of the parabola): bracketing from the start
+        let r = newton(|x| (x - 3.0).powi(2), |x| Ok(2.0 * (x - 3.0)), 3.0, 1.0, &opts(3.0, 1)).unwrap();
+        assert!(((r.x - 3.0).abs() - 1.0).abs() < 1e-9, "{r:?}");
+        // no slope at all (a pass that can't be done): bracketing
+        let r = newton(|x| x * 2.0, |_| Err("no".into()), 1.0, 5.0, &opts(1.0, 2)).unwrap();
+        assert!((r.x - 2.5).abs() < 1e-9, "{r:?}");
+        // a step out of the range: bracketing, which then says it's out of reach
+        let o = opts(1.0, 2).within(Some(0.0), Some(2.0));
+        assert!(matches!(newton(|x| x, |_| Ok(1.0), 1.0, 5.0, &o), Err(Fail::OutOfReach { hi: 2.0, .. })));
+        // a jump: Newton can't land on it, and bracketing reports it as before
+        let step = |x: f64| if x > 1.3 { 10.0 } else { 0.0 };
+        assert!(matches!(newton(step, |_| Ok(0.0), 1.0, 5.0, &opts(1.0, 2)), Err(Fail::Jump { .. })));
+        // whole numbers only bracket
+        let r = newton(|x| x * 10.0, |_| Ok(10.0), 24.0, 123.0, &opts(24.0, 0)).unwrap();
+        assert_eq!(r.x, 12.0);
+    }
+
     #[test]
     fn evaluation_cap() {
         let o = Opts { max_evals: 5, ..opts(1.0, 2) };

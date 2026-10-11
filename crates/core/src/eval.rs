@@ -634,7 +634,8 @@ impl<'e> Interp<'e> {
                 if !x.q.is_dimensionless() {
                     return Err(Step::Here(format!("{name} needs a dimensionless argument, got {}", x.q.dim)));
                 }
-                let (f, df): (fn(f64) -> f64, fn(f64) -> f64) = match b {
+                type F = fn(f64) -> f64;
+                let (f, df): (F, F) = match b {
                     Exp => (f64::exp, f64::exp),
                     Log => (f64::ln, |v| 1.0 / v),
                     Log10 => (f64::log10, |v| 1.0 / (v * std::f64::consts::LN_10)),

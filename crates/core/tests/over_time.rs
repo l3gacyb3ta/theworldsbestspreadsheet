@@ -304,7 +304,7 @@ fn inputs_read_inside_a_quoted_word_are_upstream() {
     set(&mut e, "B3", "2 [N*s/m]");
     assert_ne!(nums(&e, "C1"), before);
     // and goal-seek solves for it: pull element 4 down to 0.1 m
-    let g = Goal { target: c1, index: 4, want: 0.1, tol: 1e-6, input: key(&e, "B3"), decimals: Some(4) };
+    let g = Goal { target: c1, index: 4, want: 0.1, tol: 1e-6, input: key(&e, "B3"), decimals: Some(4), newton: true };
     let s = e.goal_seek(&g).unwrap();
     set(&mut e, "B3", &s.text);
     assert!((nums(&e, "C1")[4] - 0.1).abs() < 1e-3, "{} → {:?}", s.text, nums(&e, "C1"));
