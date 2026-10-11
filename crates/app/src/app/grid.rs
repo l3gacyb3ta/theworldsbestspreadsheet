@@ -364,6 +364,7 @@ impl App {
             tol: (a.y1 - a.y0).abs() / 1000.0 * a.disp.factor.abs(),
             input: g.input,
             decimals: Some(g.decimals + if g.fine { 2 } else { 0 }),
+            newton: true,
         };
         let t = std::time::Instant::now();
         let res = self.eng.goal_seek(&goal);
@@ -382,9 +383,11 @@ impl App {
                 if s.text != self.eng.wb.cell_text(g.input) {
                     self.eng.set_text(g.input, &s.text);
                 }
+                g.slope = self.eng.slope_text(g.input, g.target, g.index).ok();
                 Ok(s.text)
             }
             Err(e) => {
+                g.slope = None;
                 if self.eng.wb.cell(g.input) != g.orig.as_ref() {
                     self.eng.apply(Edit::Cells(vec![(g.input, g.orig.clone())]));
                 }
@@ -447,7 +450,12 @@ impl App {
                 tip.push(Tip::Action(format!("release to goal-seek {input}")));
                 tip.push(Tip::Note(format!("a solve takes {:.0} ms, too slow to follow the pointer", g.solve_ms)));
             }
-            Some(Ok(text)) => tip.push(Tip::Action(format!("{input} = {text}"))),
+            Some(Ok(text)) => {
+                tip.push(Tip::Action(format!("{input} = {text}")));
+                if let Some(s) = &g.slope {
+                    tip.push(Tip::Note(s.clone()));
+                }
+            }
             Some(Err(e)) => {
                 tip.push(Tip::Action(format!("no answer: {input} stays as it was")));
                 tip.push(Tip::Note(e.to_string()));
@@ -566,7 +574,7 @@ impl App {
                     if let Some((input, _)) = self.goal_choice(target) {
                         let decimals = ops::cell_literal(&self.eng.wb.cell_text(input)).map_or(0, |l| l.decimals);
                         let (axis, at, orig) = (axis.clone(), hit.pos, self.eng.wb.cell(input).cloned());
-                        let g = GoalDrag { target, index, input, orig, axis, at, press: pos, pointer: pos, decimals, fine: false, moved: false, live: true, want: None, outcome: None, solve_ms: 0.0 };
+                        let g = GoalDrag { target, index, input, orig, axis, at, press: pos, pointer: pos, decimals, fine: false, moved: false, live: true, want: None, outcome: None, solve_ms: 0.0, slope: None };
                         self.drag = Drag::Goal(Box::new(g));
                         return;
                     }

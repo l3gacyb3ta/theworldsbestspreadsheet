@@ -94,7 +94,7 @@ fn solve_growth_for_month_12_revenue() {
     let mut e = model();
     let before = snapshot(&e);
     // "what growth rate makes month 12 hit 1M?"
-    let goal = Goal { target: key(&e, "B10"), index: 11, want: usd(&e, "B10", 1_000_000.0), tol: 100.0, input: key(&e, "B4"), decimals: None };
+    let goal = Goal { target: key(&e, "B10"), index: 11, want: usd(&e, "B10", 1_000_000.0), tol: 100.0, input: key(&e, "B4"), decimals: None, newton: true };
     let s = e.goal_seek(&goal).unwrap();
     assert_eq!(s.text, "21.3 [%]", "keeps the literal's one decimal and its unit");
     assert!(s.evals < 40, "{s:?}");
@@ -106,7 +106,11 @@ fn solve_growth_for_month_12_revenue() {
     assert_eq!(snapshot(&e), before);
     // more decimals on request (Shift in the app)
     let s = e.goal_seek(&Goal { decimals: Some(4), ..goal.clone() }).unwrap();
-    assert_eq!(s.text, "21.2576 [%]");
+    // (the exact root is 21.25811 %; bracketing alone stops at the first try within 100 USD of 1M)
+    assert_eq!(s.text, "21.2581 [%]");
+    let b = e.goal_seek(&Goal { decimals: Some(4), newton: false, ..goal.clone() }).unwrap();
+    assert_eq!(b.text, "21.2576 [%]");
+    assert!(s.evals < b.evals, "newton {} vs bracketing {}", s.evals, b.evals);
     // solving the start revenue instead: whole dollars, the first within the tolerance (100 USD)
     let s = e.goal_seek(&Goal { input: key(&e, "B3"), ..goal }).unwrap();
     assert_eq!(s.text, "649569 [USD]");
@@ -118,7 +122,7 @@ fn failures_leave_the_document_alone_and_say_why() {
     let before = snapshot(&e);
     let b10 = key(&e, "B10");
     // month 1 is the start revenue, whatever the growth
-    let goal = Goal { target: b10, index: 0, want: usd(&e, "B10", 500_000.0), tol: 1.0, input: key(&e, "B4"), decimals: None };
+    let goal = Goal { target: b10, index: 0, want: usd(&e, "B10", 500_000.0), tol: 1.0, input: key(&e, "B4"), decimals: None, newton: true };
     let err = e.goal_seek(&goal).unwrap_err();
     assert_eq!(err, "out of reach: B10 stays at 120,000 USD for growth from -4,092 % to 4,100 %");
     assert_eq!(snapshot(&e), before);
@@ -143,7 +147,7 @@ fn jumps_are_reported() {
     set(&mut e, "D3", "1.00");
     set(&mut e, "D4", "=D3 2 > 100 [USD] 0 [USD] if");
     let before = snapshot(&e);
-    let goal = Goal { target: key(&e, "D4"), index: 0, want: usd(&e, "D4", 50.0), tol: 0.01, input: key(&e, "D3"), decimals: None };
+    let goal = Goal { target: key(&e, "D4"), index: 0, want: usd(&e, "D4", 50.0), tol: 0.01, input: key(&e, "D3"), decimals: None, newton: true };
     let err = e.goal_seek(&goal).unwrap_err();
     assert_eq!(err, "D4 jumps from 0 USD to 100 USD at D3 = 2, skipping 50 USD");
     assert_eq!(snapshot(&e), before);
@@ -161,9 +165,9 @@ fn absolute_units_and_dates() {
         Some(Ok(Value::Num(n))) => n.q.disp.to_canonical(100.0),
         _ => panic!(),
     };
-    let s = e.goal_seek(&Goal { target: c39, index: 0, want, tol: 0.01, input: key(&e, "B39"), decimals: None }).unwrap();
+    let s = e.goal_seek(&Goal { target: c39, index: 0, want, tol: 0.01, input: key(&e, "B39"), decimals: None, newton: true }).unwrap();
     assert_eq!(s.text, "38 [°C]");
-    let s = e.goal_seek(&Goal { target: c39, index: 0, want, tol: 0.01, input: key(&e, "B39"), decimals: Some(2) }).unwrap();
+    let s = e.goal_seek(&Goal { target: c39, index: 0, want, tol: 0.01, input: key(&e, "B39"), decimals: Some(2), newton: true }).unwrap();
     assert_eq!(s.text, "37.78 [°C]");
     // dates: whole days
     assert_eq!(show(&e, "C40"), "77 day");
@@ -172,9 +176,9 @@ fn absolute_units_and_dates() {
         Some(Ok(Value::Num(n))) => n.q.disp.to_canonical(100.0),
         _ => panic!(),
     };
-    let s = e.goal_seek(&Goal { target: c40, index: 0, want, tol: 1e-6, input: key(&e, "B40"), decimals: None }).unwrap();
+    let s = e.goal_seek(&Goal { target: c40, index: 0, want, tol: 1e-6, input: key(&e, "B40"), decimals: None, newton: true }).unwrap();
     assert_eq!(s.text, "2027-01-16");
-    let s = e.goal_seek(&Goal { target: c40, index: 0, want: want * 1.005, tol: 1e-6, input: key(&e, "B40"), decimals: Some(3) }).unwrap();
+    let s = e.goal_seek(&Goal { target: c40, index: 0, want: want * 1.005, tol: 1e-6, input: key(&e, "B40"), decimals: Some(3), newton: true }).unwrap();
     assert_eq!(s.text, "2027-01-16", "the nearer whole day: dates have no decimals");
     assert_eq!(show(&e, "B40"), "2026-12-24");
 }
@@ -196,7 +200,7 @@ fn goal_seek_on_a_big_sheet() {
         Some(Ok(Value::Num(n))) => n.data[0] * 2.0,
         _ => panic!(),
     };
-    let goal = Goal { target: d2, index: 0, want, tol: want * 1e-4, input: key(&e, "A1"), decimals: Some(6) };
+    let goal = Goal { target: d2, index: 0, want, tol: want * 1e-4, input: key(&e, "A1"), decimals: Some(6), newton: true };
     let runs: Vec<(f64, usize)> = (0..3)
         .map(|_| {
             let t = std::time::Instant::now();

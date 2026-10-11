@@ -7,6 +7,13 @@
 //! a value from a bracket that straddles the target; when there is none it
 //! says why (out of reach, a jump, an error) instead of picking the closest.
 //!
+//! With the derivative at hand (`Engine::sensitivities`), Newton steps go first:
+//! a few steps from the current value, each needing one recalc and one
+//! sensitivity pass. Any step that can't be taken (a flat or failed derivative,
+//! a step out of the input's range, no convergence in a few steps) hands over
+//! to the bracketing search from the start, so its answers and its reasons for
+//! having none stay what they were. Whole-number inputs only bracket.
+//!
 //! `Engine::goal_seek` evaluates by writing the input and recalculating, and
 //! restores the document exactly before returning, success or not.
 
@@ -64,7 +71,55 @@ impl Opts {
 pub struct Root {
     pub x: f64,
     pub y: f64,
+    /// Evaluations: of the value, and (Newton) of its derivative, one each.
     pub evals: usize,
+}
+
+/// What `solve_newton` asks of the model.
+pub enum Ask {
+    /// The value at `x` (which becomes the current input).
+    Value(f64),
+    /// The derivative of the value at the current input, per unit of `x`.
+    Slope,
+}
+
+/// How many Newton steps to try before bracketing instead.
+const NEWTON_STEPS: usize = 6;
+
+/// `solve`, trying Newton steps first: `f` gives values and, asked right after a value, the slope
+/// there. See the module notes for when it brackets instead.
+pub fn solve_newton(f: &mut dyn FnMut(Ask) -> Result<f64, String>, x0: f64, target: f64, o: &Opts) -> Result<Root, Fail> {
+    let mut n = 0;
+    if !o.whole {
+        let mut x = x0.max(o.lo).min(o.hi);
+        for step in 0..=NEWTON_STEPS {
+            n += 1;
+            let Ok(y) = f(Ask::Value(x)).map(|y| if y.is_finite() { y } else { f64::NAN }) else { break };
+            if !y.is_finite() {
+                break;
+            }
+            if (y - target).abs() <= o.tol {
+                return Ok(Root { x, y, evals: n });
+            }
+            if step == NEWTON_STEPS {
+                break;
+            }
+            n += 1;
+            let Ok(d) = f(Ask::Slope) else { break };
+            let next = x + (target - y) / d;
+            if !next.is_finite() || d == 0.0 || next < o.lo || next > o.hi || next == x {
+                break;
+            }
+            x = next;
+        }
+    }
+    let mut value = |x: f64| f(Ask::Value(x));
+    let o = Opts { max_evals: o.max_evals.saturating_sub(n).max(1), ..o.clone() };
+    match solve(&mut value, x0, target, &o) {
+        Ok(r) => Ok(Root { evals: r.evals + n, ..r }),
+        Err(Fail::Evals(m)) => Err(Fail::Evals(m + n)),
+        Err(e) => Err(e),
+    }
 }
 
 /// Why there is no answer.
@@ -256,6 +311,15 @@ pub struct Goal {
     pub input: CellKey,
     /// Decimal places to write; `None` keeps the literal's own.
     pub decimals: Option<usize>,
+    /// Try Newton steps (with the exact derivative) before bracketing. On by default; off is the
+    /// bracketing search alone.
+    pub newton: bool,
+}
+
+impl Goal {
+    pub fn new(target: CellKey, index: usize, want: f64, tol: f64, input: CellKey, decimals: Option<usize>) -> Goal {
+        Goal { target, index, want, tol, input, decimals, newton: true }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -318,13 +382,29 @@ impl Engine {
         let opts = Opts::for_literal(lit.value, decimals, lit.is_date, g.tol).within(range.min.as_ref().map(|m| m.0), range.max.as_ref().map(|m| m.0));
         // trials only write the input cell (a spill past the stored rows reaches virtual ones)
         let orig = self.wb.cell(g.input).cloned();
+        // the derivative per unit of the literal as written (canonical = literal × factor + offset)
+        let factor = match self.result(g.input) {
+            Some(Ok(Value::Num(n))) => n.q.disp.factor,
+            _ => 1.0,
+        };
         let res = {
-            let mut f = |x: f64| {
-                let s = if lit.is_date { format_lit(x, 0, true) } else { format!("{x}") };
-                self.set_text(g.input, &replace_span(&text, &lit.span, &s));
-                self.goal_element(g.target, g.index)
+            let mut f = |a: Ask| match a {
+                Ask::Value(x) => {
+                    let s = if lit.is_date { format_lit(x, 0, true) } else { format!("{x}") };
+                    self.set_text(g.input, &replace_span(&text, &lit.span, &s));
+                    self.goal_element(g.target, g.index)
+                }
+                Ask::Slope => {
+                    let d = self.sensitivities(g.input, &[g.target])?.remove(0);
+                    d.data.get(g.index).map(|d| d * factor).ok_or_else(|| "no such element".to_string())
+                }
             };
-            solve(&mut f, lit.value, g.want, &opts)
+            if g.newton {
+                solve_newton(&mut f, lit.value, g.want, &opts)
+            } else {
+                let mut value = |x: f64| f(Ask::Value(x));
+                solve(&mut value, lit.value, g.want, &opts)
+            }
         };
         self.apply(Edit::Cells(vec![(g.input, orig)]));
         let unit = text[lit.span.end..].trim();
@@ -510,6 +590,45 @@ mod tests {
         // whole numbers: the whole numbers inside
         let o = opts(3.0, 0).within(Some(0.5), Some(7.5));
         assert_eq!((o.lo, o.hi), (1.0, 7.0));
+    }
+
+    /// `solve_newton` on `f` with derivative `df`, counting value and slope calls.
+    fn newton(f: impl Fn(f64) -> f64, df: impl Fn(f64) -> Result<f64, String>, x0: f64, t: f64, o: &Opts) -> Result<Root, Fail> {
+        let mut x = x0;
+        let mut g = |a: Ask| match a {
+            Ask::Value(v) => {
+                x = v;
+                Ok(f(v))
+            }
+            Ask::Slope => df(x),
+        };
+        solve_newton(&mut g, x0, t, o)
+    }
+
+    #[test]
+    fn newton_steps_then_brackets() {
+        // monotone: a few steps, fewer evaluations than bracketing
+        let r = newton(|g| (1.0 + g).powi(12), |g| Ok(12.0 * (1.0 + g).powi(11)), 0.04, 2.0, &opts(0.04, 2)).unwrap();
+        let b = run(|g| Ok((1.0 + g).powi(12)), 0.04, 2.0, &opts(0.04, 2)).unwrap();
+        assert!((r.x - b.x).abs() < 1e-9 && r.evals < b.evals, "{r:?} vs {b:?}");
+        // the nearer root of a parabola, as bracketing finds
+        let r = newton(|x| (x - 3.0).powi(2), |x| Ok(2.0 * (x - 3.0)), 4.0, 0.25, &opts(4.0, 1)).unwrap();
+        assert!((r.x - 3.5).abs() < 1e-9, "{r:?}");
+        // a flat start (the bottom of the parabola): bracketing from the start
+        let r = newton(|x| (x - 3.0).powi(2), |x| Ok(2.0 * (x - 3.0)), 3.0, 1.0, &opts(3.0, 1)).unwrap();
+        assert!(((r.x - 3.0).abs() - 1.0).abs() < 1e-9, "{r:?}");
+        // no slope at all (a pass that can't be done): bracketing
+        let r = newton(|x| x * 2.0, |_| Err("no".into()), 1.0, 5.0, &opts(1.0, 2)).unwrap();
+        assert!((r.x - 2.5).abs() < 1e-9, "{r:?}");
+        // a step out of the range: bracketing, which then says it's out of reach
+        let o = opts(1.0, 2).within(Some(0.0), Some(2.0));
+        assert!(matches!(newton(|x| x, |_| Ok(1.0), 1.0, 5.0, &o), Err(Fail::OutOfReach { hi: 2.0, .. })));
+        // a jump: Newton can't land on it, and bracketing reports it as before
+        let step = |x: f64| if x > 1.3 { 10.0 } else { 0.0 };
+        assert!(matches!(newton(step, |_| Ok(0.0), 1.0, 5.0, &opts(1.0, 2)), Err(Fail::Jump { .. })));
+        // whole numbers only bracket
+        let r = newton(|x| x * 10.0, |_| Ok(10.0), 24.0, 123.0, &opts(24.0, 0)).unwrap();
+        assert_eq!(r.x, 12.0);
     }
 
     #[test]

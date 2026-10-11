@@ -121,6 +121,7 @@ These are the things that make Excel good and are non-negotiable:
 - **Scrubbing**: alt-drag (or similar) on any numeric literal, in a cell or in the formula bar, changes it continuously and all dependents update live. This is the core interaction for modeling and should feel immediate.
 - **Named inputs**: any cell can be named and marked as an input; inputs are listed in a side panel.
 - **Trace**: select a cell to see its precedents and dependents highlighted.
+- **Sensitivities**: forward-mode derivatives through the evaluator, opt-in per evaluation. A sensitivity pass seeds one input with tangent 1, re-evaluates the cells between it and the requested outputs into a scratch overlay (the document is untouched), and every value carries d(value)/d(input) beside it. Derivatives are typed: output units per input unit (`yr*kW/USD`). Every builtin has a derivative rule next to its dimension rule; words that rearrange move tangents with their elements; user words, `iterate` and `rk4` need nothing special. `min`, `max`, `if` take the chosen branch's derivative (ties: the left), comparisons, `floor`, `ceil`, `round` are flat, so sensitivities are local and can jump at kinks. The plain recalc never carries tangents. Uses: Newton steps in goal-seek (falling back to bracketing), the slope in the goal-seek drag tooltip, the inspector's per-input list, and the `sensitivity` tornado chart.
 
 ## 7. charts
 

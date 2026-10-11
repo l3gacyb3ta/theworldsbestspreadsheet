@@ -281,6 +281,11 @@ pub const WORDS: &[WordDoc] = &[
         ex: [("A1:A5 B1:B5 line \"height\" ylabel", "chart · line (5 points) · 6×14 cells")], see: ["xlabel"]),
     w!("size", "chart cols rows — chart", Charts, "Sets how many cells the chart spills over.", units: "", details: "",
         ex: [("A1:A5 B1:B5 line 4 8 size", "chart · line (5 points) · 4×8 cells")], see: ["line"]),
+    w!("sensitivity", "x — chart", Charts, "A tornado chart: how much a cell's value swings with each named input upstream of it, largest first.",
+        units: "Bars are in the cell's units.",
+        details: "Give it a cell's value (`B10`, or one element: `B10 last`). Each bar is the change across the input's range, or across ±10% of its value when it has none (named dates and temperatures without a range are left out). The changes are linearised from the exact local derivative, one pass per input, so a model with kinks (a battery that starts hitting its capacity) can swing more or less than the bar says. Inputs read inside words count. See [[#sensitivities]].",
+        ex: [("E3 sensitivity", "chart \"sensitivity of E3\" · bar (2 points) · 6×14 cells"), ("E1 sensitivity", "! that's an input itself"), ("2 3 * sensitivity", "! needs a cell's value")],
+        see: ["bar", "#sensitivities"]),
     // -- recurrences -------------------------------------------------------------
     w!("'word", "— word", Recurrences, "A quote before a word pushes the word itself as a value, for words that take words.",
         units: "A word isn't a number: using one as a number is an error.",
@@ -371,6 +376,7 @@ const TOPIC_SOURCES: &[(&str, &str)] = &[
     topic!("over-time"),
     topic!("editing"),
     topic!("modeling"),
+    topic!("sensitivities"),
     topic!("charts"),
     topic!("errors"),
     topic!("keys"),
@@ -583,6 +589,13 @@ pub const ERRORS: &[ErrorHelp] = &[
         why: "`iterate` takes `n s1 … sk 'step k`, `rk4` takes `t0 h n s1 … sk 'deriv k`. The quoted word must leave exactly k numbers: the next state for `iterate`, each state's rate of change for `rk4`.",
         fix: "Check that k matches how many state values you pushed and how many the word leaves, that the word is quoted (`'step`, not `step`), and that n is a whole number of steps.",
         topic: "over-time",
+    },
+    ErrorHelp {
+        patterns: &["sensitivity", "sensitivities"],
+        title: "Sensitivity",
+        why: "`sensitivity` charts how a computed cell moves with each named input. It needs a cell's value (a reference, or one element of it with `last` or `pick`), computed from at least one named input, and every cell in between free of errors.",
+        fix: "Point it at a computed cell (`B10 sensitivity`), name the inputs you want to see, and fix any error between them. Inputs that only reach the cell through a unit definition aren't supported yet.",
+        topic: "sensitivities",
     },
     ErrorHelp {
         patterns: &["must be ≥", "must be ≤", "'s range:"],
@@ -863,7 +876,7 @@ pub const SAMPLE_NAMES: &[(&str, &str)] = &[("growth", "E1"), ("price", "E2"), (
 
 /// Sample cells that need the sample names.
 pub const SAMPLE_AFTER_NAMES: &[(&str, &str)] =
-    &[("F7", ": spring ( t x v -- dx dv ) { t x v } v stiffness mass / x * neg friction mass / v * - ;")];
+    &[("F7", ": spring ( t x v -- dx dv ) { t x v } v stiffness mass / x * neg friction mass / v * - ;"), ("E3", "=price growth 1 + 3 ^ *")];
 
 /// A workbook holding the sample data, plus the id of its sample sheet.
 pub fn sample_engine() -> (Engine, SheetId) {
