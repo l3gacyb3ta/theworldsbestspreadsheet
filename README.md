@@ -46,6 +46,7 @@ cargo run --release -p wbs-core --example bench_file  -- f.wbs.json [name] [step
 cargo run --release -p wbs-core --example bench_edits -- f.wbs.json sheet A1   # retype, insert/delete a row
 cargo run --release -p wbs-core --example bench_open  -- f.wbs.json
 cargo run --release -p wbs-core --example bench_csv   -- [rows] [cols]          # Paste CSV: parse, paste, undo
+cargo run --release -p wbs-core --example bench_iterate -- [hours]             # a year-long iterate that picks from a year-long array
 WBS_PERF_FILE=f.wbs.json WBS_PERF_SHEET=sheet WBS_PERF_SCRUB=name \
   cargo test --release -p wbs perf_frames -- --ignored --nocapture   # UI frame times
 ```
