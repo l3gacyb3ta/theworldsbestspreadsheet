@@ -450,6 +450,172 @@ impl Engine {
     }
 }
 
+/// A 2D goal: put a chart point, element `x.1` of cell `x.0` across and element `y.1` of `y.0` up,
+/// at `want` (canonical units, each within its `tol`) by changing the number literals in both `inputs`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Goal2 {
+    pub x: (CellKey, usize),
+    pub y: (CellKey, usize),
+    pub want: [f64; 2],
+    pub tol: [f64; 2],
+    pub inputs: [CellKey; 2],
+    /// Decimal places to write each input with; `None` keeps the literal's own.
+    pub decimals: [Option<usize>; 2],
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Solved2 {
+    /// Each input's new text, rounded to its decimals, with its unit kept.
+    pub texts: [String; 2],
+    pub evals: usize,
+}
+
+/// Newton steps for a 2D goal before giving up.
+const NEWTON_2D_STEPS: usize = 24;
+
+impl Engine {
+    /// Solves `g` by Newton's method on the 2×2 Jacobian (one sensitivity pass per input), with damped
+    /// steps that stay inside both inputs' ranges, starting from their current values, so the answer is
+    /// the one continuously connected to where they are. Leaves the document exactly as it was; on
+    /// failure says why (inputs that don't move the point independently, out of reach, no
+    /// convergence) and never settles for the closest point.
+    pub fn goal_seek_2d(&mut self, g: &Goal2) -> Result<Solved2, String> {
+        let home = g.y.0.sheet;
+        let [a, b] = g.inputs;
+        if a == b {
+            return Err("a 2D goal needs two different inputs".into());
+        }
+        let names = [self.short_name(a, home), self.short_name(b, home)];
+        let texts = [self.wb.cell_text(a), self.wb.cell_text(b)];
+        let mut lits = Vec::new();
+        for i in 0..2 {
+            let lit = cell_literal(&texts[i]).ok_or_else(|| format!("{} isn't a number", names[i]))?;
+            if let Some(Err(e)) = self.result(g.inputs[i]) {
+                return Err(format!("{} has an error: {}", names[i], e.msg));
+            }
+            lits.push(lit);
+        }
+        for (k, _) in [g.x, g.y] {
+            if !matches!(self.result(k), Some(Ok(Value::Num(_)))) {
+                return Err(format!("{} isn't a number", self.wb.cell_label(k, Some(home))));
+            }
+        }
+        let ranges = [self.input_range(a).unwrap_or_default(), self.input_range(b).unwrap_or_default()];
+        let bounds: Vec<(f64, f64)> = ranges.iter().map(|r| (r.min.as_ref().map_or(f64::NEG_INFINITY, |m| m.0), r.max.as_ref().map_or(f64::INFINITY, |m| m.0))).collect();
+        // derivatives per unit of each literal as written (canonical = literal × factor + offset)
+        let factors: Vec<f64> = g
+            .inputs
+            .iter()
+            .map(|k| match self.result(*k) {
+                Some(Ok(Value::Num(n))) => n.q.disp.factor,
+                _ => 1.0,
+            })
+            .collect();
+        let point = self.wb.cell_label(self.element_cell(g.y.0, g.y.1), Some(home));
+        let origs = [self.wb.cell(a).cloned(), self.wb.cell(b).cloned()];
+        let mut evals = 0;
+        let res = (|| -> Result<[f64; 2], String> {
+            let at = |u: [f64; 2]| format!("{} = {}, {} = {}", names[0], fmt_num(u[0]), names[1], fmt_num(u[1]));
+            let eval = |e: &mut Engine, u: [f64; 2], evals: &mut usize| -> Result<[f64; 2], String> {
+                *evals += 1;
+                let mut cells = Vec::new();
+                for i in 0..2 {
+                    let s = if lits[i].is_date { format_lit(u[i], 0, true) } else { format!("{}", u[i]) };
+                    let text = replace_span(&texts[i], &lits[i].span, &s);
+                    cells.push((g.inputs[i], Some(crate::model::Cell::new(e.wb.parse_text(&text, g.inputs[i].sheet)))));
+                }
+                e.apply(Edit::Cells(cells));
+                let f = [e.goal_element(g.x.0, g.x.1), e.goal_element(g.y.0, g.y.1)];
+                match f {
+                    [Ok(x), Ok(y)] if x.is_finite() && y.is_finite() => Ok([x, y]),
+                    [Err(m), _] | [_, Err(m)] => Err(format!("at {}, {point} is an error: {m}", at(u))),
+                    _ => Err(format!("at {}, {point} isn't a finite number", at(u))),
+                }
+            };
+            // misses scaled by the tolerances, so x and y count alike whatever their units
+            let merit = |f: [f64; 2]| ((g.want[0] - f[0]) / g.tol[0]).powi(2) + ((g.want[1] - f[1]) / g.tol[1]).powi(2);
+            let mut u = [lits[0].value.clamp(bounds[0].0, bounds[0].1), lits[1].value.clamp(bounds[1].0, bounds[1].1)];
+            let mut f = eval(self, u, &mut evals)?;
+            for _ in 0..NEWTON_2D_STEPS {
+                let r = [g.want[0] - f[0], g.want[1] - f[1]];
+                if r[0].abs() <= g.tol[0] && r[1].abs() <= g.tol[1] {
+                    return Ok(u);
+                }
+                // the Jacobian: column i is how (x, y) move per unit of input i
+                let mut jac = [[0.0; 2]; 2];
+                for i in 0..2 {
+                    evals += 1;
+                    let d = self.sensitivities(g.inputs[i], &[g.x.0, g.y.0]).map_err(|m| format!("can't reach: {m}"))?;
+                    jac[0][i] = d[0].data.get(g.x.1).copied().unwrap_or(f64::NAN) * factors[i];
+                    jac[1][i] = d[1].data.get(g.y.1).copied().unwrap_or(f64::NAN) * factors[i];
+                }
+                // scaled by the tolerances, so "independent" doesn't depend on units
+                let sc = [[jac[0][0] / g.tol[0], jac[0][1] / g.tol[0]], [jac[1][0] / g.tol[1], jac[1][1] / g.tol[1]]];
+                let col = |i: usize| sc[0][i].hypot(sc[1][i]);
+                for i in 0..2 {
+                    if col(i) == 0.0 || !col(i).is_finite() {
+                        return Err(format!("can't reach: {} doesn't move this point here, so {} and {} can't place it in 2D", names[i], names[0], names[1]));
+                    }
+                }
+                let det = sc[0][0] * sc[1][1] - sc[0][1] * sc[1][0];
+                if det.abs() <= 1e-9 * col(0) * col(1) {
+                    return Err(format!("can't reach: {} and {} don't move this point independently here", names[0], names[1]));
+                }
+                let det = jac[0][0] * jac[1][1] - jac[0][1] * jac[1][0];
+                let step = [(jac[1][1] * r[0] - jac[0][1] * r[1]) / det, (jac[0][0] * r[1] - jac[1][0] * r[0]) / det];
+                // stay inside both ranges: the longest part of the step that does
+                let mut lam: f64 = 1.0;
+                let mut blocked = None;
+                for i in 0..2 {
+                    let to = u[i] + step[i];
+                    let edge = if to < bounds[i].0 { Some(bounds[i].0) } else if to > bounds[i].1 { Some(bounds[i].1) } else { None };
+                    if let Some(e) = edge {
+                        let l = (e - u[i]) / step[i];
+                        if l < lam {
+                            lam = l.max(0.0);
+                            blocked = Some(i);
+                        }
+                    }
+                }
+                if lam <= 0.0 {
+                    let i = blocked.unwrap_or(0);
+                    let end = if step[i] < 0.0 { ranges[i].min.as_ref() } else { ranges[i].max.as_ref() };
+                    let end = end.map(|e| format!(" ({} {})", if step[i] < 0.0 { "min" } else { "max" }, e.1)).unwrap_or_default();
+                    return Err(format!("out of reach: {} is at the end of its range{end}, and the point needs it further", names[i]));
+                }
+                // damped: halve the step until the miss shrinks
+                let m0 = merit(f);
+                let mut next = None;
+                for _ in 0..10 {
+                    let v = [u[0] + lam * step[0], u[1] + lam * step[1]];
+                    match eval(self, v, &mut evals) {
+                        Ok(fv) if merit(fv) < m0 => {
+                            next = Some((v, fv));
+                            break;
+                        }
+                        // an error part-way: a shorter step may stay clear of it
+                        _ => lam /= 2.0,
+                    }
+                }
+                let Some((v, fv)) = next else {
+                    return Err(format!("can't reach: no {} and {} near their current values put the point there", names[0], names[1]));
+                };
+                (u, f) = (v, fv);
+            }
+            Err(format!("can't reach: no answer after {NEWTON_2D_STEPS} steps from the current {} and {}", names[0], names[1]))
+        })();
+        self.apply(Edit::Cells(vec![(a, origs[0].clone()), (b, origs[1].clone())]));
+        let u = res?;
+        let mut out = [String::new(), String::new()];
+        for i in 0..2 {
+            let decimals = if lits[i].is_date { 0 } else { g.decimals[i].unwrap_or(lits[i].decimals) };
+            let num = ranges[i].format(u[i], decimals, lits[i].is_date);
+            out[i] = replace_span(&texts[i], &lits[i].span, &num);
+        }
+        Ok(Solved2 { texts: out, evals })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

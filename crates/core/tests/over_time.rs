@@ -375,3 +375,84 @@ fn a_history_starts_with_its_start_cells() {
     set(&mut e, "C60", "=4 x0 2 * 'half 1 iterate");
     assert_eq!(e.literal_source(key(&e, "C60"), 0), None);
 }
+
+/// Element `i` of the phase plot's x (C1) and y (D1), canonical.
+fn phase_point(e: &Engine, i: usize) -> [f64; 2] {
+    [nums(e, "C1")[i], nums(e, "D1")[i]]
+}
+
+#[test]
+fn a_computed_phase_point_solves_for_two_inputs() {
+    use wbs_core::solve::Goal2;
+    let mut e = phase_plot();
+    let (c1, d1) = (key(&e, "C1"), key(&e, "D1"));
+    // where the 5th point is with a stiffer, more damped spring: solving from the current values finds them
+    set(&mut e, "B1", "5 [N/m]");
+    set(&mut e, "B3", "0.7 [N*s/m]");
+    let want = phase_point(&e, 4);
+    set(&mut e, "B1", "4 [N/m]");
+    set(&mut e, "B3", "0.5 [N*s/m]");
+    let before = serde_json::to_string(&e.wb).unwrap();
+    let g = Goal2 { x: (c1, 4), y: (d1, 4), want, tol: [1e-7, 1e-7], inputs: [key(&e, "B3"), key(&e, "B1")], decimals: [Some(4), Some(4)] };
+    let s = e.goal_seek_2d(&g).unwrap();
+    assert_eq!(serde_json::to_string(&e.wb).unwrap(), before, "solving doesn't change the document");
+    assert_eq!(s.texts, ["0.7000 [N*s/m]".to_string(), "5.0000 [N/m]".to_string()]);
+    // fewer evaluations than solving damping in an outer search with spring solved inside each try
+    let nested = {
+        let mut n = 0;
+        let mut f = |damping: f64, e: &mut Engine| {
+            set(e, "B3", &format!("{damping} [N*s/m]"));
+            let inner = e.goal_seek(&Goal::new(c1, 4, want[0], 1e-7, key(e, "B1"), Some(6))).unwrap();
+            n += inner.evals + 1;
+            set(e, "B1", &inner.text);
+            phase_point(e, 4)[1]
+        };
+        let mut tries = 0;
+        let (mut lo, mut hi) = (0.5, 0.9);
+        let (mut flo, fhi) = (f(lo, &mut e) - want[1], f(hi, &mut e) - want[1]);
+        assert!(flo.signum() != fhi.signum());
+        while hi - lo > 1e-6 && tries < 60 {
+            let mid = (lo + hi) / 2.0;
+            let fm = f(mid, &mut e) - want[1];
+            if fm.signum() == flo.signum() {
+                (lo, flo) = (mid, fm);
+            } else {
+                hi = mid;
+            }
+            tries += 1;
+        }
+        n
+    };
+    println!("2D Newton: {} evaluations, nested 1D: {nested}", s.evals);
+    assert!(s.evals * 3 < nested, "2D Newton: {} evaluations, nested 1D: {nested}", s.evals);
+}
+
+#[test]
+fn a_2d_goal_without_an_answer_says_why_and_changes_nothing() {
+    use wbs_core::solve::Goal2;
+    let mut e = phase_plot();
+    let (c1, d1) = (key(&e, "C1"), key(&e, "D1"));
+    set(&mut e, "B9", "3");
+    e.set_name("unrelated", Some(key(&e, "B9")), true).unwrap();
+    let before = serde_json::to_string(&e.wb).unwrap();
+    let p = phase_point(&e, 4);
+    let goal = |inputs: [&str; 2], want: [f64; 2], e: &Engine| Goal2 { x: (c1, 4), y: (d1, 4), want, tol: [1e-6, 1e-6], inputs: [key(e, inputs[0]), key(e, inputs[1])], decimals: [None, None] };
+    // one of the pair doesn't move the point at all: singular, not solved
+    let err = e.goal_seek_2d(&goal(["B3", "B9"], [p[0] * 0.9, p[1] * 1.1], &e)).unwrap_err();
+    assert_eq!(err, "can't reach: unrelated doesn't move this point here, so damping and unrelated can't place it in 2D");
+    // somewhere no spring can put it
+    let err = e.goal_seek_2d(&goal(["B3", "B1"], [500.0, -800.0], &e)).unwrap_err();
+    assert!(err.starts_with("can't reach") || err.starts_with("out of reach"), "{err}");
+    // ranges hold: where the point would be with damping 0.9, beyond its max
+    set(&mut e, "B1", "5 [N/m]");
+    set(&mut e, "B3", "0.9 [N*s/m]");
+    let far = phase_point(&e, 4);
+    set(&mut e, "B1", "4 [N/m]");
+    set(&mut e, "B3", "0.5 [N*s/m]");
+    e.set_range("damping", "0 [N*s/m]", "0.6 [N*s/m]").unwrap();
+    let before_ranged = serde_json::to_string(&e.wb).unwrap();
+    let err = e.goal_seek_2d(&goal(["B3", "B1"], far, &e)).unwrap_err();
+    assert!(err.contains("damping is at the end of its range (max 0.6 [N*s/m])"), "{err}");
+    assert_eq!(serde_json::to_string(&e.wb).unwrap(), before_ranged);
+    assert_ne!(before, before_ranged);
+}

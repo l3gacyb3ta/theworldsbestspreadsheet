@@ -123,6 +123,7 @@ enum Drag {
     /// With both, Alt locks it to the axis moved along most since the press.
     Point { y: Option<PointCell>, x: Option<PointCell>, axis: YAxis, press: Pos2 },
     Goal(Box<GoalDrag>),
+    Goal2(Box<Goal2Drag>),
 }
 
 /// A literal number cell a chart point drag writes, as it was at the press.
@@ -163,6 +164,31 @@ struct GoalDrag {
 }
 
 type SensRows = Result<Vec<(CellKey, String, String, String)>, String>;
+
+/// Dragging a computed scatter or path point in 2D: solves two inputs at once so the point lands under the pointer.
+struct Goal2Drag {
+    /// Element `.1` of cell `.0` gives the point's x, and of `y.0` its y.
+    x: (CellKey, usize),
+    y: (CellKey, usize),
+    inputs: [CellKey; 2],
+    origs: [Option<Cell>; 2],
+    axis: YAxis,
+    at: Pos2,
+    press: Pos2,
+    pointer: Pos2,
+    /// Each input literal's decimals at the press; Shift (`fine`) writes two more.
+    decimals: [usize; 2],
+    fine: bool,
+    moved: bool,
+    live: bool,
+    /// The point wanted under the pointer, in the axes' display units.
+    want: Option<(f64, f64)>,
+    /// Alt: locked to x (`true`) or y, a 1D goal-seek of the first input.
+    lock: Option<bool>,
+    /// The last solve: what it writes, or why there's no answer.
+    outcome: Option<Result<String, String>>,
+    solve_ms: f64,
+}
 
 /// The selected cell's precedents and dependents with their positions, for the trace
 /// overlay and the inspector. A cell can have thousands: kept while the graph holds.
@@ -270,9 +296,11 @@ pub struct App {
     chart_hits: Vec<(PointHit, YAxis)>,
     /// The input a computed cell's chart points goal-seek, when switched from the default (click the point).
     goal_inputs: std::collections::HashMap<CellKey, CellKey>,
+    /// Which pair of inputs a 2D point drag solves for, by its (x, y) cells: an index into its pairs.
+    goal_pairs: std::collections::HashMap<(CellKey, CellKey), usize>,
     /// The last `goal_choice` candidates: (target, `eng.revision()`, inputs). Hovering a point asks every frame,
     /// and a target fed by whole columns has thousands of number cells upstream.
-    goal_cands: std::cell::RefCell<Option<(CellKey, u64, std::rc::Rc<[CellKey]>)>>,
+    goal_cands: std::cell::RefCell<Vec<(CellKey, u64, std::rc::Rc<[CellKey]>)>>,
     /// Why the last goal-seek found no answer, shown at its point (target, element) until the next press.
     goal_note: Option<(CellKey, usize, String)>,
     /// The inspector's sensitivities of a cell element at a document revision: per named input,
@@ -355,6 +383,7 @@ impl App {
             range_err: None,
             chart_hits: Vec::new(),
             goal_inputs: Default::default(),
+            goal_pairs: Default::default(),
             goal_cands: Default::default(),
             goal_note: None,
             sens_cache: None,
