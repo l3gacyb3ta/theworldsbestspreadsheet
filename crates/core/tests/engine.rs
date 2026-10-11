@@ -567,3 +567,26 @@ fn cached_recalc_plans_stay_correct() {
         check(&e, &format!("{cell} := {text}"));
     }
 }
+
+#[test]
+fn upstream_inputs_visit_a_spill_once() {
+    // C1 spills a year of hours; D1 reads the whole spill. Each spilled cell stands for C1, whose
+    // precedents are walked once (it was once per spilled cell: seconds for a hover tooltip).
+    let mut e = eng();
+    let n = 8760;
+    set(&mut e, "A1", "2");
+    e.set_name("scale", Some(key(&e, "A1")), true).unwrap();
+    for r in 1..=n {
+        set(&mut e, &format!("B{r}"), &format!("{}", r % 7));
+    }
+    set(&mut e, "C1", &format!("=B1:B{n} scale *"));
+    set(&mut e, "D1", &format!("=C1:C{n} 1 +"));
+    let t = std::time::Instant::now();
+    let up = e.upstream_inputs(key(&e, "D1"));
+    assert!(t.elapsed().as_secs_f64() < 1.0, "{:?}", t.elapsed());
+    // the named input first, then the column in order
+    assert_eq!(up.len(), n + 1);
+    assert_eq!(up[0], key(&e, "A1"));
+    assert_eq!(up[1], key(&e, "B1"));
+    assert_eq!(up[n], key(&e, &format!("B{n}")));
+}

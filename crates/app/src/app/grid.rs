@@ -297,8 +297,14 @@ impl App {
     }
     /// The number cells a computed cell's points can goal-seek (named inputs first), and the one they do:
     /// the first, unless a click on one of its points switched it.
-    fn goal_choice(&self, target: CellKey) -> Option<(CellKey, Vec<CellKey>)> {
-        let cands = self.eng.upstream_inputs(target);
+    fn goal_choice(&self, target: CellKey) -> Option<(CellKey, std::rc::Rc<[CellKey]>)> {
+        let rev = self.eng.revision();
+        let cached = self.goal_cands.borrow().as_ref().filter(|(t, r, _)| *t == target && *r == rev).map(|(_, _, c)| c.clone());
+        let cands = cached.unwrap_or_else(|| {
+            let c: std::rc::Rc<[CellKey]> = self.eng.upstream_inputs(target).into();
+            *self.goal_cands.borrow_mut() = Some((target, rev, c.clone()));
+            c
+        });
         let pick = self.goal_inputs.get(&target).copied().filter(|k| cands.contains(k)).or(cands.first().copied())?;
         Some((pick, cands))
     }
