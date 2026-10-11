@@ -181,35 +181,41 @@ fn untraced(mut v: Value) -> Value {
     v
 }
 
-/// Split along the leading axis. Each row keeps its elements' provenance.
-fn rows_of(v: &Value) -> R<Vec<Value>> {
+/// How many rows `rows_of` gives: the leading axis's length (a scalar is one row).
+fn row_count(v: &Value) -> R<usize> {
+    match v {
+        Value::Num(_) | Value::Text(_) => Ok(v.shape().first().copied().unwrap_or(1)),
+        v => Err(format!("can't split a {} into rows", v.type_name())),
+    }
+}
+
+/// Row `i` along the leading axis (`i` < `row_count`), with its elements' provenance. Builds only that
+/// row: `pick` in a step word runs once per step, on arrays as long as the steps.
+fn row_of(v: &Value, i: usize) -> R<Value> {
     match v {
         Value::Num(n) => {
             if n.shape.is_empty() {
-                return Ok(vec![v.clone()]);
+                return Ok(v.clone());
             }
-            let k = n.shape[0];
             let inner: usize = n.shape[1..].iter().product();
-            Ok((0..k)
-                .map(|i| {
-                    let mut r = Num::with_shape(n.shape[1..].to_vec(), n.data[i * inner..(i + 1) * inner].to_vec(), n.q.clone());
-                    r.prov = slice_prov(&n.prov, i * inner, inner);
-                    Value::Num(r)
-                })
-                .collect())
+            let mut r = Num::with_shape(n.shape[1..].to_vec(), n.data[i * inner..(i + 1) * inner].to_vec(), n.q.clone());
+            r.prov = slice_prov(&n.prov, i * inner, inner);
+            Ok(Value::Num(r))
         }
         Value::Text(t) => {
             if t.shape.is_empty() {
-                return Ok(vec![v.clone()]);
+                return Ok(v.clone());
             }
-            let k = t.shape[0];
             let inner: usize = t.shape[1..].iter().product();
-            Ok((0..k)
-                .map(|i| Value::Text(Text { shape: t.shape[1..].to_vec(), data: Arc::new(t.data[i * inner..(i + 1) * inner].to_vec()) }))
-                .collect())
+            Ok(Value::Text(Text { shape: t.shape[1..].to_vec(), data: Arc::new(t.data[i * inner..(i + 1) * inner].to_vec()) }))
         }
         v => Err(format!("can't split a {} into rows", v.type_name())),
     }
+}
+
+/// Split along the leading axis. Each row keeps its elements' provenance.
+fn rows_of(v: &Value) -> R<Vec<Value>> {
+    (0..row_count(v)?).map(|i| row_of(v, i)).collect()
 }
 
 /// Stack values (all the same shape and units) along a new leading axis, with their elements' provenance.
@@ -656,19 +662,21 @@ impl<'e> Interp<'e> {
             }
             First | Last => {
                 let v = pop(st, name)?;
-                let rows = rows_of(&v)?;
-                let r = if b == First { rows.into_iter().next() } else { rows.into_iter().last() };
-                st.push(r.ok_or_else(|| format!("{name} of an empty array"))?);
+                let n = row_count(&v)?;
+                if n == 0 {
+                    return Err(Step::Here(format!("{name} of an empty array")));
+                }
+                st.push(row_of(&v, if b == First { 0 } else { n - 1 })?);
             }
             Pick => {
                 let i = pop_num(st, name)?;
                 let v = pop(st, name)?;
                 let k = scalar_dimless(&i, name)?;
-                let rows = rows_of(&v)?;
-                if k < 0.0 || k.fract() != 0.0 || k as usize >= rows.len() {
-                    return Err(Step::Here(format!("pick index {k} is out of range 0..{}", rows.len())));
+                let n = row_count(&v)?;
+                if k < 0.0 || k.fract() != 0.0 || k as usize >= n {
+                    return Err(Step::Here(format!("pick index {k} is out of range 0..{n}")));
                 }
-                st.push(rows.into_iter().nth(k as usize).unwrap());
+                st.push(row_of(&v, k as usize)?);
             }
             Transpose => {
                 let v = pop(st, name)?;
