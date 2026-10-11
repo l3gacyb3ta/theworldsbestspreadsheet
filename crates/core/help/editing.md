@@ -51,6 +51,15 @@ Select B2 and double-click its fill square: B3 to B1000 follow A.
 - An error copies its short code (`#err`, `#cycle`…), which pastes back as text.
 - Charts, unit, dimension and word definitions, and empty cells copy as nothing.
 
+## Paste CSV
+
+⌘V splits text on tabs and newlines only, so comma-separated text pastes as one cell per line: a line like `Smith, John, 42` might not be CSV, and the paste never guesses. To say it is, use ⌥⇧⌘V (Edit ▸ Paste CSV…). A preview shows the first rows as they'll land at the selection's top-left; pick the separator (comma, semicolon or tab) and whether the first row is a header. The paste is one undo step.
+
+- Quoting follows the usual CSV rules: `"a, b"` is one field, `""` inside quotes is a quote, and a quoted field can span lines.
+- Each field is read the way typing it would be: `42`, `-3.5`, `1e6` and ISO dates like `2026-10-11` become numbers and dates. Everything else is text, including `1,234.5`, `$12`, `12%`, `10/11/2026` and `TRUE`.
+- A field that would be read as a program or definition (`=A1`, `dim x`) is pasted as text, with a `'` in front, so pasting never runs anything.
+- Header cells are pasted as text. Empty fields clear their cell.
+
 ## Moving cells
 
 ⌘X marks the selection with a dashed outline; the next ⌘V moves the cells there, on this sheet or another. Or drag the selection by its border; hold Alt while dropping to copy instead. A move is one undo step.

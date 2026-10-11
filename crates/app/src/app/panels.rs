@@ -45,6 +45,7 @@ impl App {
         });
         self.ime_events(ctx);
         let (events, mods) = ctx.input(|i| (i.events.clone(), i.modifiers));
+        let csv = events.iter().any(|e| matches!(e, Event::Paste(_))) && self.take_csv_request(ctx);
         let focused = ctx.memory(|m| m.focused());
         if self.edit.is_some() {
             // An edit whose editor lost focus (e.g. after clicking a header) can still be cancelled.
@@ -67,6 +68,11 @@ impl App {
                 Event::Copy if mods.shift => self.copy_values(ctx),
                 Event::Copy => self.copy(ctx),
                 Event::Cut => self.cut(ctx),
+                // ⌥⇧⌘V reaches the app as a Paste event with Alt and Shift held (on macOS the menu's key equivalent gets it first)
+                Event::Paste(s) if csv || (mods.alt && mods.shift) => {
+                    self.open_csv_paste(&s);
+                    return;
+                }
                 Event::Paste(s) => self.paste(ctx, &s),
                 Event::Key { key, pressed: true, modifiers: m, .. } => {
                     let ext = m.shift;

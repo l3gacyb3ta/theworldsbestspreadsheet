@@ -45,6 +45,7 @@ cargo run --release -p wbs-core --example bench                 # 3,000-cell scr
 cargo run --release -p wbs-core --example bench_file  -- f.wbs.json [name] [steps]  # load, save, scrub each named input
 cargo run --release -p wbs-core --example bench_edits -- f.wbs.json sheet A1   # retype, insert/delete a row
 cargo run --release -p wbs-core --example bench_open  -- f.wbs.json
+cargo run --release -p wbs-core --example bench_csv   -- [rows] [cols]          # Paste CSV: parse, paste, undo
 WBS_PERF_FILE=f.wbs.json WBS_PERF_SHEET=sheet WBS_PERF_SCRUB=name \
   cargo test --release -p wbs perf_frames -- --ignored --nocapture   # UI frame times
 ```
@@ -149,7 +150,7 @@ builtin, or an error message without an explanation fails the build.
 ## Keys
 
 Arrows/⇧arrows, Enter/Tab, F2 or double-click to edit, Delete clears, ⌘C/⌘X/⌘V,
-⇧⌘C copy values (as literals to 15 significant digits: `5300 [m]`), ⌘Z/⇧⌘Z, ⌘D fill down, ⌘E accept "extend formula", ⌘N/⌘O/⌘S/⇧⌘S new/open/save/save as. Alt-drag a number
+⇧⌘C copy values (as literals to 15 significant digits: `5300 [m]`), ⌥⇧⌘V paste CSV (with a preview), ⌘Z/⇧⌘Z, ⌘D fill down, ⌘E accept "extend formula", ⌘N/⌘O/⌘S/⇧⌘S new/open/save/save as. Alt-drag a number
 (in a cell or the formula bar) to scrub it, ⇧ for ×10. Drag a chart point to
 edit its cell, or (a computed point) goal-seek an input; click a computed point
 to switch the input. Right-click for insert/delete rows/columns and sort.

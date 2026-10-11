@@ -606,7 +606,7 @@ fn double_click_fill_handle_lines_up_with_a_spill() {
     }
     h.run_steps(2);
     assert_eq!(source(&h, "E33"), "=E32 0.9 *");
-    assert_eq!(source(&h, "E34"), "");
+    assert_eq!(source(&h, "G25"), "");
     assert_eq!(h.state().cursor, (32, 4));
     undo(&mut h);
     assert_eq!(source(&h, "E12"), "");
@@ -1724,6 +1724,93 @@ fn copy_values_copies_what_cells_show_as_literals() {
         assert_eq!(shown(&h, a), shown(&h, b), "{a} vs {b}");
     }
     assert_eq!((source(&h, "F30"), source(&h, "G31")), ("5300 [m]".into(), "20".into()));
+}
+
+// ---- paste CSV -----------------------------------------------------------------
+
+#[test]
+fn paste_csv_previews_then_pastes_as_one_undo_step() {
+    let mut h = harness();
+    let csv = "name,amount,when,note\r\n\"Smith, John\",42,2026-10-11,=A1\r\nDoe,\"1,234.5\",10/11/2026,dim x\r\n";
+    { let p = center(&h, "E30"); click(&mut h, p, Modifiers::NONE); }
+    // plain ⌘V never reads it as CSV: one text cell per line
+    h.event(Event::Paste(csv.into()));
+    h.run_steps(2);
+    assert_eq!(source(&h, "E30"), "name,amount,when,note");
+    assert_eq!(source(&h, "F30"), "");
+    undo(&mut h);
+    // Paste CSV asks for the clipboard; the paste that answers opens the preview, and nothing changes yet
+    h.state_mut().queue(Command::PasteCsv);
+    h.step();
+    h.event(Event::Paste(csv.into()));
+    h.run_steps(2);
+    assert!(h.state().csv.is_some());
+    assert_eq!(source(&h, "E30"), "");
+    h.get_by_label("First row is a header (pasted as text)").click();
+    h.run_steps(2);
+    shot(&mut h, "45_paste_csv_preview");
+    h.get_by_label("Paste").click();
+    h.run_steps(2);
+    assert!(h.state().csv.is_none());
+    assert_eq!((source(&h, "E30"), source(&h, "H30")), ("name".into(), "note".into()));
+    assert_eq!((source(&h, "E31"), source(&h, "F31"), source(&h, "G31")), ("Smith, John".into(), "42".into(), "2026-10-11".into()));
+    // what would run pastes as text; nothing else is guessed
+    assert_eq!((source(&h, "H31"), shown(&h, "H31")), ("'=A1".into(), "=A1".into()));
+    assert_eq!((source(&h, "F32"), source(&h, "G32"), source(&h, "H32")), ("1,234.5".into(), "10/11/2026".into(), "'dim x".into()));
+    assert_eq!(h.state().sel(), CRect::span(h.state().sid(), (29, 4), (31, 7)));
+    shot(&mut h, "46_paste_csv_pasted");
+    undo(&mut h);
+    for at in ["E30", "F31", "H32"] {
+        assert_eq!(source(&h, at), "", "{at}");
+    }
+    // ⌥⇧⌘V reaches the app as a Paste event with Alt and Shift held; Escape cancels the preview
+    h.event(Event::ModifiersChanged(Modifiers::COMMAND | Modifiers::SHIFT | Modifiers::ALT));
+    h.event(Event::Paste("a;b\n1,5;2".into()));
+    h.run_steps(2);
+    h.event(Event::ModifiersChanged(Modifiers::NONE));
+    assert!(h.state().csv.is_some());
+    key(&mut h, Key::Escape);
+    assert!(h.state().csv.is_none());
+    assert_eq!(source(&h, "E30"), "");
+    // the separator choice re-reads it; Enter pastes
+    h.state_mut().queue(Command::PasteCsv);
+    h.step();
+    h.event(Event::Paste("a;b\n1,5;2".into()));
+    h.run_steps(2);
+    h.get_by_label("semicolon").click();
+    h.run_steps(2);
+    key(&mut h, Key::Enter);
+    assert_eq!((source(&h, "E30"), source(&h, "F30"), source(&h, "E31"), source(&h, "F31")), ("a".into(), "b".into(), "1,5".into(), "2".into()));
+    // a Paste CSV the clipboard never answered doesn't turn the next ⌘V into one
+    h.state_mut().queue(Command::PasteCsv);
+    h.run_steps(5);
+    { let p = center(&h, "G25"); click(&mut h, p, Modifiers::NONE); }
+    h.event(Event::Paste("x,y".into()));
+    h.run_steps(2);
+    assert!(h.state().csv.is_none());
+    assert_eq!(source(&h, "G25"), "x,y");
+}
+
+#[test]
+fn paste_csv_handles_thousands_of_rows() {
+    let mut h = harness();
+    let rows = 8670;
+    let csv: String = (0..rows).map(|r| format!("{r},\"item {r}, size {}\",2026-01-{:02},{}.25\r\n", r % 5, r % 28 + 1, r * 3)).collect();
+    { let p = center(&h, "A30"); click(&mut h, p, Modifiers::NONE); }
+    h.state_mut().queue(Command::PasteCsv);
+    h.step();
+    h.event(Event::Paste(csv));
+    h.run_steps(2);
+    shot(&mut h, "47_paste_csv_big_preview");
+    h.get_by_label("Paste").click();
+    h.run_steps(2);
+    assert_eq!(undo_cells(&h), rows * 4);
+    let last = format!("A{}", 29 + rows);
+    assert_eq!(source(&h, &last), format!("{}", rows - 1));
+    assert_eq!(source(&h, &format!("B{}", 29 + rows)), format!("item {}, size {}", rows - 1, (rows - 1) % 5));
+    assert_eq!(h.state().status.as_deref(), Some("pasted 8670×4 as CSV"));
+    undo(&mut h);
+    assert_eq!(source(&h, &last), "");
 }
 
 // ---- moving cells --------------------------------------------------------------

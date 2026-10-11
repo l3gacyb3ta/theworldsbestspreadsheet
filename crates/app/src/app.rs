@@ -1,4 +1,5 @@
 mod commands;
+mod csv_paste;
 mod files;
 mod grid;
 mod panels;
@@ -227,6 +228,10 @@ pub struct App {
     clip: Option<Clip>,
     /// Cells marked by ⌘X, with the document fingerprint then: the next paste moves them if nothing changed since.
     cut: Option<(CRect, u64)>,
+    /// Edit ▸ Paste CSV's preview, while it's up.
+    csv: Option<csv_paste::CsvPaste>,
+    /// The frame Paste CSV asked for the clipboard in: the Paste event that answers it opens the preview.
+    csv_wanted: Option<u64>,
     drag: Drag,
     offer: Option<(CellKey, CRect)>,
     status: Option<String>,
@@ -315,6 +320,8 @@ impl App {
             redo: Vec::new(),
             clip: None,
             cut: None,
+            csv: None,
+            csv_wanted: None,
             drag: Drag::None,
             offer: None,
             status: Some(status),
@@ -588,7 +595,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.run_queued(&ctx);
-        if self.confirm.is_none() {
+        if self.confirm.is_none() && self.csv.is_none() {
             self.command_keys(&ctx);
             self.keys(&ctx);
         }
@@ -604,7 +611,7 @@ impl eframe::App for App {
         });
         egui::CentralPanel::no_frame().show(ui, |ui| self.grid(ui, dark));
         let home = self.sid();
-        let keys = if self.confirm.is_none() { self.owned_keys() } else { &[] };
+        let keys = if self.confirm.is_none() && self.csv.is_none() { self.owned_keys() } else { &[] };
         if let (true, crate::help_view::Page::Topic(id)) = (self.help.open, self.help.page()) {
             // key glyphs (⇧ ↑ ↓) aren't in egui's fonts either
             if let Some(t) = wbs_core::help::topic(id) {
@@ -623,6 +630,7 @@ impl eframe::App for App {
             }
         }
         self.settings_ui(&ctx);
+        self.csv_paste_ui(&ctx, dark);
         self.document_ui(&ctx);
         self.autosave(&ctx);
         self.fonts.load_if_wanted(&ctx);
