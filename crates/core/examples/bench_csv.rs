@@ -27,7 +27,7 @@ fn main() {
     let parsed = csv::parse(&text, Sep::Comma);
     println!("parse {rows}×{cols} ({} KB): {:.1} ms", text.len() / 1024, t.elapsed().as_secs_f64() * 1e3);
     let t = Instant::now();
-    let ed = csv::paste(&e, &parsed, true, s, (0, 0));
+    let ed = csv::paste(&e, &parsed, true, &[], s, (0, 0));
     println!("build edit: {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
     let t = Instant::now();
     let inv = e.apply(ed);

@@ -3,6 +3,7 @@
 
 use crate::engine::Edit;
 use crate::ids::SheetId;
+use crate::lex::{self, Tok};
 use crate::model::{classify, Cell, Kind};
 use crate::Engine;
 
@@ -94,25 +95,57 @@ pub fn parse(text: &str, sep: Sep) -> Vec<Vec<String>> {
 /// What typing a field into a cell gives: `None` for an empty field, the field itself where it reads as a
 /// number, date or text, and `'`-quoted text where it would read as a program or declaration (`=A1`,
 /// `dim x`) or starts with `'` or a space. In the header row (`header`) numbers are quoted too. So a paste never runs
-/// anything, and text stays the text it was.
-pub fn cell_text(field: &str, header: bool) -> Option<String> {
+/// anything, and text stays the text it was. With a column `unit`, a plain number gets it (`42` → `42 [USD]`);
+/// a number with its own unit, a date and text are left as they are.
+pub fn cell_text(field: &str, header: bool, unit: Option<&str>) -> Option<String> {
     match classify(field) {
         Kind::Empty => None,
-        Kind::Number if !header => Some(field.trim().to_string()),
+        Kind::Number if !header => Some(match unit {
+            Some(u) if is_plain_number(field) => format!("{} [{u}]", field.trim()),
+            _ => field.trim().to_string(),
+        }),
         Kind::Text if !field.starts_with(['\'', ' ', '\t']) => Some(field.to_string()),
         _ => Some(format!("'{field}")),
     }
 }
 
-/// The cells of `rows` with their top-left at `at`, as one edit; `header` pastes the first row as text.
+/// A number without a unit: not `5 [m]`, not a date.
+fn is_plain_number(field: &str) -> bool {
+    matches!(lex::lex_code(field.trim()).as_slice(), [t] if matches!(t.tok, Tok::Num(_)))
+}
+
+/// A unit as typed for a column: `USD` or `[USD]`; `None` when blank.
+pub fn column_unit(typed: &str) -> Option<&str> {
+    let u = typed.trim();
+    let u = u.strip_prefix('[').and_then(|u| u.strip_suffix(']')).unwrap_or(u).trim();
+    (!u.is_empty()).then_some(u)
+}
+
+/// How many fields of column `col` (header row aside) a unit would go on, and how many it wouldn't
+/// because they're text, dates or numbers with a unit already.
+pub fn unit_coverage(rows: &[Vec<String>], header: bool, col: usize) -> (usize, usize) {
+    let (mut gets, mut not) = (0, 0);
+    for f in rows.iter().skip(header as usize).filter_map(|r| r.get(col)) {
+        match classify(f) {
+            Kind::Empty => {}
+            Kind::Number if is_plain_number(f) => gets += 1,
+            _ => not += 1,
+        }
+    }
+    (gets, not)
+}
+
+/// The cells of `rows` with their top-left at `at`, as one edit; `header` pastes the first row as text,
+/// and `units[j]` (a unit as `column_unit` reads it, or blank) goes on column j's plain numbers.
 /// Empty fields clear their cell.
-pub fn paste(e: &Engine, rows: &[Vec<String>], header: bool, sheet: SheetId, at: (usize, usize)) -> Edit {
+pub fn paste(e: &Engine, rows: &[Vec<String>], header: bool, units: &[String], sheet: SheetId, at: (usize, usize)) -> Edit {
     let s = e.wb.sheet(sheet).unwrap();
     let mut out = Vec::new();
     for (i, row) in rows.iter().enumerate() {
         for (j, field) in row.iter().enumerate() {
             let Some(k) = s.key(at.0 + i, at.1 + j) else { continue };
-            out.push((k, cell_text(field, header && i == 0).map(|t| Cell::new(e.wb.parse_text(&t, sheet)))));
+            let unit = units.get(j).and_then(|u| column_unit(u));
+            out.push((k, cell_text(field, header && i == 0, unit).map(|t| Cell::new(e.wb.parse_text(&t, sheet)))));
         }
     }
     Edit::Cells(out)
@@ -174,7 +207,7 @@ mod tests {
 
     #[test]
     fn fields_become_cells_by_the_typing_rules() {
-        let t = |f: &str| cell_text(f, false);
+        let t = |f: &str| cell_text(f, false, None);
         let s = |x: &str| Some(x.to_string());
         // numbers and ISO dates
         assert_eq!(t("42"), s("42"));
@@ -204,10 +237,10 @@ mod tests {
 
     #[test]
     fn a_header_row_is_text() {
-        assert_eq!(cell_text("2026", true), Some("'2026".into()));
-        assert_eq!(cell_text("Name", true), Some("Name".into()));
-        assert_eq!(cell_text("=x", true), Some("'=x".into()));
-        assert_eq!(cell_text("", true), None);
+        assert_eq!(cell_text("2026", true, None), Some("'2026".into()));
+        assert_eq!(cell_text("Name", true, None), Some("Name".into()));
+        assert_eq!(cell_text("=x", true, None), Some("'=x".into()));
+        assert_eq!(cell_text("", true, None), None);
     }
 
     #[test]
@@ -220,7 +253,7 @@ mod tests {
         e.set_text(k(&e, 2, 1), "old");
         e.set_text(k(&e, 0, 0), "10");
         let text = "when,n,note\r\n2026-10-11,42,=A1\r\n\"2026-10-12\",\"1,234.5\",\r\n";
-        let ed = paste(&e, &parse(text, Sep::Comma), true, s, (1, 1));
+        let ed = paste(&e, &parse(text, Sep::Comma), true, &[], s, (1, 1));
         let inv = e.apply(ed);
         let text_at = |e: &Engine, r, c| e.wb.cell_text(k(e, r, c));
         assert_eq!((text_at(&e, 1, 1), text_at(&e, 1, 2), text_at(&e, 1, 3)), ("when".into(), "n".into(), "note".into()));
@@ -239,5 +272,45 @@ mod tests {
         assert_eq!(text_at(&e, 2, 1), "old");
         assert_eq!(text_at(&e, 1, 1), "");
         assert_eq!(text_at(&e, 0, 0), "10");
+    }
+
+    #[test]
+    fn a_column_unit_goes_on_plain_numbers_only() {
+        let t = |f: &str| cell_text(f, false, Some("USD"));
+        assert_eq!(t("42"), Some("42 [USD]".into()));
+        assert_eq!(t(" -3.5 "), Some("-3.5 [USD]".into()));
+        assert_eq!(t("5 [m]"), Some("5 [m]".into()));
+        assert_eq!(t("2026-10-11"), Some("2026-10-11".into()));
+        assert_eq!(t("$12"), Some("$12".into()));
+        assert_eq!(t("=A1"), Some("'=A1".into()));
+        assert_eq!(cell_text("42", true, Some("USD")), Some("'42".into()));
+        assert_eq!((column_unit(" [USD] "), column_unit("m/s"), column_unit(" "), column_unit("[]")), (Some("USD"), Some("m/s"), None, None));
+        let rows = parse("price\n1\n2\nn/a\n\n2026-01-01\n3 [EUR]", Sep::Comma);
+        assert_eq!(unit_coverage(&rows, true, 0), (2, 3));
+        assert_eq!(unit_coverage(&rows, false, 0), (2, 4));
+        assert_eq!(unit_coverage(&rows, false, 5), (0, 0));
+    }
+
+    #[test]
+    fn pasting_with_a_column_unit_gives_quantities() {
+        use crate::engine::Shown;
+        use crate::stdlib::default_workbook;
+        let mut e = Engine::new(default_workbook());
+        let s = e.wb.sheets[0].id;
+        let k = |e: &Engine, r, c| e.wb.sheet(s).unwrap().key(r, c).unwrap();
+        assert!(e.check_unit("km").is_ok());
+        assert!(e.check_unit("m/s^2").is_ok());
+        assert!(e.check_unit("furlong").is_err());
+        assert!(e.check_unit("m*").is_err());
+        let rows = parse("d,t\n5,2\n7,x", Sep::Comma);
+        let ed = paste(&e, &rows, true, &["[km]".into(), "".into()], s, (0, 0));
+        e.apply(ed);
+        assert_eq!(e.wb.cell_text(k(&e, 1, 0)), "5 [km]");
+        assert_eq!(e.wb.cell_text(k(&e, 1, 1)), "2");
+        assert_eq!(e.wb.cell_text(k(&e, 0, 0)), "d");
+        match e.shown(k(&e, 2, 0)) {
+            Shown::Value { value, .. } => assert_eq!(value.display_at(0, 0), "7 km"),
+            _ => panic!("no value"),
+        }
     }
 }

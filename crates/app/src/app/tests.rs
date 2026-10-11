@@ -1792,6 +1792,47 @@ fn paste_csv_previews_then_pastes_as_one_undo_step() {
 }
 
 #[test]
+fn paste_csv_puts_a_unit_on_a_column() {
+    let mut h = harness();
+    { let p = center(&h, "E27"); click(&mut h, p, Modifiers::NONE); }
+    h.state_mut().queue(Command::PasteCsv);
+    h.step();
+    h.event(Event::Paste("item,price,qty\nwidget,12.5,3\ngadget,n/a,4\nbolt,\"7 [EUR]\",9\n".into()));
+    h.run_steps(2);
+    h.get_by_label("First row is a header (pasted as text)").click();
+    h.run_steps(2);
+    let unit_field = |h: &Harness<'static, App>, col: usize| {
+        h.query_all_by(|n| n.role() == egui::accesskit::Role::TextInput && n.placeholder() == Some("unit")).nth(col).unwrap().focus();
+    };
+    // a unit that isn't defined here is refused, and nothing pastes
+    unit_field(&h, 1);
+    h.run_steps(1);
+    typ(&mut h, "furlong");
+    h.run_steps(1);
+    h.get_by_label("unknown unit");
+    key(&mut h, Key::Enter);
+    assert!(h.state().csv.is_some());
+    h.get_by_label("Paste").click();
+    h.run_steps(2);
+    assert!(h.state().csv.is_some());
+    // USD is declared in the demo; brackets are optional
+    h.get_by(|n| n.role() == egui::accesskit::Role::TextInput && n.value().as_deref() == Some("furlong")).focus();
+    h.run_steps(1);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    typ(&mut h, "[USD]");
+    h.run_steps(1);
+    h.get_by_label("1 get it, 2 don't");
+    shot(&mut h, "48_paste_csv_unit");
+    h.get_by_label("Paste").click();
+    h.run_steps(2);
+    assert!(h.state().csv.is_none());
+    assert_eq!((source(&h, "F27"), source(&h, "F28"), source(&h, "F29"), source(&h, "F30")), ("price".into(), "12.5 [USD]".into(), "n/a".into(), "7 [EUR]".into()));
+    assert_eq!(shown(&h, "F28"), "12.5 USD");
+    // the other columns are untouched
+    assert_eq!((source(&h, "G28"), source(&h, "E28")), ("3".into(), "widget".into()));
+}
+
+#[test]
 fn paste_csv_handles_thousands_of_rows() {
     let mut h = harness();
     let rows = 8670;
