@@ -219,6 +219,227 @@ fn drag_bar_writes_literal() {
     assert_eq!(src.split_whitespace().next().unwrap().split('.').nth(1).map(str::len), Some(2), "{src}");
 }
 
+/// An empty workbook with `cells` typed in (no undo steps), drawn.
+fn sheet_with(cells: &[(&str, &str)]) -> Harness<'static, App> {
+    let mut h = harness();
+    command(&mut h, Command::New);
+    for (at, text) in cells {
+        let k = cell_key(&h, at);
+        h.state_mut().eng.set_text(k, text);
+    }
+    h.run_steps(3);
+    h
+}
+
+/// Where a chart point is drawn whose y comes from `y` and x from `x` (`""`: from anywhere).
+fn point_at(h: &Harness<'static, App>, x: &str, y: &str) -> (Pos2, bool) {
+    let prov = |p: Prov, at: &str| at.is_empty() || matches!(p, Prov::Literal(k) | Prov::Derived(k, _) if k == cell_key(h, at));
+    let hit = h.state().chart_hits.iter().find(|(p, _)| prov(p.xprov, x) && prov(p.prov, y)).map(|(p, _)| (p.pos, p.two_d));
+    hit.unwrap_or_else(|| panic!("no point with x from {x:?} and y from {y:?}"))
+}
+
+fn hover_cursor(h: &mut Harness<'static, App>, p: Pos2) -> CursorIcon {
+    h.hover_at(p);
+    h.run_steps(1);
+    h.output().platform_output.cursor_icon
+}
+
+/// x in A1:A3 (one decimal), y in B1:B3 (whole metres).
+const XY: [(&str, &str); 6] = [("A1", "1.0"), ("A2", "2.0"), ("A3", "3.0"), ("B1", "10 [m]"), ("B2", "20 [m]"), ("B3", "30 [m]")];
+
+fn num(h: &Harness<'static, App>, at: &str) -> f64 {
+    source(h, at).split_whitespace().next().unwrap().parse().unwrap()
+}
+
+#[test]
+fn scatter_point_drags_diagonally_in_one_undo_step() {
+    let mut h = sheet_with(&[XY.as_slice(), &[("D1", "=A1:A3 B1:B3 scatter")]].concat());
+    let (p, two_d) = point_at(&h, "A2", "B2");
+    assert!(two_d);
+    assert_eq!(hover_cursor(&mut h, p), CursorIcon::Move);
+    shot(&mut h, "50_scatter_hover");
+    drag_with_shot(&mut h, p, p + Vec2::new(50.0, -40.0), Modifiers::NONE, "51_scatter_dragging", &|h| {
+        assert!(num(h, "A2") > 2.0 && num(h, "B2") > 20.0, "both follow the pointer live");
+    });
+    shot(&mut h, "52_scatter_dragged");
+    let (a2, b2) = (source(&h, "A2"), source(&h, "B2"));
+    assert!(num(&h, "A2") > 2.0 && a2.split('.').nth(1).map(str::len) == Some(1), "x keeps one decimal: {a2}");
+    assert!(num(&h, "B2") > 20.0 && b2.ends_with(" [m]") && !b2.contains('.'), "y keeps whole metres: {b2}");
+    assert_eq!(h.state().undo.len(), 1, "one undo step");
+    match h.state().undo.last() {
+        Some(Edit::Cells(c)) => assert_eq!(c.len(), 2, "both cells in one edit"),
+        other => panic!("{other:?}"),
+    }
+    key_cmd(&mut h, Key::Z);
+    assert_eq!((source(&h, "A2"), source(&h, "B2")), ("2.0".to_string(), "20 [m]".to_string()));
+}
+
+#[test]
+fn scatter_drag_pins_x_at_its_range_while_y_moves() {
+    let mut h = sheet_with(&[XY.as_slice(), &[("D1", "=A1:A3 B1:B3 scatter")]].concat());
+    // only x has a range
+    let a2 = cell_key(&h, "A2");
+    h.state_mut().eng.set_name("xin", Some(a2), true).unwrap();
+    h.state_mut().eng.set_range("xin", "", "2.2").unwrap();
+    h.run_steps(2);
+    let (p, _) = point_at(&h, "A2", "B2");
+    drag_with_shot(&mut h, p, p + Vec2::new(300.0, -60.0), Modifiers::NONE, "65_scatter_x_at_max", &|h| {
+        assert_eq!(source(h, "A2"), "2.2", "x stops at its max");
+        assert!(num(h, "B2") > 20.0, "y still follows the pointer");
+        assert_eq!(h.state().pinned.as_deref(), Some("x at max 2.2"));
+    });
+    assert_eq!(source(&h, "A2"), "2.2");
+    assert!(num(&h, "B2") > 20.0);
+    assert!(h.state().pinned.is_none());
+    assert_eq!(undo_cells(&h), 2, "one undo step for both");
+}
+
+/// Presses at `from`, moves through `steps` (offsets from `from`, each with the modifiers held there; `check`
+/// runs after each), and lets go at the last.
+fn drag_steps(h: &mut Harness<'static, App>, from: Pos2, steps: &[(Vec2, Modifiers)], check: &dyn Fn(&mut Harness<'static, App>, usize)) {
+    h.event(Event::PointerMoved(from));
+    h.run_steps(1);
+    press(h, from, true, steps[0].1);
+    for (i, (d, mods)) in steps.iter().enumerate() {
+        h.event(Event::ModifiersChanged(*mods));
+        h.event(Event::PointerMoved(from + *d));
+        h.run_steps(1);
+        check(h, i);
+    }
+    let (d, mods) = *steps.last().unwrap();
+    press(h, from + d, false, mods);
+    h.event(Event::ModifiersChanged(Modifiers::NONE));
+    h.run_steps(2);
+}
+
+fn undo_cells(h: &Harness<'static, App>) -> usize {
+    match h.state().undo.last() {
+        Some(Edit::Cells(c)) => c.len(),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn alt_locks_a_2d_drag_to_one_axis() {
+    let mut h = sheet_with(&[XY.as_slice(), &[("D1", "=A1:A3 B1:B3 scatter")]].concat());
+    let (p, _) = point_at(&h, "A2", "B2");
+    // held from the press (which drags the point, not a scrub): mostly sideways, so x only
+    let steps: Vec<(Vec2, Modifiers)> = (1..=6).map(|i| (Vec2::new(10.0, -3.0) * i as f32, Modifiers::ALT)).collect();
+    drag_steps(&mut h, p, &steps, &|h, i| {
+        assert!(matches!(h.state().drag, Drag::Point { .. }));
+        assert_eq!(h.output().platform_output.cursor_icon, CursorIcon::ResizeHorizontal, "step {i}");
+        if i == 3 {
+            shot(h, "59_scatter_alt_locked");
+        }
+    });
+    assert!(num(&h, "A2") > 2.0, "{}", source(&h, "A2"));
+    assert_eq!(source(&h, "B2"), "20 [m]", "the locked axis' cell is untouched");
+    assert_eq!((h.state().undo.len(), undo_cells(&h)), (1, 1), "one undo step, with only the cell that changed");
+}
+
+#[test]
+fn alt_locks_to_the_axis_moved_most_and_releasing_it_frees_the_drag() {
+    let mut h = sheet_with(&[XY.as_slice(), &[("D1", "=A1:A3 B1:B3 scatter")]].concat());
+    let (p, _) = point_at(&h, "A2", "B2");
+    let (free, alt) = (Modifiers::NONE, Modifiers::ALT);
+    // sideways first (x leads), then up past it (y leads), then Alt: locked to y, x back exactly where it started
+    let steps = [(Vec2::new(50.0, -10.0), free), (Vec2::new(50.0, -70.0), free), (Vec2::new(50.0, -70.0), alt), (Vec2::new(55.0, -80.0), alt), (Vec2::new(60.0, -80.0), free)];
+    drag_steps(&mut h, p, &steps, &|h, i| match i {
+        0 => assert!(num(h, "A2") > 2.0, "free: x moves"),
+        2 | 3 => {
+            assert_eq!(source(h, "A2"), "2.0", "locked to y: x is exactly its start (step {i})");
+            assert!(num(h, "B2") > 20.0);
+            assert_eq!(h.output().platform_output.cursor_icon, CursorIcon::ResizeVertical);
+        }
+        4 => assert!(num(h, "A2") > 2.0, "Alt released: x follows again"),
+        _ => {}
+    });
+    assert_eq!((h.state().undo.len(), undo_cells(&h)), (1, 2));
+}
+
+#[test]
+fn shift_alt_is_a_fine_locked_drag() {
+    let mut h = sheet_with(&[XY.as_slice(), &[("D1", "=A1:A3 B1:B3 scatter")]].concat());
+    let (p, _) = point_at(&h, "A2", "B2");
+    let both = Modifiers::ALT | Modifiers::SHIFT;
+    let steps: Vec<(Vec2, Modifiers)> = (1..=6).map(|i| (Vec2::new(2.0, -7.0) * i as f32, both)).collect();
+    drag_steps(&mut h, p, &steps, &|_, _| {});
+    let b2 = source(&h, "B2");
+    assert!(num(&h, "B2") > 20.0 && b2.contains('.') && b2.ends_with(" [m]"), "finer than whole metres: {b2}");
+    assert_eq!(source(&h, "A2"), "2.0");
+    assert_eq!(undo_cells(&h), 1);
+}
+
+#[test]
+fn path_point_drags_in_2d() {
+    // a closed shape: joined in the order given, back to the start
+    let mut h = sheet_with(&[XY.as_slice(), &[("D1", "=A1:A3 A1 join B1:B3 B1 join path")]].concat());
+    shot(&mut h, "53_path");
+    let (p, two_d) = point_at(&h, "A3", "B3");
+    assert!(two_d);
+    drag(&mut h, p, p + Vec2::new(-40.0, 30.0), Modifiers::NONE);
+    shot(&mut h, "54_path_dragged");
+    assert!(num(&h, "A3") < 3.0 && num(&h, "B3") < 30.0, "{} {}", source(&h, "A3"), source(&h, "B3"));
+    assert_eq!(h.state().undo.len(), 1);
+}
+
+#[test]
+fn line_point_moves_only_up_and_down() {
+    let mut h = sheet_with(&[XY.as_slice(), &[("D1", "=A1:A3 B1:B3 line")]].concat());
+    let (p, two_d) = point_at(&h, "", "B2");
+    assert!(!two_d);
+    assert_eq!(hover_cursor(&mut h, p), CursorIcon::ResizeVertical);
+    drag(&mut h, p, p + Vec2::new(50.0, -40.0), Modifiers::NONE);
+    assert_eq!(source(&h, "A2"), "2.0", "x stays");
+    assert!(num(&h, "B2") > 20.0, "{}", source(&h, "B2"));
+}
+
+#[test]
+fn only_the_literal_axis_of_a_point_moves() {
+    // F1 computes the x values, G1 the y values
+    let cells = [XY.as_slice(), &[("F1", "=A1:A3 2 *"), ("G1", "=B1:B3 2 *"), ("A6", "=F1 B1:B3 scatter")]].concat();
+    let mut h = sheet_with(&cells);
+    // x computed, y from B2: up and down only
+    let (p, _) = point_at(&h, "F1", "B2");
+    assert_eq!(hover_cursor(&mut h, p), CursorIcon::ResizeVertical);
+    shot(&mut h, "55_scatter_x_computed");
+    drag(&mut h, p, p + Vec2::new(50.0, -40.0), Modifiers::NONE);
+    assert_eq!(source(&h, "A2"), "2.0", "no goal-seek for the computed x");
+    assert!(num(&h, "B2") > 20.0);
+    // x from A2, y computed: sideways only, no goal-seek
+    let k = cell_key(&h, "A6");
+    h.state_mut().eng.set_text(k, "=A1:A3 G1 scatter");
+    h.run_steps(2);
+    let b2 = source(&h, "B2");
+    let (p, _) = point_at(&h, "A2", "G1");
+    assert_eq!(hover_cursor(&mut h, p), CursorIcon::ResizeHorizontal);
+    shot(&mut h, "56_scatter_y_computed");
+    drag(&mut h, p, p + Vec2::new(50.0, -40.0), Modifiers::NONE);
+    assert!(num(&h, "A2") > 2.0, "{}", source(&h, "A2"));
+    assert_eq!(source(&h, "B2"), b2, "the computed y isn't solved for");
+    // both computed: the y goal-seeks, up and down only
+    h.state_mut().eng.set_text(k, "=F1 G1 scatter");
+    h.run_steps(2);
+    let (p, _) = point_at(&h, "F1", "G1");
+    assert_eq!(hover_cursor(&mut h, p), CursorIcon::ResizeVertical);
+    let a = source(&h, "A2");
+    drag_with_shot(&mut h, p, p + Vec2::new(50.0, -40.0), Modifiers::NONE, "57_scatter_both_computed", &|h| assert!(matches!(h.state().drag, Drag::Goal(_))));
+    assert_eq!(source(&h, "A2"), a, "x isn't solved for");
+}
+
+#[test]
+fn scatter_point_with_dates_and_temperatures() {
+    let cells = [("A1", "2026-01-01"), ("A2", "2026-02-01"), ("A3", "2026-03-01"), ("B1", "10.0 [°C]"), ("B2", "12.0 [°C]"), ("B3", "15.0 [°C]"), ("D1", "=A1:A3 B1:B3 to[°F] scatter")];
+    let mut h = sheet_with(&cells);
+    let (p, _) = point_at(&h, "A2", "B2");
+    drag(&mut h, p, p + Vec2::new(30.0, -30.0), Modifiers::NONE);
+    shot(&mut h, "58_scatter_dates");
+    let (a2, b2) = (source(&h, "A2"), source(&h, "B2"));
+    assert!(a2.len() == 10 && a2.starts_with("2026-0") && a2 > "2026-02-01".to_string(), "a later date: {a2}");
+    assert!(b2.ends_with(" [°C]") && num(&h, "B2") > 12.0 && b2.split_whitespace().next().unwrap().split('.').nth(1).map(str::len) == Some(1), "°C with one decimal: {b2}");
+    assert_eq!(h.state().undo.len(), 1);
+}
+
 fn cell_key(h: &Harness<'static, App>, at: &str) -> CellKey {
     let r = a1::parse_ref(at).unwrap();
     h.state().eng.wb.sheets[0].key(r.row, r.col).unwrap()
@@ -1895,7 +2116,7 @@ fn scrubbing_stops_at_an_inputs_range() {
     h.run_steps(2);
     let from = center(&h, "B4");
     // 40 px left is 10 ticks of 0.1 %: past the min
-    drag_with_shot(&mut h, from, from - Vec2::new(40.0, 0.0), Modifiers::ALT, "50_scrub_stopped_at_min", &|h| {
+    drag_with_shot(&mut h, from, from - Vec2::new(40.0, 0.0), Modifiers::ALT, "60_scrub_stopped_at_min", &|h| {
         assert_eq!(source(h, "B4"), "3.5 [%]");
         assert_eq!(h.state().pinned.as_deref(), Some("min 3.5 [%]"));
     });
@@ -1927,7 +2148,7 @@ fn inspector_sets_an_inputs_range() {
     key(&mut h, Key::Enter);
     h.get_by_label("range not set: min 0 [m] is length, but growth is dimensionless");
     assert_eq!(h.state().eng.wb.names["growth"].min, None);
-    shot(&mut h, "51_range_refused");
+    shot(&mut h, "61_range_refused");
     // in the input's unit, it's set (one undo step)
     h.get_by(|n| n.role() == egui::accesskit::Role::TextInput && n.value().as_deref() == Some("0 [m]")).focus();
     h.run_steps(1);
@@ -1948,7 +2169,7 @@ fn inspector_sets_an_inputs_range() {
     { let p = center(&h, "B4"); click(&mut h, p, Modifiers::NONE); }
     h.run_steps(2);
     h.get_by_label("Outside the input's range");
-    shot(&mut h, "52_outside_the_range");
+    shot(&mut h, "62_outside_the_range");
     // undo: the value, then the max, then the min
     key_cmd(&mut h, Key::Z);
     key_cmd(&mut h, Key::Z);
@@ -1969,7 +2190,7 @@ fn chart_point_drag_stops_at_an_inputs_range() {
     h.event(Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -700.0), modifiers: Modifiers::NONE, phase: egui::TouchPhase::Move });
     h.run_steps(20);
     let hit = h.state().chart_hits.iter().find(|(p, a)| h.state().hit_label(p, a).starts_with("Q4")).map(|(p, _)| p.pos).expect("Q4 bar");
-    drag_with_shot(&mut h, hit, hit - Vec2::new(0.0, 200.0), Modifiers::NONE, "54_bar_stopped_at_max", &|h| {
+    drag_with_shot(&mut h, hit, hit - Vec2::new(0.0, 200.0), Modifiers::NONE, "64_bar_stopped_at_max", &|h| {
         assert_eq!(source(h, "B47"), "190 [widget]");
         assert_eq!(h.state().pinned.as_deref(), Some("max 190 [widget]"));
     });
@@ -1986,7 +2207,7 @@ fn bounded_inputs_are_sliders() {
     h.state_mut().eng.set_range("months", "1", "").unwrap();
     h.run_steps(3);
     assert_eq!(sliders(&h), 1);
-    shot(&mut h, "53_input_slider");
+    shot(&mut h, "63_input_slider");
     // dragging the slider past its end stops there
     let r = h.get_by(|n| n.role() == egui::accesskit::Role::Slider).rect();
     let from = r.left_center() + Vec2::new(r.height(), 0.0);

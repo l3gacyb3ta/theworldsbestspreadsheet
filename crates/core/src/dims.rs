@@ -668,7 +668,7 @@ impl<'e> Abs<'e> {
                 st.push(v);
             }
             Pi => st.push(SVal::konst(std::f64::consts::PI)),
-            Line | Scatter | Bar => {
+            Line | Scatter | Path | Bar => {
                 self.pop_num(st, name)?;
                 pop(st, name)?;
                 st.push(SVal::Chart);

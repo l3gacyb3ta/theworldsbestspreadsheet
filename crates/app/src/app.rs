@@ -118,8 +118,20 @@ enum Drag {
     Col { col: usize, x0: f32, w0: Option<f32> },
     Row { row: usize, y0: f32, h0: Option<f32> },
     Scrub { key: CellKey, orig: Option<Cell>, text: String, lit: Lit, x0: f32 },
-    Point { key: CellKey, orig: Option<Cell>, text: String, lit: Lit, axis: YAxis, cell_disp: wbs_core::units::DispUnit },
+    /// Dragging a chart point backed by literal cells: `y` follows the pointer's y, `x` its x (scatter and path points).
+    /// With both, Alt locks it to the axis moved along most since the press.
+    Point { y: Option<PointCell>, x: Option<PointCell>, axis: YAxis, press: Pos2 },
     Goal(Box<GoalDrag>),
+}
+
+/// A literal number cell a chart point drag writes, as it was at the press.
+struct PointCell {
+    key: CellKey,
+    orig: Option<Cell>,
+    text: String,
+    lit: Lit,
+    /// The cell's own display unit (the chart's axis may show another).
+    disp: wbs_core::units::DispUnit,
 }
 
 /// Dragging a computed chart point: goal-seeks `input` so element `index` of `target` lands at the pointer.

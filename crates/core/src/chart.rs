@@ -7,6 +7,8 @@ use crate::value::{Num, Text};
 pub enum Mark {
     Line,
     Scatter,
+    /// Points joined in the order given (a traced shape): like a line, but its points move in 2D.
+    Path,
     Bar,
 }
 

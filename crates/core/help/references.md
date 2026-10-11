@@ -42,7 +42,7 @@ price 2 *        ⇒ 2,000 USD
 
 Tick **input** next to a name and the cell is tinted yellow and listed in the Inputs panel. There you can drag each value directly. Inputs are the knobs of your model: rates, sizes, assumptions. See [[#modeling]].
 
-An input can have a range: a min and a max in the inspector, each a number in the input's unit (`0 [1/s]`, `0 [%]`). Scrubbing, chart dragging and goal-seek stop at its ends; a value typed outside it is an error on the input's cell (`damping must be ≥ 0 [1/s]`), kept as typed, and cells that read it show `#upstream`. An input with both ends is a slider in the Inputs panel.
+An input can have a range: a min and a max in the inspector, each a number in the input's unit (`0 [1/s]`, `0 [%]`) or a reference, name or formula giving one (`B7`, `max_damping`). References in a range follow their cells like any other. Scrubbing, chart dragging and goal-seek stop at its ends; a value typed outside it is an error on the input's cell (`damping must be ≥ 0 [1/s]`), kept as typed, and cells that read it show `#upstream`. An input with both ends is a slider in the Inputs panel.
 
 ## Empty cells
 

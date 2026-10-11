@@ -56,6 +56,7 @@ A • in the window title means there are unsaved changes.
 | drag the selection's border | move the cells (Alt-drag copies them) |
 | drag a header border | resize; double-click to fit |
 | drag a hollow chart point | edit the cell behind it (⇧ for finer steps) |
+| Alt while dragging a scatter or path point | lock it to the axis you've moved along most (release Alt to move freely; works with ⇧) |
 | drag a computed chart point | goal-seek an input so the point lands there (⇧ for two more decimals) |
 | click a computed chart point | switch which input its drags goal-seek |
 | right-click | insert, delete, sort, fill |

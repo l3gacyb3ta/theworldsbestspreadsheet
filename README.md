@@ -113,9 +113,11 @@ is an ordinary, editable `units` sheet; exchange rates are inputs you can scrub.
   dependencies of the input's cell.
 - **Fill**: one cell copies; two or more numbers in an arithmetic progression
   continue the series; otherwise the pattern repeats. Formulas move relative refs.
-- **Charts**: `xs ys line|scatter`, `cats vals bar`, `layer`, `title`,
+- **Charts**: `xs ys line|scatter|path`, `cats vals bar`, `layer`, `title`,
   `xlabel`, `ylabel`, `cols rows size`. Points read directly from literal cells
-  are draggable and write the cell. Dragging a computed point goal-seeks one
+  (also through `join`, `rev`, `pick`, `to[…]` and the other words that only
+  rearrange values) are draggable and write the cell. Scatter and path points
+  move in 2D; line points move only up and down. Dragging a computed point goal-seeks one
   upstream input (`crates/core/src/solve.rs`: bracket outward, then Brent) so
   the point lands there; a click on it switches the input. No answer means no
   change, and the point says why.

@@ -16,10 +16,10 @@ Name the cells that are assumptions and tick **input** in the inspector. Inputs 
 
 **An input's range limits scrubbing, chart dragging and goal-seek; typing a value outside it is an error on that cell.**
 
-Set it in the inspector, next to **input**: a min, a max, or both, each a number in the input's unit — `0 [1/s]` for a damping rate, `0 [%]` for a growth rate. Another unit of the same dimension works too (`6 [1/min]`), and a plain number on a percentage is a fraction (`0.5` is 50 %). A bound in the wrong dimension isn't set: the inspector says why, and nothing changes. Leave a field empty for no bound on that side.
+Set it in the inspector, next to **input**: a min, a max, or both, each a number in the input's unit — `0 [1/s]` for a damping rate, `0 [%]` for a growth rate. Another unit of the same dimension works too (`6 [1/min]`), and a plain number on a percentage is a fraction (`0.5` is 50 %). An end can also be a reference or a name (`B7`, `max_damping`), or any formula that gives one number: the range then follows that cell, and the input is checked again whenever it changes. If the cell is empty or has an error, the range can't be used, and the input says so. A bound in the wrong dimension isn't set: the inspector says why, and nothing changes. Leave a field empty for no bound on that side.
 
 - Scrubbing, in a cell, the formula bar or the Inputs panel, stops at the ends.
-- Dragging a chart point bound to the input stops there too.
+- Dragging a chart point bound to the input stops there too. A scatter point's x and y each stop at their own input's range, and the pointer says which axis stopped (`x at max 2.2`).
 - Goal-seek only tries values inside the range; when the answer is outside, "out of reach" names the end it ran into (`out of reach within damping ≥ 0 [1/s]: …`).
 - A value typed outside the range is kept as typed, never clamped, and the cell shows the error (`damping must be ≥ 0 [1/s]`); cells that read it show `#upstream` until you fix it.
 - An input with both ends shows as a slider in the Inputs panel; dragging it stops at the ends, and the number beside it still takes any typed value.

@@ -17,7 +17,12 @@ pub const SERIES: [Color32; 6] = [
 
 pub struct PointHit {
     pub pos: Pos2,
+    /// Where its y value came from.
     pub prov: Prov,
+    /// Where its x value came from, on a mark whose points move in 2D (scatter, path); `None` on the others.
+    pub xprov: Prov,
+    /// A scatter or path point on a numeric x axis: it moves in 2D. Line and bar points move only up and down.
+    pub two_d: bool,
     /// Which point: its label is built only when it's shown (`point_label`).
     pub layer: usize,
     pub index: usize,
@@ -33,13 +38,17 @@ pub fn point_label(chart: &Chart, layer: usize, i: usize) -> String {
     format!("{x} → {}", l.ys.fmt_elem(i))
 }
 
-/// Maps between screen y and y values in the chart's display unit.
+/// Maps between screen y and y values in the chart's display unit (and screen x and x values, on a numeric x axis).
 #[derive(Clone)]
 pub struct YAxis {
     pub plot: Rect,
     pub y0: f64,
     pub y1: f64,
     pub disp: DispUnit,
+    /// The x range, in `xdisp`; `xdisp` is `None` for a category x axis.
+    pub x0: f64,
+    pub x1: f64,
+    pub xdisp: Option<DispUnit>,
     /// The chart's cell, set by the grid once drawn.
     pub anchor: Option<CellKey>,
 }
@@ -52,6 +61,13 @@ impl YAxis {
     pub fn from_screen(&self, y: f32) -> f64 {
         let t = ((self.plot.bottom() - y) / self.plot.height()) as f64;
         self.y0 + t * (self.y1 - self.y0)
+    }
+    pub fn x_to_screen(&self, v: f64) -> f32 {
+        self.plot.left() + (((v - self.x0) / (self.x1 - self.x0)) as f32) * self.plot.width()
+    }
+    pub fn x_from_screen(&self, x: f32) -> f64 {
+        let t = ((x - self.plot.left()) / self.plot.width()) as f64;
+        self.x0 + t * (self.x1 - self.x0)
     }
 }
 
@@ -110,8 +126,8 @@ fn short(v: f64) -> String {
     }
 }
 
-/// `fixed` keeps the y range (while a point is dragged, so it stays under the pointer).
-pub fn draw(p: &Painter, rect: Rect, chart: &Chart, dark: bool, fixed: Option<(f64, f64)>) -> (YAxis, Vec<PointHit>) {
+/// `fixed` keeps the y and x ranges (while a point is dragged, so it stays under the pointer).
+pub fn draw(p: &Painter, rect: Rect, chart: &Chart, dark: bool, fixed: Option<((f64, f64), (f64, f64))>) -> (YAxis, Vec<PointHit>) {
     let (bg, fg, grid, muted) = if dark {
         (Color32::from_rgb(0x1f, 0x22, 0x28), Color32::from_gray(220), Color32::from_gray(60), Color32::from_gray(150))
     } else {
@@ -170,10 +186,9 @@ pub fn draw(p: &Painter, rect: Rect, chart: &Chart, dark: bool, fixed: Option<(f
         ylo = ylo.min(0.0);
         yhi = yhi.max(0.0);
     }
-    let (y0, y1) = fixed.unwrap_or_else(|| pad(ylo, yhi));
-    let (x0, x1) = pad(xlo, xhi);
-    let yaxis = YAxis { plot, y0, y1, disp: ydisp.clone(), anchor: None };
-    let xs = |v: f64| plot.left() + (((v - x0) / (x1 - x0)) as f32) * plot.width();
+    let ((y0, y1), (x0, x1)) = fixed.unwrap_or_else(|| (pad(ylo, yhi), pad(xlo, xhi)));
+    let yaxis = YAxis { plot, y0, y1, disp: ydisp.clone(), x0, x1, xdisp: xdisp.clone().filter(|_| !categorical), anchor: None };
+    let xs = |v: f64| yaxis.x_to_screen(v);
     let cat_x = |i: usize| plot.left() + (i as f32 + 0.5) / ncat.max(1) as f32 * plot.width();
 
     // grid + y ticks
@@ -234,12 +249,17 @@ pub fn draw(p: &Painter, rect: Rect, chart: &Chart, dark: bool, fixed: Option<(f
             })
             .collect();
         let prov = |i: usize| l.ys.prov.get(i);
+        let two_d = matches!(l.mark, Mark::Scatter | Mark::Path) && !categorical;
+        let xprov = |i: usize| match &l.xs {
+            Xs::Num(n) if two_d => n.prov.get(i),
+            _ => Prov::None,
+        };
         // a line with points closer than a few pixels apart is drawn without its markers
         // (they'd hide it and cost a mesh each); the points still answer the pointer
-        let markers = l.mark == Mark::Scatter || (pts.len() as f32) * 4.0 < plot.width();
+        let markers = matches!(l.mark, Mark::Scatter | Mark::Path) || (pts.len() as f32) * 4.0 < plot.width();
         match l.mark {
-            Mark::Line | Mark::Scatter => {
-                if l.mark == Mark::Line {
+            Mark::Line | Mark::Scatter | Mark::Path => {
+                if l.mark != Mark::Scatter {
                     for run in pts.split(|p| p.is_none()) {
                         let run: Vec<Pos2> = run.iter().flatten().copied().collect();
                         if run.len() > 1 {
@@ -250,8 +270,12 @@ pub fn draw(p: &Painter, rect: Rect, chart: &Chart, dark: bool, fixed: Option<(f
                 for (i, pt) in pts.iter().enumerate() {
                     let Some(pt) = pt else { continue };
                     if markers {
-                        let draggable = matches!(prov(i), Prov::Literal(_));
-                        let r = if l.mark == Mark::Scatter { 4.0 } else { 2.5 };
+                        let draggable = matches!(prov(i), Prov::Literal(_)) || matches!(xprov(i), Prov::Literal(_));
+                        let r = match l.mark {
+                            Mark::Scatter => 4.0,
+                            Mark::Path => 3.0,
+                            _ => 2.5,
+                        };
                         if draggable {
                             clip.circle_filled(*pt, r + 1.5, bg);
                             clip.circle_stroke(*pt, r + 1.5, Stroke::new(2.0, color));
@@ -259,7 +283,7 @@ pub fn draw(p: &Painter, rect: Rect, chart: &Chart, dark: bool, fixed: Option<(f
                             clip.circle_filled(*pt, r, color);
                         }
                     }
-                    hits.push(PointHit { pos: *pt, prov: prov(i), layer: li, index: i });
+                    hits.push(PointHit { pos: *pt, prov: prov(i), xprov: xprov(i), two_d, layer: li, index: i });
                 }
             }
             Mark::Bar => {
@@ -275,7 +299,7 @@ pub fn draw(p: &Painter, rect: Rect, chart: &Chart, dark: bool, fixed: Option<(f
                     if matches!(prov(i), Prov::Literal(_)) {
                         clip.line_segment([top - Vec2::new(bw / 2.0 - 2.0, 0.0), top + Vec2::new(bw / 2.0 - 3.0, 0.0)], Stroke::new(3.0, fg));
                     }
-                    hits.push(PointHit { pos: top, prov: prov(i), layer: li, index: i });
+                    hits.push(PointHit { pos: top, prov: prov(i), xprov: Prov::None, two_d: false, layer: li, index: i });
                 }
                 bar_i += 1;
             }
