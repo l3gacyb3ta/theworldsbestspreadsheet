@@ -13,7 +13,7 @@ use std::sync::Arc;
 pub enum Builtin {
     Add, Sub, Mul, Div, Pow, Neg, Abs, Sqrt, Exp, Log, Log10, Log2, Sin, Cos, Tan,
     Floor, Ceil, Round, Min, Max, Dup, Drop, Swap, Over, Rot, Len, Range, If,
-    Lt, Gt, Le, Ge, Eq, Ne, Not, Sum, Mean, Rev, Join, First, Last, Pick, Transpose,
+    Lt, Gt, Le, Ge, Eq, Ne, Not, Sum, Mean, Rev, Join, First, Last, Pick, Transpose, Reshape,
     Couple, Pi, Line, Scatter, Path, Bar, Layer, Title, XLabel, YLabel, Size, Iterate, Rk4,
 }
 
@@ -63,6 +63,7 @@ pub const BUILTINS: &[(&str, Builtin, &str)] = {
         ("last", Last, "a → last row"),
         ("pick", Pick, "a i → row i of a (0-based)"),
         ("transpose", Transpose, "a → a with axes swapped"),
+        ("reshape", Reshape, "a shape → a's elements in that shape"),
         ("couple", Couple, "a b → 2-row array [a, b]"),
         ("pi", Pi, " → π"),
         ("line", Line, "xs ys → line chart"),

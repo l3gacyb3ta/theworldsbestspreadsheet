@@ -590,3 +590,50 @@ fn upstream_inputs_visit_a_spill_once() {
     assert_eq!(up[1], key(&e, "B1"));
     assert_eq!(up[n], key(&e, &format!("B{n}")));
 }
+
+#[test]
+fn reshape_keeps_elements_and_units_in_a_new_shape() {
+    let mut e = eng();
+    set(&mut e, "A1", "=6 range 1 [m] * 2 3 join reshape");
+    assert_eq!(show(&e, "A1"), "0 m");
+    assert_eq!(show(&e, "C2"), "5 m");
+    set(&mut e, "E1", "=A1 6 reshape sum");
+    assert_eq!(show(&e, "E1"), "15 m");
+    set(&mut e, "E2", "=A1 /+");
+    assert_eq!(show(&e, "E2"), "3 m");
+    set(&mut e, "E3", "=A1 transpose /+ len");
+    assert_eq!(show(&e, "E3"), "2");
+    // a single number is a list of one; text reshapes too
+    set(&mut e, "E4", "=5 1 reshape len");
+    assert_eq!(show(&e, "E4"), "1");
+    set(&mut e, "G1", "a");
+    set(&mut e, "G2", "b");
+    set(&mut e, "G3", "c");
+    set(&mut e, "G4", "d");
+    set(&mut e, "H1", "=G1:G4 2 2 join reshape");
+    assert_eq!((show(&e, "H1"), show(&e, "I1"), show(&e, "H2")), ("a".into(), "b".into(), "c".into()));
+    // nothing is dropped or repeated to make it fit
+    set(&mut e, "E5", "=6 range 4 reshape");
+    assert_eq!(show(&e, "E5"), "ERR reshape: 6 elements don't fit 4 (4)");
+    set(&mut e, "E6", "=6 range 2 2 join reshape");
+    assert_eq!(show(&e, "E6"), "ERR reshape: 6 elements don't fit 2×2 (4)");
+    set(&mut e, "E7", "=6 range 2.5 reshape");
+    assert_eq!(show(&e, "E7"), "ERR reshape: 2.5 isn't a length (a whole number, 0 or more)");
+    set(&mut e, "E8", "=6 range 6 [m] reshape");
+    assert_eq!(show(&e, "E8"), "ERR reshape expects a dimensionless number, got length");
+}
+
+#[test]
+fn hourly_data_reshaped_by_day() {
+    // a year of hourly values: hour h of day d is d + h/100
+    let mut e = eng();
+    set(&mut e, "A1", "=8760 range dup 24 / floor swap dup 24 / floor 24 * - 100 / + 1 [kW*h] *");
+    set(&mut e, "B1", "=A1 365 24 join reshape /+ 365 /");
+    // the average day, hour by hour: 182 (the mean day) + h/100
+    assert_eq!(show(&e, "B1"), "182 kW*h");
+    assert_eq!(show(&e, "B24"), "182.23 kW*h");
+    set(&mut e, "C1", "=A1 365 24 join reshape transpose /+ 24 /");
+    // each day's average: d + 0.115
+    assert_eq!(show(&e, "C1"), "0.115 kW*h");
+    assert_eq!(show(&e, "C365"), "364.115 kW*h");
+}

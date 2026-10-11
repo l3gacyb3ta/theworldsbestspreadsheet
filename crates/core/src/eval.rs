@@ -3,7 +3,7 @@
 
 use crate::chart::{Chart, Mark, Xs};
 use crate::ids::*;
-use crate::model::StoredRef;
+use crate::model::{StoredRef, MAX_INDEX};
 use crate::parse::{Builtin, Callee, Compiled, Op, OpKind};
 use crate::rational::Rational;
 use crate::units::{self, Dim, DispUnit, Quant, UnitExpr, UnitInfo};
@@ -682,6 +682,11 @@ impl<'e> Interp<'e> {
                 let v = pop(st, name)?;
                 st.push(transpose(v)?);
             }
+            Reshape => {
+                let s = pop_num(st, name)?;
+                let v = pop(st, name)?;
+                st.push(reshape(v, &s)?);
+            }
             Couple => {
                 let y = pop(st, name)?;
                 let x = pop(st, name)?;
@@ -1047,6 +1052,37 @@ fn join(x: Value, y: Value) -> R<Value> {
         return Ok(x);
     }
     from_rows(rows, "join")
+}
+
+/// `a shape reshape`: a's elements, in order, in a new shape. The shape is a number or a list of
+/// whole numbers whose product is a's element count; nothing is dropped or repeated to make it fit.
+fn reshape(v: Value, s: &Num) -> R<Value> {
+    dimless_only(s, "reshape")?;
+    let n = match &v {
+        Value::Num(n) => n.len(),
+        Value::Text(t) => t.data.len(),
+        v => return Err(format!("can't reshape a {}", v.type_name())),
+    };
+    if s.rank() > 1 {
+        return Err(format!("reshape: the shape is a number or a list, got shape {:?}", s.shape));
+    }
+    let mut shape = Vec::with_capacity(s.len());
+    for &d in s.data.iter() {
+        if !(0.0..=MAX_INDEX as f64).contains(&d) || d.fract() != 0.0 {
+            return Err(format!("reshape: {d} isn't a length (a whole number, 0 or more)"));
+        }
+        shape.push(d as usize);
+    }
+    let fits: usize = shape.iter().product();
+    if fits != n {
+        let dims: Vec<String> = shape.iter().map(|d| d.to_string()).collect();
+        return Err(format!("reshape: {n} elements don't fit {} ({fits})", dims.join("×")));
+    }
+    Ok(match v {
+        Value::Num(x) => Value::Num(Num { shape: shape.into(), ..x }),
+        Value::Text(t) => Value::Text(Text { shape, data: t.data }),
+        _ => unreachable!(),
+    })
 }
 
 fn transpose(v: Value) -> R<Value> {

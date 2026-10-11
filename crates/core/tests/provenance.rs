@@ -60,6 +60,9 @@ fn couple_keeps_both_rows() {
 #[test]
 fn rev_reverses_it() {
     let e = sheet();
+    // reshape keeps every element where it was, so chart points still drag their cells
+    assert_eq!(provs(&e, "A1:A3 B1:B3 join 2 3 join reshape"), ["A1", "A2", "A3", "B1", "B2", "B3"]);
+    assert_eq!(provs(&e, "D1 4 reshape"), ["D1#0", "D1#1", "D1#2", "D1#3"]);
     assert_eq!(provs(&e, "A1:A3 rev"), ["A3", "A2", "A1"]);
     assert_eq!(provs(&e, "C1 rev"), ["C1#2", "C1#1", "C1#0"]);
     assert_eq!(provs(&e, "D1 rev"), ["D1#2", "D1#3", "D1#0", "D1#1"]);

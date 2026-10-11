@@ -32,7 +32,7 @@ Axes are labelled with the values' display units automatically. Dates on the x a
 
 ## Dragging points
 
-If a point's y value comes straight from a number cell (through a range, a reference, or words that only rearrange values — `join`, `couple`, `rev`, `first`, `last`, `pick`, `transpose`, `to[…]` — with nothing computed in between), the point is drawn hollow and you can drag it up and down — that writes the cell, keeping its unit and its decimals: dragging `180 [widget]` writes whole numbers, `4.0` moves in steps of 0.1. Hold Shift for finer steps. Bars with a dark cap are draggable the same way.
+If a point's y value comes straight from a number cell (through a range, a reference, or words that only rearrange values — `join`, `couple`, `rev`, `first`, `last`, `pick`, `transpose`, `reshape`, `to[…]` — with nothing computed in between), the point is drawn hollow and you can drag it up and down — that writes the cell, keeping its unit and its decimals: dragging `180 [widget]` writes whole numbers, `4.0` moves in steps of 0.1. Hold Shift for finer steps. Bars with a dark cap are draggable the same way.
 
 **Scatter and path points move in 2D; line points move only up and down.** On a `scatter` or `path`, the pointer's x writes the x value's cell and its y writes the y value's cell, each the same way (own decimals and unit; dates move in whole days, °C stays °C). A diagonal drag that writes two cells is one undo step. The chart's axes stay put until you let go.
 

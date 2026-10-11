@@ -649,6 +649,17 @@ impl<'e> Abs<'e> {
                 }
                 st.push(v.forget());
             }
+            Reshape => {
+                let s = self.pop_num(st, name)?;
+                let v = pop(st, name)?;
+                if dimless(&s) == Some(false) {
+                    return Err(format!("reshape expects a dimensionless number, got {}", s.dim.as_ref().unwrap()).into());
+                }
+                if let SVal::Chart | SVal::Other(_) | SVal::Fn(_) = v {
+                    return Err(format!("can't reshape a {}", type_name(&v)).into());
+                }
+                st.push(v.forget());
+            }
             Join => {
                 let y = pop(st, name)?;
                 let x = pop(st, name)?;
