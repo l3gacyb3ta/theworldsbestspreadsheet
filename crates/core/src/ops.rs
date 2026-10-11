@@ -249,7 +249,7 @@ pub fn value_literal(e: &Engine, k: CellKey) -> String {
             }
             None => String::new(),
         },
-        Value::Chart(_) | Value::Unit(_) | Value::Dim(_) | Value::Word(_) => String::new(),
+        Value::Chart(_) | Value::Unit(_) | Value::Dim(_) | Value::Word(_) | Value::Fn(_) => String::new(),
     }
 }
 

@@ -474,7 +474,7 @@ impl Engine {
         match self.nodes.get(&k).map(|n| n.compiled.as_ref().map(|c| &**c)) {
             Some(Ok(Compiled::UnitDef { .. } | Compiled::Base { .. })) => SVal::Other("unit"),
             Some(Ok(Compiled::Dim(_))) => SVal::Other("dimension"),
-            Some(Ok(Compiled::WordDef { .. })) => SVal::Other("word"),
+            Some(Ok(Compiled::WordDef { .. })) => SVal::Other("word definition"),
             Some(Ok(_)) => self.stat(&k).map_or(SVal::Any, |s| s.val.forget()),
             _ => SVal::Any,
         }
@@ -483,7 +483,7 @@ impl Engine {
     /// One element of node `a`'s value, as `scalar_at` reads it; `None` where that certainly fails.
     fn static_element(&self, a: CellKey) -> Option<SVal> {
         match self.static_ref(a) {
-            SVal::Chart | SVal::Other(_) => None,
+            SVal::Chart | SVal::Other(_) | SVal::Fn(_) => None,
             v => Some(v),
         }
     }

@@ -26,6 +26,8 @@ pub enum Tok {
     Reduce(String),
     /// `\+`
     Scan(String),
+    /// `'step`: the word itself as a value, for words that take words (`iterate`, `rk4`).
+    Quote(String),
     /// Any other chunk: builtin words, operators, user words, names, `:`, `;`, `{`, `}`.
     Word(String),
     /// `( stack comment )` — a lone `(` up to the next `)`. Ignored by the compiler.
@@ -213,17 +215,30 @@ pub fn lex(src: &str) -> Vec<Token> {
         }
         // plain chunk; a leading quoted sheet name may contain spaces
         if c == b'\'' {
-            i += 1;
-            while i < b.len() {
-                if b[i] == b'\'' {
-                    if b.get(i + 1) == Some(&b'\'') {
-                        i += 2;
+            let mut j = i + 1;
+            while j < b.len() {
+                if b[j] == b'\'' {
+                    if b.get(j + 1) == Some(&b'\'') {
+                        j += 2;
                         continue;
                     }
-                    i += 1;
+                    j += 1;
                     break;
                 }
+                j += 1;
+            }
+            if b.get(j) == Some(&b'!') && b[j - 1] == b'\'' {
+                i = j;
+            } else {
+                // not `'sheet'!…`: a quoted word, `'step`
                 i += 1;
+                while i < b.len() && !b[i].is_ascii_whitespace() && b[i] != b'[' && b[i] != b'"' {
+                    i += 1;
+                }
+                let name = &src[start + 1..i];
+                let tok = if name.is_empty() { Tok::Bad("' quotes a word: 'step".into()) } else { Tok::Quote(name.to_string()) };
+                out.push(Token { tok, span: start..i });
+                continue;
             }
         }
         while i < b.len() && !b[i].is_ascii_whitespace() && b[i] != b'[' && b[i] != b'"' {
@@ -273,6 +288,10 @@ mod tests {
             [Tok::Comment("x -- x²".into()), Tok::Word("dup".into())]
         );
         assert_eq!(toks("(m"), vec![Tok::Word("(m".into())]);
+        assert_eq!(toks("'step 2 iterate"), vec![Tok::Quote("step".into()), Tok::Num(2.0), Tok::Word("iterate".into())]);
+        assert_eq!(toks("'+ 'my sheet'!B2"), vec![Tok::Quote("+".into()), Tok::Ref(a1::parse_ref("'my sheet'!B2").unwrap())]);
+        assert_eq!(toks("'it''s'!A1"), vec![Tok::Ref(a1::parse_ref("'it''s'!A1").unwrap())]);
+        assert!(matches!(&toks("' x")[0], Tok::Bad(_)));
     }
     #[test]
     fn ranges_with_gaps() {

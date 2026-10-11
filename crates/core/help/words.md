@@ -39,8 +39,12 @@ A finance example, from the demo model — net present value of a list of cash f
 
 Any word that turns two values into one can be used with `/` and `\`: `/myword`, `\myword`.
 
+## Passing a word to a word
+
+`'myword` pushes the word itself, for [[iterate]] and [[rk4]] to run as many times as they need. See [[#over-time]].
+
 ## Rules
 
 - Names start with a letter and can't be a builtin word.
-- Words can't call themselves; use arrays (`range`, `/op`, `\op`) instead of loops.
+- Words can't call themselves; use arrays (`range`, `/op`, `\op`) or [[iterate]] instead of loops.
 - Your words are listed under **Your words** in the help sidebar.

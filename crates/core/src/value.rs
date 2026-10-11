@@ -3,6 +3,7 @@
 use crate::chart::Chart;
 use crate::ids::CellKey;
 use crate::lex::civil_from_days;
+use crate::parse::Callee;
 use crate::units::{Quant, UnitInfo};
 use std::sync::Arc;
 
@@ -241,6 +242,8 @@ pub enum Value {
     Dim(Arc<str>),
     /// A word definition.
     Word(Arc<str>),
+    /// A word as a value (`'step`), for words that take words.
+    Fn(Callee),
 }
 
 impl Value {
@@ -254,7 +257,8 @@ impl Value {
             Value::Chart(_) => "chart",
             Value::Unit(_) => "unit",
             Value::Dim(_) => "dimension",
-            Value::Word(_) => "word",
+            Value::Word(_) => "word definition",
+            Value::Fn(_) => "word",
         }
     }
     pub fn shape(&self) -> &[usize] {
@@ -377,6 +381,7 @@ impl Value {
             }
             Value::Dim(d) => format!("dim {d}"),
             Value::Word(w) => format!(": {w}"),
+            Value::Fn(c) => format!("'{}", c.name()),
         }
     }
 }

@@ -25,11 +25,12 @@ pub enum Category {
     Reduce,
     Units,
     Charts,
+    Recurrences,
     Definitions,
 }
 
 impl Category {
-    pub const ALL: [Category; 10] = [
+    pub const ALL: [Category; 11] = [
         Category::Syntax,
         Category::Arithmetic,
         Category::Math,
@@ -39,6 +40,7 @@ impl Category {
         Category::Reduce,
         Category::Units,
         Category::Charts,
+        Category::Recurrences,
         Category::Definitions,
     ];
     pub fn title(self) -> &'static str {
@@ -52,6 +54,7 @@ impl Category {
             Category::Reduce => "Reduce & scan",
             Category::Units => "Units",
             Category::Charts => "Charts",
+            Category::Recurrences => "Recurrences & equations over time",
             Category::Definitions => "Definitions",
         }
     }
@@ -273,6 +276,23 @@ pub const WORDS: &[WordDoc] = &[
         ex: [("A1:A5 B1:B5 line \"height\" ylabel", "chart · line (5 points) · 6×14 cells")], see: ["xlabel"]),
     w!("size", "chart cols rows — chart", Charts, "Sets how many cells the chart spills over.", units: "", details: "",
         ex: [("A1:A5 B1:B5 line 4 8 size", "chart · line (5 points) · 4×8 cells")], see: ["line"]),
+    // -- recurrences -------------------------------------------------------------
+    w!("'word", "— word", Recurrences, "A quote before a word pushes the word itself as a value, for words that take words.",
+        units: "A word isn't a number: using one as a number is an error.",
+        details: "`'sq` pushes `sq` without running it; `iterate` and `rk4` then run it as often as they need. Builtins quote too (`'swap`). Like a call, a quote makes the cell recalculate when the word's definition changes.",
+        ex: [("'sq", "'sq"), ("3 'sq drop", "3"), ("'sq 1 +", "! + expects a number, got word")], see: ["iterate", "rk4", "#words"]),
+    w!("iterate", "n s1…sk 'step k — xs1…xsk", Recurrences, "Applies a step word n times to a state, keeping every state: one array per state value, each n+1 long.",
+        units: "The step must give each state back in its own dimension. Each state keeps its own unit, so a position in m and a speed in m/s step together.",
+        details: "The state is k values on the stack, each with its own unit; the step word takes them and leaves the next state (`( s1 … sk -- s1' … sk' )`). The result is k arrays, the first state's on the bottom: keep the one you want with `drop`, `swap drop` or `pick`. Up to 1,000,000 steps. See [[#over-time]].",
+        ex: [("3 1 'grow 1 iterate", "[1, 1.1, 1.21, 1.331]"), ("4 1 [m] 'grow 1 iterate", "[1, 1.1, 1.21, 1.331, 1.4641] m"), ("4 0 1 'swap 2 iterate drop", "[0, 1, 0, 1, 0]"),
+             ("3 1 [m] 'sq 1 iterate", "! iterate needs matching units: 'sq turns state 1 from length into length^2"), ("3 1 'sq 2 iterate", "! iterate needs more values")],
+        see: ["rk4", "'word", "\\op", "#over-time"]),
+    w!("rk4", "t0 h n s1…sk 'deriv k — xs1…xsk", Recurrences, "Solves an ODE with fixed-step Runge–Kutta: the state at t0, t0+h, … t0+n·h, one array per state value.",
+        units: "Each derivative times the step must have its state's dimension: a velocity in m/s times seconds is a length.",
+        details: "The derivative word takes the time and the state and leaves each state's rate of change: `( t s1 … sk -- d1 … dk )`. The result is k arrays of n+1 values, as for `iterate`. A matching time column is `n 1 + range h * t0 +`. Fourth-order Runge–Kutta is exact for polynomials up to degree 4 and very accurate for smooth motion with a small step. See [[#over-time]].",
+        ex: [("0 [s] 0.5 [s] 2 10 [m] 0 [m/s] 'fall 2 rk4 drop", "[10, 8.77375, 5.095] m"), ("0 [s] 0.5 [s] 2 10 [m] 0 [m/s] 'fall 2 rk4 swap drop", "[0, -4.905, -9.81] m/s"),
+             ("0 [s] 0.5 [s] 2 0 [m/s] 10 [m] 'fall 2 rk4", "! rk4 needs matching units: state 1 is length/time, but its derivative × the step is length*time")],
+        see: ["iterate", "'word", "#over-time"]),
     // -- definitions -------------------------------------------------------------
     w!(":", ": name ( doc ) body ;", Definitions, "Defines a word in a cell. Cells that use it recalculate when you edit it.",
         units: "",
@@ -310,6 +330,7 @@ pub fn doc_for_token(tok: &Tok) -> Option<&'static WordDoc> {
         Tok::Range(_, _, true) => word_doc("A1:B5?"),
         Tok::Reduce(_) => word_doc("/op"),
         Tok::Scan(_) => word_doc("\\op"),
+        Tok::Quote(_) => word_doc("'word"),
         Tok::Comment(_) => word_doc("( … )"),
         Tok::Word(w) if w == ":" || w == ";" || w == "{" || w == "}" => word_doc(":"),
         Tok::Word(w) => word_doc(w),
@@ -342,6 +363,7 @@ const TOPIC_SOURCES: &[(&str, &str)] = &[
     topic!("absolute"),
     topic!("defining-units"),
     topic!("words"),
+    topic!("over-time"),
     topic!("editing"),
     topic!("modeling"),
     topic!("charts"),
@@ -550,6 +572,13 @@ pub struct ErrorHelp {
 }
 
 pub const ERRORS: &[ErrorHelp] = &[
+    ErrorHelp {
+        patterns: &["should leave", "expects a word", "state count", "step count", "values each is more than"],
+        title: "iterate and rk4 arguments",
+        why: "`iterate` takes `n s1 … sk 'step k`, `rk4` takes `t0 h n s1 … sk 'deriv k`. The quoted word must leave exactly k numbers: the next state for `iterate`, each state's rate of change for `rk4`.",
+        fix: "Check that k matches how many state values you pushed and how many the word leaves, that the word is quoted (`'step`, not `step`), and that n is a whole number of steps.",
+        topic: "over-time",
+    },
     ErrorHelp {
         patterns: &["must be ≥", "must be ≤", "'s range:"],
         title: "Outside the input's range",
@@ -818,9 +847,18 @@ pub const SAMPLE: &[(&str, &str)] = &[
     ("F2", "base [widget] widgets"),
     ("F3", ": sq ( x -- x² ) dup * ;"),
     ("F4", ": hyp ( a b -- hypotenuse ) { a b } a sq b sq + sqrt ;"),
+    ("F5", ": grow ( x -- x' ) 1.1 * ;"),
+    ("F6", ": fall ( t y v -- dy dv ) { t y v } v -9.81 [m/s^2] ;"),
+    ("J1", "4 [N/m]"),
+    ("J2", "1 [kg]"),
+    ("J3", "0 [kg/s]"),
 ];
 
-pub const SAMPLE_NAMES: &[(&str, &str)] = &[("growth", "E1"), ("price", "E2")];
+pub const SAMPLE_NAMES: &[(&str, &str)] = &[("growth", "E1"), ("price", "E2"), ("stiffness", "J1"), ("mass", "J2"), ("friction", "J3")];
+
+/// Sample cells that need the sample names.
+pub const SAMPLE_AFTER_NAMES: &[(&str, &str)] =
+    &[("F7", ": spring ( t x v -- dx dv ) { t x v } v stiffness mass / x * neg friction mass / v * - ;")];
 
 /// A workbook holding the sample data, plus the id of its sample sheet.
 pub fn sample_engine() -> (Engine, SheetId) {
@@ -837,6 +875,11 @@ pub fn sample_engine() -> (Engine, SheetId) {
         let r = crate::a1::parse_ref(at).unwrap();
         let k = e.wb.sheets[0].key(r.row, r.col).unwrap();
         e.set_name(name, Some(k), true).unwrap();
+    }
+    for (at, text) in SAMPLE_AFTER_NAMES {
+        let r = crate::a1::parse_ref(at).unwrap();
+        let k = e.wb.sheets[0].key(r.row, r.col).unwrap();
+        e.set_text(k, text);
     }
     (e, sid)
 }
@@ -984,6 +1027,11 @@ mod tests {
             "=1 \"oops",
             "=A1? sum",
             "=A6:A9 sum",
+            "=3 1 'swap 1 iterate",
+            "=3 1 sq 1 iterate",
+            "=0.5 1 'grow 1 iterate",
+            "=3 1 'grow 0 iterate",
+            "=0 [s] 1 [s] 3 1 [m] 0 [m/s] 'fall 2 rk4 swap drop 'sq 1 +",
         ] {
             e.set_text(k, prog);
             let msg = match e.shown(k) {

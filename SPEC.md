@@ -27,6 +27,7 @@ Concatenative and array-oriented, closest in spirit to Uiua: Forth's stack + APL
 - A range reference pushes **one array**, not N scalars. `A1:A10 /+` sums. `B1:B10 C1:C10 *` multiplies elementwise.
 - Arithmetic words are rank-polymorphic and broadcast scalars against arrays.
 - Reductions/scans use a modifier: `/+` reduce, `\+` scan.
+- Words are values too: `'name` pushes a word without running it, for words that take words. `iterate` (`n s1 … sk 'step k iterate`) applies a step to a state of k values n times; `rk4` (`t0 h n s1 … sk 'deriv k rk4`) solves an ODE with fixed-step Runge–Kutta. Both leave k arrays, one per state value, so a state can mix units (x [m] and v [m/s]) without arrays that mix them.
 - Minimal word set for v0: `+ - * / ^ neg abs sqrt exp log min max`, `dup drop swap over rot`, `/` reduce, `\` scan, `len`, `range` (iota), `if`, comparisons, `sum mean` as convenience words.
 - User-defined words: a word definition is a cell (`: npv  rate cashflows ... ;`) and is part of the dependency graph, so editing a word recalculates its users.
 - Syntax errors and type/unit errors are shown inline on the cell, pointing at the offending token where possible.
@@ -72,6 +73,7 @@ Every word declares a dimension rule alongside its stack effect:
 - `^ n`: exponents multiply by n (n must be a dimensionless literal or constant for this to be static).
 - `sqrt`: exponents halve.
 - `exp log sin cos` etc.: argument must be dimensionless.
+- `iterate`: the step must give each state back in its own dimension. `rk4`: each derivative × the step must have its state's dimension (a velocity × a time is a length). The static pass runs the quoted word's body on the state's dimensions to check both.
 
 Because dimensions don't depend on magnitudes, dimensions are propagated through the dependency graph statically. A unit mismatch is reported **on the cell where it occurs**, not as a wrong number downstream.
 
